@@ -1,0 +1,15 @@
+[project]
+name = "comfyui-gori-custom-nodes"
+description = "GoRi custom nodes for ComfyUI: Camera Director (camera-aware prompt conditioning) and Wireless Engine (wireless node connection UI extension)."
+version = "0.1.0"
+license = {text = "MIT"}
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/kwonhyukdal/ComfyUI_GoRi_custom_nodes"
+
+[tool.comfy]
+PublisherId = "gori"
+DisplayName = "GoRi Custom Nodes"
+Icon = ""
+Tags = ["camera", "prompt", "ui", "workflow"]
