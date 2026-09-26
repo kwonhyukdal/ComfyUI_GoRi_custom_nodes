@@ -7,6 +7,8 @@
 > - **MiniMax H3** (영상, Hailuo): 무빙·속도 필드가 만든 카메라 이동 문구를 H3 영상 프롬프트로 사용 — I2V에서 카메라 워크 지정에 유용합니다.
 > conditioning 출력(`positive_out`/`negative_out`)의 직결 연결은 Qwen 계열이 기준입니다.
 
+> **완전 로컬 동작 지원** — API 키·클라우드 없이도 규칙 엔진(한/영 키워드 사전)으로 100% 오프라인 동작합니다. LLM 티어는 선택사항이며, 키를 넣으면(OpenAI/Anthropic/Ollama 로컬 LLM) AI 판단 품질이 올라갑니다.
+
 주제 한 줄(한글 OK), 선택 이미지, 선택적 positive/negative conditioning을 입력하면 **카메라 구도·렌즈·앵글·조명·그레이드·(영상)무빙**이 자동으로 조합됩니다. 최종적으로 `positive_out`, `negative_out` conditioning과 확인용 `prompt_out`을 출력합니다.
 
 - 패키지 폴더: `comfyui-GoRi-camera-director`
