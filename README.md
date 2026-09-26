@@ -1,6 +1,6 @@
 # ComfyUI_GoRi_custom_nodes
 
-GoRi(권혁달) 제작 ComfyUI 커스텀 노드 통합 배포 저장소입니다.
+GoRi 제작 ComfyUI 커스텀 노드 통합 배포 저장소입니다.
 
 ## 포함된 노드
 
