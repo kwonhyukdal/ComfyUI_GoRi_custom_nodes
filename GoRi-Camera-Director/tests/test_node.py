@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """ComfyUI 없이 노드 로직을 검증하는 테스트.
 
-실행: python tests/test_node.py   (구상 문서의 V2/V4/V7 + 구조 검증에 대응)
+실행: python tests/test_node.py   (노드 동작 + 구조 검증에 대응)
 """
 
 import os
