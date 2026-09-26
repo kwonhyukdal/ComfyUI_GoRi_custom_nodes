@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-gori-custom-nodes"
-description = "GoRi custom nodes for ComfyUI: Camera Director (camera-aware prompt conditioning) and Wireless Engine (wireless node connection UI extension)."
-version = "1.0.0"
+description = "GoRi custom nodes for ComfyUI: Camera Director generates camera-aware English prompts and Qwen conditioning from a topic and reference images."
+version = "1.1.0"
 license = {text = "MIT"}
 dependencies = []
 
