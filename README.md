@@ -7,12 +7,14 @@ GoRi 제작 ComfyUI 커스텀 노드 통합 배포 저장소입니다.
 | 노드 | 설명 | 설치 폴더 |
 |---|---|---|
 | [GoRi Camera Director](./GoRi-Camera-Director) | 주제(한글 OK) + 레퍼런스 이미지 → 카메라 연출이 포함된 영문 프롬프트·conditioning 출력 (Qwen Image Edit 경로) | `GoRi-Camera-Director/` |
+| [GoRi Wireless Engine](./GoRi-Wireless-Engine) | ComfyUI 무선 연결 엔진 — 노드 배선 없이 신호 기반으로 값을 전달하는 UI 확장 | `GoRi-Wireless-Engine/` |
 
 ## 설치 방법
 
 1. 원하는 노드 폴더 전체를 ComfyUI의 `custom_nodes/` 안으로 복사합니다.
    ```
    ComfyUI/custom_nodes/GoRi-Camera-Director/
+   ComfyUI/custom_nodes/GoRi-Wireless-Engine/
    ```
 2. ComfyUI를 재시작합니다.
 3. 노드 검색에서 `(GoRi)` 접두어로 찾을 수 있습니다. 자세한 사용법은 각 노드 폴더의 README를 참고하세요.
