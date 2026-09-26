@@ -342,8 +342,43 @@ def rules(topic: str):
     return cam, matched
 
 
+# 구도(앵글·샷) → 추천 조명 매칭 표 (우선순위 순).
+# 왜(Why): LLM 없는 규칙 환경에서는 조명이 주제 키워드에만 의존해
+# 구도와 무관한 기본값(흐린 부드러움)으로 남는 경우가 있었다.
+# 구도가 드라마틱한 의도를 담을 때 조명도 세트로 따라가도록 한다.
+# 주제 키워드/사용자 고정값이 있으면 절대 덮지 않는다.
+FRAMING_LIGHTING_RULES = (
+    (("angle", "개미눈 (worm's eye)"), "림라이트/실루엣"),
+    (("angle", "로우앵글"), "림라이트/실루엣"),
+    (("angle", "편각 (Dutch)"), "로우키"),
+    (("shot", "극접 (ECU)"), "램브란트"),
+    (("shot", "근접 (CU)"), "램브란트"),
+    (("shot", "중근접 (MCU)"), "창가빛"),
+    (("shot", "원경 (WS)"), "골든아워"),
+    (("shot", "극원경 (EWS)"), "골든아워"),
+)
+
+
+def apply_framing_lighting(cam: dict, locked: set):
+    """조명이 아직 확정되지 않았으면(키워드/고정값 없음) 구도에서 추천 조명을 채운다.
+
+    수동 티어와 LLM 성공 경로는 호출하지 않는다 — 사용자/LLM이 정한 조명을
+    건드리지 않기 위함이다. 적용 시 lighting을 locked에 넣어 이미지 힌트도
+    덮지 못하게 한다.
+    """
+    if "lighting" in locked or cam.get("lighting") != DEFAULTS["lighting"]:
+        return cam, locked
+    for (cat, label), lighting in FRAMING_LIGHTING_RULES:
+        if cam.get(cat) == label:
+            cam = dict(cam)
+            cam["lighting"] = lighting
+            locked = locked | {"lighting"}
+            break
+    return cam, locked
+
+
 def resolve_rules_camera(topic: str, metrics: dict, fixed_cam, locked: set):
-    """규칙 판정 + 명시 고정값 병합 + 이미지 힌트 — auto/LLM 폴백 공통 경로.
+    """규칙 판정 + 명시 고정값 병합 + 추천 조명 + 이미지 힌트 — auto/LLM 폴백 공통 경로.
 
     왜(Why): run()의 auto 분기와 LLM 폴백 분기에서 동일한 규칙·병합·힌트
     블록이 중복되어 한쪽만 수정되는 퇴행 위험이 있었다.
@@ -351,6 +386,7 @@ def resolve_rules_camera(topic: str, metrics: dict, fixed_cam, locked: set):
     camera, matched = rules(topic)
     camera.update(fixed_cam or {})
     locked = locked | matched
+    camera, locked = apply_framing_lighting(camera, locked)
     if metrics:
         camera = apply_image_hints(camera, locked, metrics)
     return camera, locked, matched

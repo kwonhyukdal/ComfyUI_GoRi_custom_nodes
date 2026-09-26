@@ -968,5 +968,28 @@ finally:
     llm_client._post = _orig_post_r6
 llm_client.clear_cache()
 
+print("-- R7: 구도 → 추천 조명 규칙 (LLM 없는 환경) --")
+_p7a, _, _ = run(topic="x", preset=cd.CUSTOM, automation="auto (규칙)",
+                 angle="로우앵글")
+check("로우앵글 → 림라이트 추천", "strong backlight" in _p7a, _p7a[:300])
+_p7b, _, _ = run(topic="x", preset=cd.CUSTOM, automation="auto (규칙)",
+                 shot="극접 (ECU)")
+check("극접 → 램브란트 추천", "Rembrandt" in _p7b, _p7b[:300])
+_p7c, _, _ = run(topic="x", preset=cd.CUSTOM, automation="auto (규칙)",
+                 shot="극원경 (EWS)")
+check("극원경 → 골든아워 추천", "golden hour" in _p7c, _p7c[:300])
+_p7d, _, _ = run(topic="네온 간판 아래 얼굴 클로즈업", preset=cd.CUSTOM,
+                 automation="auto (규칙)", shot="근접 (CU)")
+check("주제 키워드 조명(네온)은 구도 규칙보다 우선",
+      "neon glow" in _p7d and "Rembrandt" not in _p7d, _p7d[:300])
+_p7e, _, _ = run(topic="x", preset=cd.CUSTOM, automation="manual (수동)",
+                 angle="로우앵글")
+check("수동 티어는 구도 규칙 미적용 (기본 조명 유지)",
+      "soft overcast light" in _p7e, _p7e[:300])
+_p7f, _, _ = run(topic="x", preset=cd.CUSTOM, automation="auto (규칙)",
+                 shot="중경 (MS)")
+check("중경은 추천 규칙 없음 (기본 조명 유지)",
+      "soft overcast light" in _p7f, _p7f[:300])
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
