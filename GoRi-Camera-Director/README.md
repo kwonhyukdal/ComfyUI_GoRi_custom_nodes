@@ -1,12 +1,14 @@
 # 🎥 (GoRi) Camera Director Skills
 
+> **Qwen-Image 2.1 완전 지원** — Text Encode Qwen Image 2.1 노드와 동일한 reference-latents 방식으로 동작합니다. 레퍼런스 이미지 10장 입력, RGBA(투명도) 입력 네이티브 통과, 2K 네이티브 워크플로 그대로 사용.
+
 주제 한 줄(한글 OK), 선택 이미지, 선택적 positive/negative conditioning을 입력하면 **카메라 구도·렌즈·앵글·조명·그레이드·(영상)무빙**이 자동으로 조합됩니다. 최종적으로 `positive_out`, `negative_out` conditioning과 확인용 `prompt_out`을 출력합니다.
 
 - 패키지 폴더: `comfyui-GoRi-camera-director`
 - 노드 표시 이름: `(GoRi) Camera Director Skills`
 - 출력: `positive_out` (`CONDITIONING`), `negative_out` (`CONDITIONING`), `prompt_out` (`STRING`)
 - `clip`은 최종 Qwen Image 모델의 text encoder입니다.
-- `vae`는 원본 reference conditioning을 위해 선택적으로 연결합니다. Qwen Image Edit/Image 2.1 identity 유지에는 `image_1`과 `vae`를 함께 연결하는 것이 권장됩니다.
+- `vae`는 원본 reference conditioning을 위해 선택적으로 연결합니다. Qwen-Image 2.1 / Qwen Image Edit identity 유지에는 `image_1`과 `vae`를 함께 연결하는 것이 권장됩니다. 2.1의 RGBA(4채널) 입력은 알파까지 그대로 VAE에 전달됩니다.
 - Qwen 프롬프트 재작성기의 `CLIP`을 `clip`에 연결하지 마십시오. Qwen `positive_prompt` **문자열**을 `prompt_in`에 연결하고, 최종 모델용 CLIP을 `clip`에 연결하십시오.
 - `positive` conditioning 입력은 이전 배선과의 호환성을 위해 남겨 두지만 새 표준 경로에서는 사용하지 않습니다. 잘못된 CLIP conditioning이 얼굴을 바꾸는 것을 막기 위해 무시됩니다.
 - `negative` conditioning은 선택 입력입니다. 기존 negative를 보존한 뒤 카메라/영상 실패 모드만 추가합니다.

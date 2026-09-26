@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-gori-custom-nodes"
-description = "GoRi custom nodes for ComfyUI: Camera Director generates camera-aware English prompts and Qwen conditioning from a topic and reference images."
-version = "1.1.0"
+description = "GoRi Camera Director — full support for Qwen-Image 2.1 (reference-latents path, 10 reference images, RGBA). Generates camera-aware English prompts and conditioning from a topic and reference images."
+version = "1.1.1"
 license = {text = "MIT"}
 dependencies = []
 
@@ -12,4 +12,4 @@ Repository = "https://github.com/kwonhyukdal/ComfyUI_GoRi_custom_nodes"
 PublisherId = "gori"
 DisplayName = "GoRi Custom Nodes"
 Icon = ""
-Tags = ["camera", "prompt", "ui", "workflow"]
+Tags = ["camera", "prompt", "qwen", "image-edit", "workflow"]
