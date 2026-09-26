@@ -1,0 +1,57 @@
+{
+  "시네마틱 인물": {
+    "shot": "근접 (CU)",
+    "lens": "85mm f/1.4",
+    "angle": "로우앵글",
+    "composition": "삼분할",
+    "lighting": "골든아워",
+    "grade": "시네마틱 필릭",
+    "motion": "슬로우 푸시인",
+    "speed": "느림",
+    "amplitude": "약간"
+  },
+  "제품 히어로": {
+    "shot": "중경 (MS)",
+    "lens": "100mm 매크로",
+    "angle": "수평",
+    "composition": "중앙 대칭",
+    "lighting": "3점 스튜디오",
+    "grade": "클린 커머셜",
+    "motion": "오빗",
+    "speed": "느림",
+    "amplitude": "약간"
+  },
+  "CF 버티컬": {
+    "shot": "중근접 (MCU)",
+    "lens": "35mm 스냅",
+    "angle": "로우앵글",
+    "composition": "대각선",
+    "lighting": "하이키",
+    "grade": "비비드 포스터",
+    "motion": "크레인 상",
+    "speed": "보통",
+    "amplitude": "보통"
+  },
+  "다큐 핸드헬드": {
+    "shot": "중경 (MS)",
+    "lens": "35mm 스냅",
+    "angle": "수평",
+    "composition": "리딩라인",
+    "lighting": "흐린 부드러움",
+    "grade": "35mm 필름",
+    "motion": "핸드헬드",
+    "speed": "보통",
+    "amplitude": "약간"
+  },
+  "드라마틱 롱샷": {
+    "shot": "원경 (WS)",
+    "lens": "24mm 광각",
+    "angle": "하이앵글",
+    "composition": "여백",
+    "lighting": "로우키",
+    "grade": "틸-오렌지",
+    "motion": "풀백",
+    "speed": "느림",
+    "amplitude": "보통"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "_comment": "auto 티어용 최소 한/영 병기 사전. 위에서부터 대응하는 첫 항목을 채택한다. 값은 목록 A의 한글 라벨과 일치해야 한다.",
+  "shot": [
+    {"value": "극접 (ECU)", "keywords": ["클로즈업 극접", "extreme close"]},
+    {"value": "근접 (CU)", "keywords": ["얼굴", "표정", "인물", "클로즈업", "웃음", "눈물", "아기", "portrait", "face", "closeup", "close-up", "headshot"]},
+    {"value": "중근접 (MCU)", "keywords": ["반신", "shoulders", "medium close"]},
+    {"value": "전신 (FS)", "keywords": ["전신", "full body", "standing figure"]},
+    {"value": "극원경 (EWS)", "keywords": ["항공", "드론", "스카이라인", "aerial", "drone", "bird's eye"]},
+    {"value": "원경 (WS)", "keywords": ["풍경", "산맥", "바다", "해변", "거리", "도시", "숲", "사막", "드넓", "landscape", "panorama", "skyline", "wide vista"]}
+  ],
+  "lens": [
+    {"value": "100mm 매크로", "keywords": ["제품", "패키지", "화장품", "주얼리", "시계", "디테일 클로즈", "product shot", "packaging", "jewelry", "macro"]},
+    {"value": "85mm f/1.4", "keywords": ["인물", "모델", "초상", "반려동물", "강아지", "고양이", "portrait", "model", "head shot", "puppy", "kitten"]},
+    {"value": "24mm 광각", "keywords": ["건축", "실내", "인테리어", "풍경", "architecture", "interior", "landscape"]},
+    {"value": "14mm 초광각", "keywords": ["초광각", "강렬한 원근", "ultra wide", "fisheye"]}
+  ],
+  "angle": [
+    {"value": "탑다운 (오버헤드)", "keywords": ["탑다운", "평면 배치", "flat lay", "overhead", "위에서 내려다"]},
+    {"value": "개미눈 (worm's eye)", "keywords": ["개미 눈", "worm's eye", "땅에서 올려"]},
+    {"value": "하이앵글", "keywords": ["위에서 내려다", "俯瞰", "아래를 내려다", "high angle", "birds-eye view"]},
+    {"value": "로우앵글", "keywords": ["웅장", "위용", "올려다보", "위대한", "heroic", "low angle", "towering"]}
+  ],
+  "lighting": [
+    {"value": "네온", "keywords": ["네온", "neon"]},
+    {"value": "림라이트/실루엣", "keywords": ["실루엣", "역광", "silhouette", "backlit"]},
+    {"value": "골든아워", "keywords": ["노을", "석양", "황혼", "golden hour", "sunset"]},
+    {"value": "3점 스튜디오", "keywords": ["스튜디오", "studio"]},
+    {"value": "로우키", "keywords": ["어두운", "심야", "야간", "한밤", "low-key", "low key", "moody", "dark night", "night alley"]},
+    {"value": "하이키", "keywords": ["화사한", "밝은", "high-key", "high key", "bright"]}
+  ],
+  "motion": [
+    {"value": "슬로우 푸시인", "keywords": ["다가가", "천천히 다가", "가까이 접근", "approach", "push in", "closer slowly"]},
+    {"value": "풀백", "keywords": ["멀어지", "후퇴", "점점 멀", "pull back", "retreat", "zoom out", "fade away"]},
+    {"value": "오빗", "keywords": ["주위를 도는", "둘러보며", "원을 그려", "orbit", "circling", "around the subject"]},
+    {"value": "핸드헬드", "keywords": ["현장감", "기록film", "흔들리는 카메라", "documentary", "handheld", "verite"]},
+    {"value": "팔로우", "keywords": ["따라가는", "뒤따라", "follow shot", "tracking the"]}
+  ],
+  "speed": [
+    {"value": "느림", "keywords": ["천천히", "느릿", "slowly", "slow "]},
+    {"value": "빨름", "keywords": ["빠르게", "재빨리", "fast", "quick"]}
+  ]
+}
