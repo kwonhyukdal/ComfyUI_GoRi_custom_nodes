@@ -2,6 +2,11 @@
 
 > **Qwen-Image 2.1 완전 지원** — Text Encode Qwen Image 2.1 노드와 동일한 reference-latents 방식으로 동작합니다. 레퍼런스 이미지 10장 입력, RGBA(투명도) 입력 네이티브 통과, 2K 네이티브 워크플로 그대로 사용.
 
+> **KREA 2 · MiniMax H3 에서도 활용 가능** — `prompt_out`의 카메라 연출 영문 프롬프트를 그대로 복사해 넣을 수 있습니다.
+> - **KREA 2** (이미지, Qwen3-VL 인코더): `prompt_out` 텍스트를 KREA 2 텍스트 인코더에 붙여넣기 — 샷·렌즈·조명 문구가 그대로 반영됩니다.
+> - **MiniMax H3** (영상, Hailuo): 무빙·속도 필드가 만든 카메라 이동 문구를 H3 영상 프롬프트로 사용 — I2V에서 카메라 워크 지정에 유용합니다.
+> conditioning 출력(`positive_out`/`negative_out`)의 직결 연결은 Qwen 계열이 기준입니다.
+
 주제 한 줄(한글 OK), 선택 이미지, 선택적 positive/negative conditioning을 입력하면 **카메라 구도·렌즈·앵글·조명·그레이드·(영상)무빙**이 자동으로 조합됩니다. 최종적으로 `positive_out`, `negative_out` conditioning과 확인용 `prompt_out`을 출력합니다.
 
 - 패키지 폴더: `comfyui-GoRi-camera-director`

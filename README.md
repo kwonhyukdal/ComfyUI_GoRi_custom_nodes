@@ -6,7 +6,7 @@ GoRi 제작 ComfyUI 커스텀 노드 통합 배포 저장소입니다.
 
 | 노드 | 설명 | 설치 폴더 |
 |---|---|---|
-| [GoRi Camera Director](./GoRi-Camera-Director) | 주제(한글 OK) + 레퍼런스 이미지 → 카메라 연출이 포함된 영문 프롬프트·conditioning 출력 — **Qwen-Image 2.1 완전 지원** (reference-latents 방식, 10장 입력, RGBA) | `GoRi-Camera-Director/` |
+| [GoRi Camera Director](./GoRi-Camera-Director) | 주제(한글 OK) + 레퍼런스 이미지 → 카메라 연출이 포함된 영문 프롬프트·conditioning 출력 — **Qwen-Image 2.1 완전 지원**, KREA 2·MiniMax H3 프롬프트로도 활용 가능 | `GoRi-Camera-Director/` |
 
 ## 설치 방법
 
