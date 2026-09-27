@@ -7,7 +7,7 @@
 > - **MiniMax H3** (영상, Hailuo): 무빙·속도 필드가 만든 카메라 이동 문구를 H3 영상 프롬프트로 사용 — I2V에서 카메라 워크 지정에 유용합니다.
 > conditioning 출력(`positive_out`/`negative_out`)의 직결 연결은 Qwen 계열이 기준입니다.
 
-> **완전 로컬 동작 지원** — API 키·클라우드 없이도 규칙 엔진(한/영 키워드 사전)으로 100% 오프라인 동작합니다. LLM 티어는 선택사항이며, 키를 넣으면(OpenAI/Anthropic/Ollama 로컬 LLM) AI 판단 품질이 올라갑니다.
+> **완전 로컬 동작 지원** — API 키·클라우드 없이도 규칙 엔진(한/영 키워드 사전)으로 100% 오프라인 동작합니다. LLM 티어는 선택사항이며, 키를 넣거나 로컬 LLM(Ollama/LM Studio)을 연결하면 AI 판단 품질이 올라갑니다.
 
 주제 한 줄(한글 OK), 선택 이미지, 선택적 positive/negative conditioning을 입력하면 **카메라 구도·렌즈·앵글·조명·그레이드·(영상)무빙**이 자동으로 조합됩니다. 최종적으로 `positive_out`, `negative_out` conditioning과 확인용 `prompt_out`을 출력합니다.
 
@@ -20,6 +20,7 @@
 - `positive` conditioning 입력은 이전 배선과의 호환성을 위해 남겨 두지만 새 표준 경로에서는 사용하지 않습니다. 잘못된 CLIP conditioning이 얼굴을 바꾸는 것을 막기 위해 무시됩니다.
 - `negative` conditioning은 선택 입력입니다. 기존 negative를 보존한 뒤 카메라/영상 실패 모드만 추가합니다.
 - `image_1`~`image_10`은 카메라 힌트/비전 LLM 판단용 입력이며, 별도 출력하지 않습니다.
+- **점진적 입력 단자**: 기본으로 `image_1` 단자만 보이고, 선을 연결할 때마다 다음 단자가 하나씩 나타납니다(예: `image_7` 연결 → `image_8`까지 표시). 단자 숨김은 화면 표시일 뿐이며 저장된 워크플로의 링크 호환성에는 영향이 없습니다.
 - 연결된 `image_N` 번호는 LLM note와 reference guard에 그대로 유지됩니다. `image_3`만 연결하면 `image_1`로 압축되지 않습니다.
 - 레퍼런스 이미지가 2장 이상이면 첫 번째 연결 이미지가 주 인물 기준이 되고, 추가 이미지는 `background / outfit / prop / product / style / lighting / composition / mood` 중 요청된 역할로만 사용하도록 가드가 추가됩니다.
 - 의상/옷 교체처럼 `Image 2`를 의상 참고로 명시적으로 쓰는 작업일 때만 의상 전용 가드가 추가됩니다. 단순히 장면 설명에 `dress`나 `옷`이라는 단어가 있어도 고양이/배경/제품 장면에는 의상 가드를 넣지 않습니다.
@@ -36,12 +37,8 @@
 ```
 ComfyUI/
 └── custom_nodes/
-    └── comfyui-GoRi-camera-director/   ← 이 폴더 전체를 복사
+    └── GoRi-Camera-Director/   ← 이 폴더 전체를 복사
 ```
-
-> 📍 **이 PC의 실제 설치 위치 (2026-09-25 확인):**
-> `C:\ComfyUI\ComfyUI video\ComfyUI-Easy-Install\ComfyUI\custom_nodes\comfyui-GoRi-camera-director`
-> 배포 Python: `python_embeded\python.exe` (3.12.10) — 자동 테스트 통과 확인
 
 1. 이 폴더를 `ComfyUI/custom_nodes/` 에 복사
 2. ComfyUI 재시작 (`Start ComfyUI.bat`)
@@ -71,9 +68,9 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 - `positive_out`은 `prompt_in`이 연결되면 Qwen `positive_prompt`, 짧은 reference identity anchor, 카메라 문구를 하나의 문자열로 합친 뒤 최종 CLIP으로 한 번 인코딩한 결과입니다. 사람 reference가 있을 때만 identity anchor가 추가되며, 원본 reference latent는 `image_1`과 `vae`로 전달됩니다. 단일 인물 anchor와 duplicate negative는 명시적인 여러 인물에는 적용되지 않으며, 유리창/거울/반사 장면에서는 중복 억제를 적용하지 않습니다. 골반/체형 측정 문구는 public Qwen 경로에 넣지 않습니다. `positive` conditioning은 새 경로에서 무시됩니다.
 - `negative_out`은 기존 negative conditioning이 연결되어 있으면 이를 유지한 뒤, 카메라/영상 실패 모드만 합친 결과입니다. 단일 reference 경로에서는 `multiple people`, `duplicate person`, `cloned person`, `mirrored twin`만 중복 억제용으로 추가합니다. `extra arms`, `face mismatch`, 피부색 오염 방지 문구는 추가하지 않습니다. negative는 vision 없이 텍스트만 인코딩하므로 Qwen Vision 인코딩은 positive 1회만 실행되고, `reference_latents`도 positive에만 첨부됩니다. `llm` 티어에서 LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합됩니다.
 - `prompt_in` 표준 경로에서도 의상 교체 의도가 명확하고 이미지가 2장 이상이면 의상 전용 가드가 추가되고, 다중 이미지일 때는 보조 reference 역할 제한 1문장이 추가됩니다. 단일 이미지에는 역할 가드를 넣지 않습니다.
-- 이미지 2장에 두 인물을 지정하면(예: `Image 1의 여성과 Image 2의 남성이 서로 마주보기`) 2인 duo 가드로 전환됩니다. 3~10번 슬롯도 동일하게 인식합니다 (`Image 3의 남성`, `Image 10의 여성` 등). `Exactly one main person` 억제와 중복 인물 negative, 보조 역할 제한이 모두 빠지고 해당 슬롯의 정체성 보존 문구가 들어갑니다. 두 신체가 하나로 합쳐지거나 팔다리가 뒤섞이는 양방향 융합을 막는 신체 분리 문구도 함께 들어갑니다. 의상 교체 문구는 duo로 오인하지 않습니다.
+- 이미지 2장에 두 인물을 지정하면(예: `Image 1의 여성과 Image 2의 남성이 서로 마주보기`) 2인 duo 가드로 전환됩니다. 3~8번 슬롯도 동일하게 인식합니다 (`Image 3의 남성`, `Image 8의 여성` 등). `Exactly one main person` 억제와 중복 인물 negative, 보조 역할 제한이 모두 빠지고 해당 슬롯의 정체성 보존 문구가 들어갑니다. 두 신체가 하나로 합쳐지거나 팔다리가 뒤섞이는 양방향 융합을 막는 신체 분리 문구도 함께 들어갑니다. 의상 교체 문구는 duo로 오인하지 않습니다.
 - standalone 경로(`prompt_in` 미연결)의 positive에는 얼굴/신체/의상 legacy guard가 붙지만, negative는 카메라 실패 모드만 담는 것이 현행 정책입니다. positive 양면 방어가 필요하면 `prompt_out`을 별도 CLIPTextEncode에 연결해 negative를 직접 보완하십시오.
-- `auto (규칙)` 티어는 shot/lens/angle/lighting/motion/speed 키워드를 봅니다. `네온`, `노을/석양`, `스튜디오`, `실루엣/역광`, `어두운/심야/야간`, `화사한` 같은 단어가 조명을 결정합니다. 일상적인 `밤` 한 글자로는 로우키로 바꾸지 않습니다 (오탐 방지, 키워드 사전 `keywords_ko_en.json`에서 확장 가능).
+- `규칙 (auto)` 티어는 shot/lens/angle/lighting/motion/speed 키워드를 봅니다. `네온`, `노을/석양`, `스튜디오`, `실루엣/역광`, `어두운/심야/야간`, `화사한` 같은 단어가 조명을 결정합니다. 일상적인 `밤` 한 글자로는 로우키로 바꾸지 않습니다 (오탐 방지, 키워드 사전 `keywords_ko_en.json`에서 확장 가능).
 - `latent_image`는 선택 입력입니다. 2MP/2.5MP/3MP 등 실제 sampling latent를 연결해도 reference conditioning은 1MP 상한으로 묶입니다. 연결하지 않으면 1024 기준 reference conditioning을 사용합니다.
 - 고해상도에서 동일한 reference 이미지의 vision tensor와 VAE latent는 내용 해시+목표 크기 키로 캐시되어 반복 실행 시 재계산하지 않습니다. 이를 통해 reference conditioning 속도를 개선했습니다.
 - 3MP 이상에서는 KSampler 스텝, preview, VAE decode 비용이 전체 시간에서 더 큰 비중을 차지할 수 있습니다. 속도가 필요하면 2~3MP를 기준으로 생성한 뒤 upscale하는 편이 안전합니다.
@@ -88,7 +85,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 
 > **중요:** 이 conditioning 디렉터는 범용 노드입니다. `clip`, `positive`, `negative`는 모두 최종 모델에 맞는 같은 계열의 CLIP/conditioning이어야 합니다. Qwen 모델이면 Qwen 계열 CLIP을, Flux/SDXL이면 해당 모델의 CLIP을 연결하십시오. 서로 다른 모델의 CLIP conditioning을 섞으면 얼굴/피부가 깨질 수 있습니다.
 >
-> 💡 외부에서 **완성된 프롬프트**를 넣을 때는 `automation = manual (수동)` 권장 (원문 보존 + 카메라 조항만 추가)
+> 💡 외부에서 **완성된 프롬프트**를 넣을 때는 `automation = 수동 (manual)` 권장 (원문 보존 + 카메라 조항만 추가)
 > - 콘솔 로그의 `in=topic 칸` / `in=외부(prompt_in)` 으로 어느 쪽이 쓰였는지 확인 가능
 
 ## 2b. 출력 계약
@@ -98,26 +95,40 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 | `positive_out` | `CONDITIONING` | `KSampler.positive` | Qwen 프롬프트 + 사람 reference identity anchor + 카메라 문구를 한 번 인코딩한 결과. `positive` conditioning은 무시 |
 | `negative_out` | `CONDITIONING` | `KSampler.negative` | 기존 negative conditioning이 있으면 유지하고, 카메라/영상 실패 모드만 합친 결과 |
 | `prompt_out` | `STRING` | `Show Text` / 다른 프롬프트 재작성 노드 | 실제 positive 문자열과 동일한 디버그용 문자열 |
+| `image_out` | `IMAGE` | I2V 시작 프레임 / 업스케일 / Preview Image | `image_1`~`image_10` 중 첫 번째(주 reference) 이미지를 그대로 통과. 미연결이면 비어 있음 |
 
 `prompt_in`을 연결하면 Qwen 프롬프트와 카메라 문구를 하나의 문자열로 합친 뒤 최종 모델용 CLIP으로 한 번 인코딩합니다. `prompt_in`을 연결하지 않으면 topic 기반 standalone 프롬프트를 한 번 인코딩합니다. `positive` conditioning은 새 경로에서 무시됩니다. `negative` conditioning을 연결하면 기존 negative를 유지한 뒤 카메라/영상 실패 모드만 추가합니다.
 
 ### IMAGE 입력
 
 - `image_1`~`image_10`은 선택적 입력이며, 다른 다중 reference conditioning 노드와 같은 방식입니다.
-- `auto (규칙)`에서는 첫 번째 연결 이미지 기준으로 밝기·대비·채도 등을 카메라 구성 힌트에 사용합니다.
-- `llm (AI 판단)`에서는 연결된 모든 이미지를 base64 목록으로 만들어 지원 provider에 다중 비전으로 전달합니다.
+- `규칙 (auto)`에서는 첫 번째 연결 이미지 기준으로 밝기·대비·채도 등을 카메라 구성 힌트에 사용합니다.
+- `AI 판단 (llm)`에서는 연결된 모든 이미지를 base64 목록으로 만들어 지원 provider에 다중 비전으로 전달합니다.
 - 다중 이미지일 때 `Image 1`은 주 인물 기준으로 고정되고, 추가 이미지는 배경/옷/소품/제품/스타일/조명/구도/분위기 중 요청된 역할로만 사용됩니다. 주 인물, 얼굴, 신체, 옷, 제품, 배경 주체가 복제되지 않게 방지합니다.
-- 이 입력은 프롬프트 판단에만 사용되며, `image_out` 등 별도 출력은 없습니다.
+- **믹스 가드**: 이미지를 2장 이상 연결하면 융합/신원 혼합 방어어가 positive·negative에 자동 추가됩니다 — 의상 참조는 몸 위의 별도 의류 레이어로 취급되고, 원본 신체 비율·피부·얼굴·헤어·포즈 보존 지시와 "clothing fusion with skin, mixed facial features, identity blending" 등 negative 방어어가 붙습니다. (콘솔에 `믹스 가드 활성` 로그)
+- 프롬프트 판단에 쓰이는 동시에, 첫 번째(주 reference) 이미지는 `image_out`으로 그대로 통과합니다 — I2V 시작 프레임이나 업스케일 노드에 바로 연결할 수 있습니다.
+
+### LLM 작동 표시등
+
+`AI 판단 (llm)`으로 실행하면 **LLM이 구동되는 동안 `model` 입력칸에 초록불이 점멸**합니다 — 로컬 LLM(Ollama/LM Studio)은 수십 초 걸릴 수 있어서 "멈춘 건지, 계산 중인지"를 바로 알 수 있습니다. 판정이 끝나면 초록불이 잠시 유지된 후 사라지고(성공), 실패해서 규칙으로 폴백한 경우 **빨간불**이 켜집니다(콘솔에도 실패 사유 출력). 규칙/수동 티어로 실행하면 표시등이 켜지지 않습니다. 표시등은 새 실행이 시작될 때 초기화됩니다.
+
+### llm_hint — LLM에게 짧은 지시
+
+노드 맨 아래의 `llm_hint` 칸에 구도·조명·무드·장면 지시를 짧게 적으면 LLM 판단에 최우선으로 반영됩니다 (예: `어두운 무드, 클로즈업 위주, 비 오는 장면`). **AI 판단 (llm)** 티어에서만 적용되며, 규칙/수동 티어에서는 무시됩니다(콘솔 안내). 비워두면 기존과 동일하게 작동합니다.
+
+`llm_hint`를 사용한 실행에는 negative 프롬프트에 검열 아티팩트 방어어(`censored, mosaic, bar censor, pixelated, modest`)가 자동 추가됩니다 — 이미지 모델이 프롬프트 지시와 무관하게 스스로 표현을 순화하거나 모자이크를 그리는 경향을 억제합니다. `llm_hint`를 비우면 방어어도 붙지 않습니다.
 
 ## 3. 사용법 (자동화 3가지)
 
 | tier | 동작 | 언제 |
 |---|---|---|
-| **llm (AI 판단)** 기본 | LLM이 주제를 영문 장면으로 확장 + 카메라 자동 선택 | 가장 똑똑한 결과 |
-| **auto (규칙)** | 한/영 키워드 사전으로 카메라 선택 (오프라인·무료) | 네트워크/키 없을 때 |
-| **manual (수동)** | 드롭다운 값 그대로 사용 | 완전 직접 제어 |
+| **규칙 (auto)** 기본 | 한/영 키워드 사전으로 카메라 선택 (오프라인·무료·API 키 불필요) | 기본값 — 키 없이 바로 사용 |
+| **AI 판단 (llm)** | LLM이 주제를 영문 장면으로 확장 + 카메라 자동 선택 (선택 사항 고급 기능) | API 키가 있고 가장 똑똑한 결과를 원할 때 |
+| **수동 (manual)** | 드롭다운 값 그대로 사용 | 완전 직접 제어 |
 
-**프리셋 우선순위:** `특정 프리셋` > `직접 설정`(드롭다운) > `자동(auto)`(tier 판정)
+> 기본 자동화는 `규칙 (auto)`입니다. API 키 없이 100% 로컬·오프라인으로 동작합니다. 한글 주제를 영문 장면으로 확장하고 싶으면 `AI 판단 (llm)`으로 올리고 provider·model·api_key를 설정하세요. llm 호출이 실패하면 자동으로 규칙으로 폴백합니다.
+
+**프리셋 우선순위:** `특정 프리셋` > `직접 설정 (custom)`(드롭다운) > `자동(auto)`(tier 판정)
 - 예) 프리셋=`시네마틱 인물` + tier=`llm` → **카메라=프리셋 고정, 장면만 LLM이 확장**
 
 **콘솔 로그 (한글):**
@@ -132,6 +143,9 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 | OpenAI | `gpt-4o-mini` | 노드 `api_key` 칸 또는 환경변수 `OPENAI_API_KEY` |
 | Anthropic | `claude-3-5-haiku-latest` | `api_key` 또는 `ANTHROPIC_API_KEY` |
 | Ollama (로컬·무료) | `llama3.2` (설치한 모델명) | 키 불필요 — `ollama serve` 상태만 |
+| LM Studio (로컬·무료) | LM Studio에 로드된 모델 | 키 불필요 — LM Studio에서 **Local Server** 시작(포트 1234) 후 사용 |
+
+- **LM Studio:** GUI 앱에서 모델을 검색·다운로드·로드하고, 앱 안의 Local Server를 켜면 됩니다. `model` 칸에 로드한 모델 이름(예: `qwen2.5-vl`)을 적으면 그 모델로 호출하고, 비워두면 현재 로드된 모델로 라우팅합니다. 이미지 판단(llm 티어 + 이미지 연결)은 `qwen2.5-vl` 같은 비전 지원 모델을 사용하세요.
 
 > ⚠️ 노드의 `api_key` 칸에 키를 넣으면 **워크플로 JSON에 저장**될 수 있습니다.
 > 공유·백업 시 주의하고, 가능하면 **환경변수** 사용을 권장합니다.
@@ -141,6 +155,11 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 > 이전 모델명(`gpt-4o-mini` 등)이 남아 있으면, 콘솔 경고와 함께 해당 provider의
 > 기본 모델로 자동 교정합니다. `model` 칸을 비우면 항상 provider 기본값을
 > 사용합니다. Ollama 로컬 모델명(`qwen2.5-vl` 등)은 그대로 유지됩니다.
+> LM Studio는 모델명 종류가 다양해 교정하지 않고 입력값 그대로 사용합니다.
+
+> 💡 **로컬 LLM 타임아웃:** Ollama/LM Studio는 클라우드 API보다 응답이 오래
+> 걸릴 수 있어(로컬 비전 추론은 수십 초~수분) 호출 타임아웃이 **300초**로
+> 설정됩니다. 클라우드 provider(OpenAI/Anthropic)는 기본 45초입니다.
 
 > 💡 **직접 설정 + 자동 (auto):** `preset=직접 설정`에서 드롭다운을
 > `자동 (auto)`으로 둔 항목은 tier(llm/auto/manual) 판정을 따릅니다.
@@ -162,7 +181,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 ## 6. 검증 체크리스트
 
 - [ ] 1. 설치 후 노드 목록에 표시
-- [ ] 2. `직접 설정`+`85mm` 등 → 출력에 영문 조항 포함
+- [ ] 2. `직접 설정 (custom)`+`85mm` 등 → 출력에 영문 조항 포함
 - [ ] 3. tier=llm + 한글 주제 → 영문 장면으로 확장
 - [ ] 4. 키 없이 llm 실행 → 콘솔 폴백 로그 + 정상 출력
 - [ ] **5. 동일 시드 A/B** (카메라 off/on) → 구도·질감 육안 차이
@@ -193,7 +212,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 
 1. **원본 고정** — 2컷째부터 reference는 전 컷 생성물이 아니라 **최초 원본**(원 사진/첫 생성 PNG)을 계속 연결합니다. 체이닝은 손실이 누적됩니다.
 2. **PNG 저장본 사용** — 미리보기 드래그나 JPG은 그 자체로 손실입니다. `SaveImage` PNG 파일을 `LoadImage`로 연결하세요.
-3. **`automation = manual` + 프리셋 고정** — `auto`는 입력 이미지 통계에 따라 조명/그레이드를 바꾸고, `llm`은 매번 장면을 다시 씁니다. 시리즈 전 컷에 같은 프리셋(또는 `직접 설정`)을 고정해야 룩이 안 바뀝니다.
+3. **`automation = manual` + 프리셋 고정** — `auto`는 입력 이미지 통계에 따라 조명/그레이드를 바꾸고, `llm`은 매번 장면을 다시 씁니다. 시리즈 전 컷에 같은 프리셋(또는 `직접 설정 (custom)`)을 고정해야 룩이 안 바뀝니다.
 4. **슬롯 번호 고정** — 같은 인물은 매 컷 같은 `image_N` 번호에 연결합니다 (예: 이번 시리즈에서 1번=주인공, 2번=조연으로 정했으면 전 컷 동일). 번호가 바뀌면 identity/duo 앵커가 다른 인물을 가리킵니다. 조합이 바뀌는 시리즈(1·2번 여성 듀오였다가 1번 남성·2번 여성으로 변경 등)에서는 바뀐 컷부터 새 번호 규칙을 전 컷에 동일하게 적용하세요.
 5. **해상도 통일** — 전 컷 같은 latent 크기 사용. 노드는 reference를 1MP 상한으로 맞추므로, 기준 해상도를 바꾸면 reference 디테일이 달라집니다.
 6. **재생성 denoise는 낮게** — Edit/2차 패스의 denoise가 높을수록 원본에서 멀어집니다 (워크플로 측 KSampler 설정).

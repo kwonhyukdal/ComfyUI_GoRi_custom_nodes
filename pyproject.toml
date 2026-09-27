@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-gori-custom-nodes"
 description = "GoRi Camera Director — full support for Qwen-Image 2.1 (reference-latents path, 10 reference images, RGBA). Generates camera-aware English prompts and conditioning from a topic and reference images."
-version = "1.1.1"
+version = "1.2.0"
 license = {text = "MIT"}
 dependencies = []
 

@@ -17,4 +17,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GoRi_CameraDirectorEncodeSkills": "(GoRi) Camera Director Skills",
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+# 프론트엔드 확장: image_2~10 단자를 연결 개수에 맞춰 점진적으로 공개.
+# 프론트엔드 1.52.x는 소켓 hidden 플래그를 무시하므로, 동적 소켓 API
+# (removeInput/addInput)로 구현. 제거·재추가는 항상 맨 뒤(미연결) 소켓만
+# 다루므로 기존 링크와 워크플로 호환성이 유지된다.
+WEB_DIRECTORY = "./web"
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

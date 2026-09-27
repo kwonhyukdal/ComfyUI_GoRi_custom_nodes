@@ -2,7 +2,7 @@
 """llm_client.py — Camera Director용 LLM 호출 클라이언트.
 
 표준 라이브러리 중심(urllib). vision 입력 변환은 ComfyUI 환경의 PIL/torch/numpy를 사용한다.
-- provider: OpenAI / Anthropic / Ollama(로컬)
+- provider: OpenAI / Anthropic / Ollama(로컬) / LM Studio(로컬)
 - 응답에서 JSON만 추출 (code-fence 허용)
 - 프로세스 내 캐시: 같은 입력 → 네트워크 호출 0회
 """
@@ -17,7 +17,13 @@ import threading
 import urllib.error
 import urllib.request
 
-DEFAULT_TIMEOUT = 45  # 초
+DEFAULT_TIMEOUT = 45  # 초 (클라우드 API 기준)
+# 로컬 LLM(Ollama/LM Studio)은 RTX 8GB급 GPU에서 비전 추론만 수십 초~수분
+# 걸릴 수 있다. 클라우드용 기본 타임아웃으로 끊기면 LLM 판정이 항상 실패해
+# 규칙 폴백(빨간불)으로 떨어지므로, 로컬 provider는 넉넉한 상한을 쓴다.
+LOCAL_TIMEOUT = 300  # 초
+
+_LOCAL_PROVIDERS = ("Ollama", "LM Studio")
 
 _cache: dict = {}
 _cache_lock = threading.Lock()
@@ -84,7 +90,7 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
 
 def _content_from(provider: str, raw: dict) -> str:
     try:
-        if provider == "OpenAI":
+        if provider in ("OpenAI", "LM Studio"):
             return raw["choices"][0]["message"]["content"] or ""
         if provider == "Anthropic":
             blocks = raw.get("content") or []
@@ -162,19 +168,25 @@ def chat(provider: str, model: str, api_key: str,
 
     - OpenAI/Anthropic: 키가 없으면 즉시 실패(네트워크 호출 없음)
     - Ollama: 로컬(localhost:11434), 키 불필요
+    - LM Studio: 로컬 OpenAI 호환 서버(localhost:1234/v1), 키 불필요
     - image_b64: PNG base64 1장 — 비전 전달 (지원 모델만). 캐시 키에 이미지 서명 포함
-    - image_b64s: PNG base64 여러 장 — OpenAI/Anthropic/Ollama 다중 비전 전달
+    - image_b64s: PNG base64 여러 장 — OpenAI/Anthropic/Ollama/LM Studio 다중 비전 전달
     """
     image_list = [b for b in (image_b64s or []) if b]
     if not image_list and image_b64:
         image_list = [image_b64]
+    # 로컬 provider는 호출자가 짧은 타임아웃을 넘겨도 LOCAL_TIMEOUT 이하로
+    # 내려가지 않게 상향한다. (Why: 로컬 비전 추론이 기본 45초를 초과해
+    # 항상 timed out → 빨간불 폴백이 되는 사례 방지)
+    if provider in _LOCAL_PROVIDERS:
+        timeout = max(timeout, LOCAL_TIMEOUT)
     key = _cache_key(provider, model, system, user, image_b64, image_sig, image_list)
     with _cache_lock:
         if key in _cache:
             return _cache[key]
 
     api_key = (api_key or "").strip()
-    if not api_key and provider != "Ollama":
+    if not api_key and provider not in ("Ollama", "LM Studio"):
         env = "OPENAI_API_KEY" if provider == "OpenAI" else "ANTHROPIC_API_KEY"
         api_key = os.environ.get(env, "").strip()
         if not api_key:
@@ -224,6 +236,25 @@ def chat(provider: str, model: str, api_key: str,
         payload = {"model": model or "llama3.2", "stream": False,
                    "messages": messages}
         raw = _post("http://localhost:11434/api/chat", payload, {}, timeout)
+    elif provider == "LM Studio":
+        # LM Studio OpenAI 호환 서버(localhost:1234). 키 불필요, 비전도
+        # OpenAI 규격(image_url data URL) 그대로. model이 비면 LM Studio가
+        # 현재 로드된 모델로 라우팅하는 자리표시자를 쓴다.
+        if image_list:
+            user_block = [{"type": "text", "text": user}]
+            for b64 in image_list:
+                user_block.append(
+                    {"type": "image_url",
+                     "image_url": {"url": "data:image/png;base64," + b64}})
+            msgs = [{"role": "system", "content": system},
+                    {"role": "user", "content": user_block}]
+        else:
+            msgs = [{"role": "system", "content": system},
+                    {"role": "user", "content": user}]
+        raw = _post("http://localhost:1234/v1/chat/completions",
+                    {"model": model or "local-model", "messages": msgs,
+                     "temperature": 0.4},
+                    {}, timeout)
     else:
         raise LLMError(f"알 수 없는 provider: {provider}")
 
