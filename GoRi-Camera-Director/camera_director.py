@@ -68,14 +68,45 @@ SHOT = {
 }
 
 TOPIC_SHOT_PHRASES = {
-    "극접 (ECU)": ("extreme close-up shot", "extreme closeup shot", "ecu shot"),
-    "근접 (CU)": ("close-up shot", "closeup shot", "close up shot", "cu shot"),
-    "중근접 (MCU)": ("medium close-up shot", "medium closeup shot", "mcu shot"),
-    "중경 (MS)": ("medium shot", "mid shot"),
-    "전신 (FS)": ("full-body shot", "full body shot", "full-length shot", "fs shot"),
-    "원경 (WS)": ("wide shot", "ws shot"),
-    "극원경 (EWS)": ("extreme wide shot", "extreme wide-shot", "ews shot"),
+    "극접 (ECU)": ("extreme close-up shot", "extreme closeup shot", "ecu shot",
+                   "극접", "extreme close-up"),
+    "근접 (CU)": ("close-up shot", "closeup shot", "close up shot", "cu shot",
+                  "근접"),
+    "중근접 (MCU)": ("medium close-up shot", "medium closeup shot", "mcu shot",
+                    "중근접", "medium close-up"),
+    "중경 (MS)": ("medium shot", "mid shot", "중경"),
+    "전신 (FS)": ("full-body shot", "full body shot", "full-length shot", "fs shot",
+                  "전신", "full body", "full-body"),
+    "원경 (WS)": ("wide shot", "ws shot", "원경"),
+    "극원경 (EWS)": ("extreme wide shot", "extreme wide-shot", "ews shot",
+                    "극원경", "extreme wide"),
 }
+
+
+def _longest_shot_label(text: str, exclude: str = "") -> str:
+    """텍스트에서 샷 구문을 찾되, 가장 길게(구체적으로) 일치한 라벨 하나를 반환한다.
+
+    왜(Why): 한글 라벨은 서로를 부분 문자열로 포함한다("중근접"⊃"근접",
+    "극원경"⊃"원경"). 단순 any() 순회는 짧은 라벨이 먼저 잡혀 오인한다.
+    최장 일치 원칙으로 구체 표현이 이기게 한다. exclude는 최종 확정 샷으로,
+    그 라벨의 표현은 무시한다(모순 아님).
+    """
+    s = (text or "").lower()
+    if not s:
+        return ""
+    best_label, best_len = "", 0
+    for label, phrases in TOPIC_SHOT_PHRASES.items():
+        if label == exclude:
+            continue
+        for p in phrases:
+            if p in s:
+                if len(p) > best_len:
+                    best_label, best_len = label, len(p)
+            elif p.endswith(" shot"):
+                bare = p[:-5]
+                if len(bare.split()) >= 2 and bare in s and len(bare) > best_len:
+                    best_label, best_len = label, len(bare)
+    return best_label
 
 LENS = {
     "14mm 초광각 (ultra-wide)": "shot on a 14mm ultra-wide lens, strong perspective drama",
@@ -188,35 +219,46 @@ PROVIDER_DEFAULT_MODELS = {
     "OpenAI": "gpt-4o-mini",
     "Anthropic": "claude-3-5-haiku-latest",
     "Ollama": "llama3.2",
+    "Gemini": "gemini-1.5-flash",
+    "OpenRouter": "google/gemini-flash-1.5",
+    "Groq": "llama-3.2-90b-vision-preview",
+    "DeepSeek": "deepseek-chat",
+    "Mistral": "pixtral-12b-2409",
 }
 
-_MODEL_PREFIX = {"OpenAI": ("gpt", "o1", "o3", "chatgpt"),
-                 "Anthropic": ("claude",)}
+_MODEL_PREFIX = {
+    "OpenAI": ("gpt", "o1", "o3", "chatgpt"),
+    "Anthropic": ("claude",),
+    "Gemini": ("gemini-",),
+}
 
 
 def resolve_model(provider: str, model: str) -> str:
     """provider와 어긋나는 모델명을 해당 provider 기본 모델로 교정한다.
 
     왜(Why): model 위젯 기본값은 gpt-4o-mini 하나뿐이라 provider를
-    Anthropic/Ollama로 바꿔도 잘못된 모델명이 전송되고, API 오류 후
-    조용히 규칙 폴백이 되어 'AI 판단'이 실제로는 규칙 결과로 나오는
+    Anthropic/Ollama 등으로 바꿔도 잘못된 모델명이 전송되고, API 오류 후
+    조용히 규칙 폰백이 되어 'AI 판단'이 실제로는 규칙 결과로 나오는
     문제가 있었다. 자유 모델명 호환을 위해 위젯은 STRING으로 유지하고
     전송 직전에 한 번만 교정한다.
     """
+    provider = provider or ""
     model = (model or "").strip()
     default = PROVIDER_DEFAULT_MODELS.get(provider, model)
     if not model:
         return default
-    if provider == "LM Studio":
-        # LM Studio는 qwen2.5-vl, llama-3.2, mistral 등 모델명이 다양해
-        # 접두사 검증이 불가능하다. 입력값을 그대로 쓰고, 비우면 llm_client가
-        # 자리표시자를 보내 현재 로드된 모델로 라우팅한다.
+    # LM Studio / OpenRouter는 모델명이 너무 다양해 접두사 검증이 불가능하다.
+    # 입력값을 그대로 쓰고, LM Studio는 비우면 llm_client가 자리표시자 처리.
+    # Custom (OpenAI 호환)도 사용자가 엔드포인트의 모델명을 직접 넣는다 —
+    # 비우면 llm_client가 명확한 안내와 함께 실패한다.
+    if provider in ("LM Studio", "OpenRouter") or provider.startswith("Custom"):
         return model
     low = model.lower()
-    if provider == "Ollama":
-        # gpt-/claude- 등 API 모델명은 Ollama 로컬 모델명이 될 수 없다.
+    # Ollama/Groq/DeepSeek/Mistral에 OpenAI/Anthropic 모델명이 그대로 전송되는
+    # 실수를 방지한다.
+    if provider in ("Ollama", "Groq", "DeepSeek", "Mistral"):
         if low.startswith(("gpt-", "claude-", "chatgpt")):
-            _log(f"[Camera Director] provider=Ollama에 API 모델명 '{model}' "
+            _log(f"[Camera Director] provider={provider}에 API 모델명 '{model}' "
                  f"→ '{default}'로 교정")
             return default
         return model
@@ -245,6 +287,115 @@ def _notify_llm_status(node_id, state: str) -> None:
                          {"node": str(node_id), "state": state})
     except Exception:
         pass
+
+
+def _scrub_api_key_from_prompt(prompt, unique_id) -> bool:
+    """서버 프롬프트 기록에서 이 노드 entry의 api_key만 지운다 (사진 메타데이터 안전).
+
+    왜(Why): SaveImage는 실행 프롬프트 원본 dict를 PNG 메타데이터에 그대로
+    박는다. 실행 시점엔 api_key가 이미 지역 변수로 resolve되어 있어 기록을
+    지워도 실행에 영향이 없다. 자기 unique_id entry만 건드려 같은 그래프의
+    다른 감독 노드 키와는 절대 간섭하지 않는다. 실패해도 실행은 계속된다.
+    """
+    try:
+        if not isinstance(prompt, dict) or unique_id is None:
+            return False
+        entry = prompt.get(str(unique_id))
+        if not isinstance(entry, dict):
+            return False
+        inputs = entry.get("inputs")
+        if not isinstance(inputs, dict):
+            return False
+        if inputs.get("api_key"):
+            inputs["api_key"] = ""
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _write_env_file_key(env_name: str, key: str) -> bool:
+    """루트 .env에 키 저장/삭제. key가 비면 해당 줄 삭제. 성공 여부 반환.
+
+    왜(Why): 다이얼로그 OK 시점의 의도(저장·삭제·교체)를 그대로 파일에
+    반영한다. 주석·순서는 보존하고 해당 제공자 줄만 갱신한다.
+    """
+    try:
+        if env_name not in set(llm_client._API_KEY_ENV.values()):
+            return False
+        key = (key or "").strip()
+        if key and (len(key) > 512 or "\n" in key or "\r" in key):
+            return False
+        path = llm_client._env_file_path()
+        if not path:
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            lines = []
+        out, found = [], False
+        for line in lines:
+            s = line.strip()
+            if s and not s.startswith("#") and "=" in s:
+                k, _, _v = s.partition("=")
+                if k.strip() == env_name:
+                    found = True
+                    if key:
+                        out.append(f"{env_name}={key}")
+                    continue
+            out.append(line)
+        if key and not found:
+            out.append(f"{env_name}={key}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(out) + ("\n" if out else ""))
+        return True
+    except (OSError, UnicodeError):
+        return False
+
+
+def _valid_api_key_payload(provider, key):
+    """다이얼로그 동기화 페이로드 검증. (env 이름, 키) 또는 (None, None).
+
+    왜(Why): 비문자열 JSON(숫자·객체)이 str() 강제 변환으로 그대로 .env에
+    기록되는 것을 막는다. Custom/로컬 제공자는 env 매핑이 없어 거부된다.
+    """
+    try:
+        if not isinstance(provider, str) or not isinstance(key, str):
+            return None, None
+        env_name = llm_client._API_KEY_ENV.get(provider.strip())
+        if not env_name:
+            return None, None
+        return env_name, key
+    except Exception:
+        return None, None
+
+
+try:
+    from server import PromptServer as _PromptServer
+
+    @_PromptServer.instance.routes.post("/gori_api_key")
+    async def _gori_api_key(request):
+        """다이얼로그 OK 의도를 루트 .env에 반영 (저장·삭제·교체)."""
+        from aiohttp import web as _web
+        try:
+            data = await request.json()
+        except Exception:
+            return _web.json_response({"ok": False}, status=400)
+        try:
+            data = data or {}
+            env_name, key = _valid_api_key_payload(
+                data.get("provider", ""), data.get("key", ""))
+            ok = bool(env_name) and _write_env_file_key(env_name, key)
+            if ok:
+                _log(f"루트 .env에 {str(data.get('provider', '')).strip()} 키 "
+                     f"{'삭제' if not key.strip() else '저장'}")
+            return _web.json_response({"ok": ok})
+        except Exception:
+            return _web.json_response({"ok": False})
+except Exception:
+    # 서버 밖(테스트·스탠드얼론)에서는 라우트 없이 동작한다.
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -330,12 +481,13 @@ def apply_image_hints(cam: dict, locked: set, metrics: dict) -> dict:
     return cam
 
 def topic_shot_label(topic: str) -> str:
-    """주제에 사용자가 이미 카메라 샷을 명시했다면 해당 라벨을 반환한다."""
-    t = (topic or "").lower()
-    for label, phrases in TOPIC_SHOT_PHRASES.items():
-        if any(phrase in t for phrase in phrases):
-            return label
-    return ""
+    """주제에 사용자가 이미 카메라 샷을 명시했다면 해당 라벨을 반환한다.
+
+    (Why: mismatch 경고와 동일 기준으로 감지해야 한다. 경고는 뜨는데 샷 확정은
+    못 하는 상황 — 사용자가 "전신/풀바디"를 명시했는데 규칙이 근접으로 판정해
+    스스로 모순을 경고하는 사례가 있었다. 최장 일치로 "중근접"⊃"근접" 오인도 방지.)
+    """
+    return _longest_shot_label(topic)
 
 
 def rules(topic: str):
@@ -568,11 +720,17 @@ def _is_human_subject(text: str) -> bool:
 
 
 def body_proportion_guard(image_count: int, topic: str, image_labels=None) -> str:
-    """이미지 reference가 있는 사람/인물 장면에서 원본 골반/힙 비율을 유지한다."""
+    """이미지 reference가 있는 사람/인물 장면에서 원본 골반/힙 비율을 유지한다.
+
+    identity/body 참조는 계획(plan)이 선출한 주 피사체로 둔다 -- 왜(Why):
+    첫 연결이 사물(핸드백 등)이면 사물 비율을 신체 비율로 복제하는 오동작이
+    생긴다. 실제 인물 슬롯을 참조해야 한다.
+    """
     if image_count <= 0 or not _is_human_subject(topic):
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
-    first = labels[0] if labels else "1"
+    plan = _person_object_plan(topic, labels)
+    first = str(plan["main"])
     return (f"face and body preservation guard: use reference image {first} as the identity and body reference, "
             f"{FACE_IDENTITY_GUARD}, {SKIN_COLOR_GUARD}, "
             "preserve the original body proportions from the main human reference image, "
@@ -599,11 +757,16 @@ def build_identity_anchor(image_count: int, topic: str, image_labels=None) -> st
     body proportions, anatomy, or negative conditioning. Skin realism is
     included because plastic skin comes from photographic rendering, which
     this camera node can direct.
+
+    identity 소스는 역할 계획(plan)이 선출한 주 피사체로 둔다 -- 왜(Why):
+    첫 연결이 사물(핸드백 등)이면 사물을 인물 identity 소스로 지목하는
+    오동작이 생긴다(정밀 검토 발견 #1).
     """
     if image_count <= 0 or not _is_human_subject(topic):
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
-    first = labels[0] if labels else "1"
+    plan = _person_object_plan(topic, labels)
+    first = str(plan["main"])
     return (f"Use reference image {first} as the exact identity source for the main person. "
             "Preserve the same facial identity and same facial structure, age, ethnicity, hairstyle, "
             "and clothing unless the instruction explicitly changes them. "
@@ -648,12 +811,23 @@ def _is_multi_person_request(text: str) -> bool:
 
 
 def build_single_person_anchor(image_count: int, topic: str, image_labels=None) -> str:
-    """Prevent a single reference subject from being expanded into a duplicate."""
+    """Prevent a single reference subject from being expanded into a duplicate.
+
+    주 피사체도 역할 계획(plan)이 선출한다 -- 왜(Why): 첫 연결이 사물이고
+    유일한 인물이 다른 슬롯에 있으면(1번 핸드백 + 2번 여성) 구버전은
+    "유일 인물인데도 억제 문구가 아예 안 붙었다" -- plan 주체로 발화하면
+    올바른 슬롯으로 붙는다(정밀 검토 발견 #2). plan에 추가 인물이 있으면
+    (duo 이상) 기존처럼 억제한다.
+    """
     if (image_count <= 0 or not _is_human_subject(topic)
-            or _is_multi_person_request(topic) or _is_second_person_request(topic)
+            or _is_multi_person_request(topic)
             or _is_reflection_scene(topic)):
         return ""
-    first = str((image_labels or ["1"])[0])
+    labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
+    plan = _person_object_plan(topic, labels)
+    if plan["persons"]:
+        return ""
+    first = str(plan["main"])
     return (f"Exactly one main person in the output, using reference image {first} as the only subject. "
             "Single-person composition. No additional person, copy, or mirrored companion.")
 
@@ -662,10 +836,13 @@ SECOND_PERSON_PATTERNS = (
     # image/이미지 표기 혼용 대응: "Image 3의 남성" 같은 한영 혼합도 잡는다.
     # 주의: 한글 조사(의/에)는 \w 취급이라 2\b 경계가 안 맞으므로 (?![0-9])를 쓴다.
     # 2번 고정이 아니라 2~10번 슬롯을 캡처한다.
-    r"\b(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9]).{0,40}\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b",
-    r"\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b.{0,40}\b(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
-    r"(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9]).{0,20}(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)",
-    r"(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람).{0,20}(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
+    # 비탐욕 창 + 절 차단: 창이 쉼표/식별자를 넘어 다음 슬롯의 단어를 잘못 잡거나
+    # (이미지 2번 핸드백, 이미지 3번 남성 → 3번 누락/2번 오검출)
+    # finditer의 비중복 소비 때문에 건너뛰는 후보가 생기는 것을 동시에 막는다.
+    r"\b(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])[^,，.。;；!！?？\n]{0,40}?\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b",
+    r"\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b[^,，.。;；!！?？\n]{0,40}?\b(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
+    r"(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])[^,，.。;；!！?？\n]{0,20}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)",
+    r"(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)[^,，.。;；!！?？\n]{0,20}?(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
     r"두\s*번째\s*(?:사람|남자|남성|여자|여성|인물)",
     r"second\s+(?:person|man|woman|male|female)",
 )
@@ -675,15 +852,100 @@ _NUMBER_WORDS = {2: "Two", 3: "Three", 4: "Four", 5: "Five",
 _ORDINAL_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
                   6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
 
+# 사물/소품 역할 어휘. 의상 계열(옷·의상·원피스 등)은 일부러 넣지 않았다 --
+# 의상 참조에는 전용 가드(OUTFIT_GUARD·OUTFIT_RELATION_PATTERNS)가 있어
+# 이 분류기가 겹치면 의상 슬롯이 "소품"으로 오인될 수 있다.
+# 모호한 짧은 단어(검·총·잔·병)는 뺐다 -- 왜(Why): "검은 머리"의 검은이
+# 검(sword)으로 오판되는 오검출이 실측 확인됐다(정밀 검토 발견 #4).
+_KO_OBJECT_WORDS = (
+    "가방|핸드백|백팩|에코백|숄더백|클러치백|손목시계|시계|목걸이|반지|귀걸이"
+    "|안경|선글라스|모자|벨트|스카프|목도리|장갑|우산|책|컵"
+    "|방패|꽃다발|소품|오브젝트|제품|물건|구급상자|마네킹"
+)
+_EN_OBJECT_WORDS = (
+    "bag|handbag|backpack|purse|watch|wristwatch|necklace|ring|earrings"
+    "|glasses|sunglasses|hat|cap|belt|scarf|gloves|umbrella|book"
+    "|prop|object|product"
+)
+OBJECT_WORDS = _KO_OBJECT_WORDS + "|" + _EN_OBJECT_WORDS
+
+# 어휘가 앞 → 슬롯이 뒤인 순서의 창 차단. 사람 단어가 창 안에 있으면 그 슬롯은
+# 사람 절에 속한다 -- 왜(Why): "원피스로 갈아입은 여성과 이미지 3"에서 원피스가
+# 3번(남성)을 옷 슬롯으로 침범하는 오검출이 실측 확인됐다(정밀 검토 R23).
+_TEMPERED_GAP = (r"(?:(?!남성|남자|여성|여자|인물|사람"
+                 r"|man|woman|male|female|person)[^,，.。;；!！?？\n]){0,24}?")
+
+# 의상 역할 어휘 + 슬롯 검출. 왜(Why): outfit 게이트가 "의상 의도 = 모든 duo 소멸"
+# (구버전)이 아니라 "의상 슬롯만 제외"로 작동하려면 슬롯 번호를 잡아야 한다
+# (정밀 검토 발견 #3).
+_KO_CLOTHING_WORDS = (
+    "의상|옷|패션|드레스|셔츠|블라우스|바지|원피스|코트|아우터|재킷|자켓|슈트"
+    "|정장|한복|웨딩드레스|구두|신발"
+)
+_EN_CLOTHING_WORDS = "outfit|clothing|wardrobe|dress|shirt|coat|garment|apparel"
+CLOTHING_WORDS = _KO_CLOTHING_WORDS + "|" + _EN_CLOTHING_WORDS
+
+
+def _role_patterns(words: str, en_words: str):
+    """역할(사물/의상) 슬롯 검출 4패턴 골격. 단어만 주입한다.
+
+    왜(Why): 사물·의상 패턴은 절 차단 규칙이 동일하다. 형태:
+    1) "이미지 2의 핸드백" (조사 혼용 대응)
+    2) "핸드백 이미지 3" — 문장부호 차단(쉼표 너머 오인 방지) + 사람 단어
+       차단(창 안 사람 단어가 있으면 그 슬롯은 사람 절 소속)
+    3) 영문 "bag as image 2"형, 4) 영문 "image 3 shows a book"형.
+    """
+    return (
+        r"(?:image|img|이미지)\s*_?\s*(\d+)(?![0-9])\s*(?:번)?\s*(?:의|에|에서)?\s*(?:" + words + r")",
+        r"(?:" + words + r")" + _TEMPERED_GAP + r"(?:image|img|이미지)\s*_?\s*(\d+)(?![0-9])",
+        r"\b(?:" + en_words + r")\b" + _TEMPERED_GAP + r"\b(?:from|in|on|as|using|reference)\s+(?:reference\s+)?(?:image|img)\s*_?\s*(\d+)(?![0-9])",
+        r"\b(?:image|img)\s*_?\s*(\d+)(?![0-9])\b" + _TEMPERED_GAP + r"\b(?:is|as|shows|contains)\s+(?:a|an|the)?\s*(?:" + en_words + r")\b",
+    )
+
+
+OBJECT_ROLE_PATTERNS = _role_patterns(OBJECT_WORDS, _EN_OBJECT_WORDS)
+CLOTHING_ROLE_PATTERNS = _role_patterns(CLOTHING_WORDS, _EN_CLOTHING_WORDS)
+
+
+def _collect_role_slots(text: str, patterns) -> set:
+    """패턴 집합에서 번호(1~10) 수집. 사물·의상 슬롯 검출 공용 루프."""
+    t = (text or "").lower()
+    slots = set()
+    for pattern in patterns:
+        try:
+            for m in re.finditer(pattern, t):
+                groups = [g for g in m.groups() if g]
+                if not groups:
+                    continue
+                try:
+                    n = int(groups[0])
+                except ValueError:
+                    continue
+                if 1 <= n <= 10:
+                    slots.add(n)
+        except (ValueError, re.error):
+            continue
+    return slots
+
+
+def _clothing_role_slots(text: str) -> set:
+    """의상 역할이 명시된 번호(1~10) 집합. 없으면 set().
+
+    왜(Why): _second_person_slots의 outfit 게이트가 의상 슬롯만 정밀하게
+    제외하도록 (구버전은 의상 의도만 있으면 모든 인물 번호를 지웠다).
+    """
+    return _collect_role_slots(text, CLOTHING_ROLE_PATTERNS)
+
 
 def _second_person_slots(text: str) -> list:
     """인물 역할이 명시된 보조 슬롯(2~10) 번호 목록. 없으면 [].
 
-    의상 교체처럼 보조 슬롯이 사물 역할이면 duo로 오인하지 않도록
-    의상 의도가 있을 때는 빈 목록을 반환한다.
+    의상 교체 의도가 있으면 "의상 슬롯"만 인물 번호에서 제외한다 -- 왜(Why):
+    의상 의도만 보고 모든 인물 번호를 지우면(구버전 동작) "2번 원피스로 갈아입기
+    + 3번 남성 마주보기" 같은 혼합 씬에서 남성 duo 보존이 통째로 죽었다.
+    순수 의상 실행("2번 원피스를 여성에게 입히기")은 의상 슬롯만 지우면
+    결과가 구버전과 동일하다.
     """
-    if _is_outfit_transfer(text):
-        return []
     t = (text or "").lower()
     slots = set()
     for pattern in SECOND_PERSON_PATTERNS:
@@ -696,6 +958,8 @@ def _second_person_slots(text: str) -> list:
                     slots.add(2)
         except (ValueError, re.error):
             continue
+    if _is_outfit_transfer(text):
+        slots -= _clothing_role_slots(text)
     return sorted(slots)
 
 
@@ -704,22 +968,78 @@ def _is_second_person_request(text: str) -> bool:
     return bool(_second_person_slots(text))
 
 
-def _secondary_role_labels(labels) -> list:
-    """보조 역할 목록(첫 슬롯 제외)에서 9·10번(외양 참조 전용 슬롯)을 제외한다.
+def _secondary_role_labels(labels, main=None, persons=()):
+    """보조 역할 목록(주 슬롯·추가 인물 제외)에서 9·10번(외양 참조 전용 슬롯)을 제외한다.
 
     왜(Why): 9·10번의 역할은 외양 참조 가드(APPEARANCE_REF_POSITIVE / LLM
     image_note)가 전담한다. 일반 보조 역할 목록("배경·의상·소품…")에 9·10번이
     섞이면 외양 참조 지시와 충돌해 LLM·생성 모델이 외양을 무시하게 된다.
+
+    main을 넘기면 주 피사체를 명시로 제외한다 -- 왜(Why): 첫 연결이 반드시
+    주 피사체인 것은 아니다(첫 연결이 핸드백 + 다음이 여성). 넘기지 않으면
+    기존 규약(첫 식별 = 주 피사체)대로 첫 슬롯을 제외한다. persons는
+    추가 인물로 보존할 번호 -- 추가 인물은 배경/소품 역할 목록에 섞이면 안 된다.
     """
-    result = []
-    for x in (labels or [])[1:]:
+    try:
+        main_n = int(str(main)) if main is not None else int(str((labels or ["1"])[0]))
+    except (ValueError, TypeError, IndexError):
+        main_n = None
+    person_ns = set()
+    for p in (persons or ()):
         try:
-            if int(str(x)) in (9, 10):
+            person_ns.add(int(str(p)))
+        except (ValueError, TypeError):
+            continue
+    result = []
+    for x in (labels or []):
+        try:
+            n = int(str(x))
+        except (ValueError, TypeError):
+            n = None
+        if n is not None:
+            if n in (9, 10):
                 continue
-        except ValueError:
-            pass
+            if n in person_ns:
+                continue
+            if main_n is not None and n == main_n:
+                continue
         result.append(str(x))
     return result
+
+
+def _object_role_slots(text: str) -> set:
+    """사물/소품 역할이 명시된 번호(1~10) 집합. 없으면 set().
+
+    왜(Why): "이미지 2의 핸드백" 같은 사물 지시가 인물 지시와 섞이는 씬에서
+    사물 슬롯을 사람으로 오인하는 것을 막는다(다중 인물 자동 분류).
+    """
+    return _collect_role_slots(text, OBJECT_ROLE_PATTERNS)
+
+
+def _person_object_plan(text, labels):
+    """연결 슬롯의 역할을 토픽 명시에서 분류한다.
+
+    {"main": 주 피사체 번호, "persons": 추가 인물 번호, "objects": 사물 번호}
+
+    왜(Why): 1번이 반드시 주 피사체인 것은 아니라는 실행(1번 핸드백 + 2번 여성)
+    을 지원한다. 명시 근거가 없으면 기존 규약(첫 식별 = 주 피사체)을 유지해
+    기존 실행과 결과가 완전히 동일하다. 9·10번(외양 참조 전용)은
+    인물·사물 번호에서 모두 제외한다 -- 외양 참조는 인물도 사물도 아니다.
+    """
+    try:
+        label_ns = [int(str(l)) for l in (labels or [])]
+    except (ValueError, TypeError):
+        label_ns = []
+    objects = _object_role_slots(text) & set(label_ns) - {9, 10}
+    persons = (set(_second_person_slots(text)) & set(label_ns)
+               - objects - {9, 10})
+    main = label_ns[0] if label_ns else 1
+    # 첫 식별이 사물로 명시됐고 인물 후보가 있으면 첫 인물이 주 피사체가 된다.
+    # 근거 없는 번호로 넘기지 않는다 -- 근거 없으면 기존 규약 유지.
+    if main in objects and persons:
+        main = min(persons)
+        persons = persons - {main}
+    return {"main": main, "persons": sorted(persons), "objects": sorted(objects)}
 
 
 def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> str:
@@ -729,33 +1049,40 @@ def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> 
     있으면 모델이 두 신체를 하나로 녹이거나 팔다리를 뒤섞을 수 있어, 양방향
     (남성→여성, 여성→남성) 융합을 막는 분리 문구가 필요하기 때문이다.
     standalone 경로는 reference_guard의 duo 분기가 이 함수를 그대로 쓴다.
+    사물 명시 슬롯(핸드백·시계 등)이 있으면 그 정체성을 살리지 않고
+    "사물로만" 제한하는 문구를 덧붙인다 -- 왜(Why): duo 앵커만 던지면
+    사물 슬롯이 사람으로 변하거나 복제될 수 있다.
     """
     if image_count < 2:
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
-    slots = _second_person_slots(topic)
-    wanted = [s for s in slots
-              if str(s) in labels and str(s) != labels[0]
-              and int(str(s)) not in (9, 10)]
-    if (not wanted and slots and len(labels) >= 2
-            and int(labels[1]) not in (9, 10)):
+    plan = _person_object_plan(topic, labels)
+    main, wanted, objects = plan["main"], plan["persons"], plan["objects"]
+    if (not wanted and _second_person_slots(topic) and len(labels) >= 2
+            and int(labels[1]) not in (9, 10) and int(labels[1]) not in objects
+            and int(labels[1]) != main):
         # "두 번째 사람"처럼 슬롯 번호 없이 지칭하면 두 번째 연결 이미지를 쓴다.
-        # 9·10번은 외양 참조 전용이므로 인물 지정 대상에서 제외한다.
+        # 9·10번은 외양 참조 전용, 사물 명시 슬롯은 사물, 이미 주 피사체인 슬롯은
+        # 중복 지정 대상이 아니다.
         wanted = [int(labels[1])]
-    persons = [labels[0]] + [str(s) for s in wanted]
+    persons = [str(main)] + [str(s) for s in wanted if int(str(s)) != main]
     if len(persons) < 2 or not _is_second_person_request(topic):
         return ""
     count_word = _NUMBER_WORDS.get(len(persons), str(len(persons)))
     roles = " and ".join(
         f"person {_ORDINAL_WORDS.get(i + 1, str(i + 1))} from reference image {slot}"
         for i, slot in enumerate(persons))
-    return (f"{count_word} main people in the output: {roles}. "
-            "Preserve each person's facial identity, hairstyle, and outfit. "
-            "Keep each person's body fully separate with its own torso, two arms, and two legs, "
-            "no merged or fused bodies, no extra limbs, no limbs swapping between people, "
-            "no body parts blending into the other person, "
-            "maintain clear personal boundaries unless physical contact is explicitly requested. "
-            "No extra people, no cloned faces.")
+    anchor = (f"{count_word} main people in the output: {roles}. "
+              "Preserve each person's facial identity, hairstyle, and outfit. "
+              "Keep each person's body fully separate with its own torso, two arms, and two legs, "
+              "no merged or fused bodies, no extra limbs, no limbs swapping between people, "
+              "no body parts blending into the other person, "
+              "maintain clear personal boundaries unless physical contact is explicitly requested. "
+              "No extra people, no cloned faces.")
+    if objects:
+        anchor += (" Use reference image(s) " + ", ".join(str(s) for s in objects)
+                   + " only as props/objects, never as people.")
+    return anchor
 
 
 
@@ -768,22 +1095,25 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
     if image_count <= 0:
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
-    first = labels[0] if labels else "1"
+    plan = _person_object_plan(topic, labels)
+    main = str(plan["main"])
     if image_count == 1:
-        return (f"preserve the same subject identity as reference image {first}, "
+        return (f"preserve the same subject identity as reference image {main}, "
                 "same facial structure, same hairstyle, same outfit, "
                 "same body proportions, same overall color identity")
     duo = build_duo_person_anchor(image_count, topic, image_labels=image_labels)
     if duo:
         # 두 번째 reference가 인물 역할이면 복제 금지 대신 두 정체성 보존을 둔다.
+        # 사물 명시 슬롯의 소품 방어는 duo 앵커가 함께 전달한다.
         return duo
-    secondary = _secondary_role_labels(labels)
-    head = f"use reference image {first} as the only main human identity, "
+    secondary = _secondary_role_labels(labels, main=plan["main"],
+                                       persons=plan["persons"])
+    head = f"use reference image {main} as the only main human identity, "
     if secondary:
         head += ("use reference image(s) " + ", ".join(secondary)
                  + " only for their explicitly requested roles "
-                 "such as background, outfit, prop, product, style, lighting, "
-                 "composition, or mood, ")
+                 "such as background, outfit, prop, product, style, "
+                 "lighting, composition, or mood, ")
     return head + (
         "do not duplicate the main subject, face, body, outfit, product, or background subject, "
         "do not turn secondary references into extra people, animals, products, or props "
@@ -799,12 +1129,15 @@ def build_secondary_role_anchor(image_count: int, topic: str, image_labels=None)
     왜(Why): prompt_in 표준 경로의 positive_text에는 identity/single-person
     anchor만 있고, 보조 reference(배경/의상/소품)의 역할 제한과 주체 복제
     금지 문구가 없었다. standalone 경로의 장문 가드 대신 1문장으로 둔다.
+    주 피사체는 계획(plan)이 선출한다 -- 첫 연결이 사물이면 다음 인물이 주체.
     """
     if image_count < 2:
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
-    secondary = _secondary_role_labels(labels)
-    head = f"Use reference image {labels[0]} as the only main subject, "
+    plan = _person_object_plan(topic, labels)
+    secondary = _secondary_role_labels(labels, main=plan["main"],
+                                       persons=plan["persons"])
+    head = f"Use reference image {plan['main']} as the only main subject, "
     if secondary:
         head += ("use reference image(s) " + ", ".join(secondary)
                  + " only for explicitly requested roles "
@@ -904,16 +1237,30 @@ def build_camera_conditioning(cam: dict) -> str:
     return ". ".join(part for part in parts if part) + "."
 
 
-def build_camera_negative(cam: dict, prevent_duplicates: bool = False) -> str:
-    """Build camera/video failure modes only, without identity or body guards."""
-    neg = ["warped geometry, distorted perspective, broken framing"]
+def _camera_failure_modes(cam: dict, topic: str = "") -> list:
+    """렌즈·모션·노출 분기 negative 조각 (공용). 왜(Why): standalone과
+    Skills negative가 같은 6분기를 따로 들고 있어 한쪽만 바뀌는 퇴행이
+    있었다. 순서는 양쪽 기존 출력과 동일하게 유지한다."""
+    out = []
     lens = cam.get("lens", "")
     if "초광각" in lens:
-        neg.append("unwanted wide-angle distortion")
+        out.append("unwanted wide-angle distortion")
+    if "f/1.4" in lens:
+        out.append("busy distracting background")
     if "매크로" in lens:
-        neg.append("muddy detail")
+        out.append("soft detail, muddy texture")
     if cam.get("motion") not in ("없음 (none)", "", None):
-        neg.append("shaky jitter, motion smear, frame warping")
+        out.append("shaky jitter, motion smear, frame warping")
+    if _is_nudity_request(topic or ""):
+        out.append("deformed intimate anatomy, blurred anatomy, featureless crotch area")
+    return out
+
+
+def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
+                          topic: str = "") -> str:
+    """Build camera/video failure modes only, without identity or body guards."""
+    neg = ["warped geometry, distorted perspective, broken framing"]
+    neg.extend(_camera_failure_modes(cam, topic))
     if cam.get("grade") == "느와르 (noir)":
         neg.append("unwanted color cast")
     if prevent_duplicates:
@@ -967,37 +1314,88 @@ APPEARANCE_REF_POSITIVE = (
     "reference's appearance onto a different body region. Do not include the "
     "reference crops themselves in the image, no panel, no collage, no split view."
 )
-APPEARANCE_REF_NEGATIVE = "collage, inset panel, split view, split screen, duplicated crop"
+APPEARANCE_REF_NEGATIVE = "collage, inset panel, split view, split screen, duplicated crop, clumped hair patches, sticker-like body hair, floating hair decals"
+
+# 외양 참조(9·10번) 실행의 체모 실사감 문구. (Why: 음모 등 체모가 뭉치거나
+# 피부 위에 스티커처럼 떠 있는 실측 사례 — 모근에서 자라는 입체 디테일,
+# 굵기 불균일, 신체 곡선을 따라 눕는 물리감을 명시해야 자연스럽다.
+# appearance_ref 실행에만 붙는 사용자 전용 기능이라 README 비공개.)
+APPEARANCE_HAIR_REALISM_POSITIVE = (
+    "natural realistic body hair detail: individual strands growing from the "
+    "skin with visible follicle roots, tapering tips, slightly irregular "
+    "thickness, hairs lying and bending along the body's curves, layered "
+    "strands creating natural depth, soft density gradient — no clumped "
+    "patches, no sticker-like or floating hair"
+)
+
+
+# 인물 신체 발란스 가드. (Why: 전신·신체 중심 장면에서 팔/다리 길이 불균형,
+# 머리-몸 비율 붕괴, 부위별 스케일 불일치가 자주 발생. 인물 주제면 참조 이미지
+# 유무와 무관하게 항상 첨부한다 — 비율 문구는 장면 훼손이 없어 상시 붙여도 안전.)
+BODY_BALANCE_POSITIVE = (
+    "body balance: natural human proportions, head-to-body ratio consistent "
+    "with a real person, arms and legs of even realistic length, natural "
+    "shoulder-hip line, relaxed upright posture, all body parts at one "
+    "consistent scale"
+)
+BODY_BALANCE_NEGATIVE = ("disproportionate limbs, elongated arms, shortened legs, "
+                         "oversized head, twisted torso, body parts of different scale")
+
+# 캐릭터 시트 참조 가드. (Why: 참조 이미지가 캐릭터 시트(여러 각도 동일 인물
+# 나열)일 때 시트 레이아웃 자체(격자·라벨·멀티패널)가 출력으로 복제되는 실측
+# 사례 — 시트는 신원 소스로만 쓰고 출력은 요청된 카메라 구도 한 컷이어야 한다.)
+CHARACTER_SHEET_TOPICS = ("캐릭터 시트", "캐릭터시트", "character sheet",
+                          "턴어라운드", "turnaround", "삼면도", "다면도",
+                          "multiple angles of the same")
+CHARACTER_SHEET_NEGATIVE = ("grid layout, contact sheet, sprite sheet, "
+                            "multi-panel layout, annotated sheet, "
+                            "character sheet layout in output")
+
+
+def _is_character_sheet_request(text: str) -> bool:
+    """캐릭터 시트 참조 의도가 명시됐는지 판별한다."""
+    t = (text or "").lower()
+    return any(keyword in t for keyword in CHARACTER_SHEET_TOPICS)
+
+
+def character_sheet_guard(image_count: int, topic: str, image_labels=None) -> str:
+    """캐릭터 시트 참조 가드 — 시트는 신원 소스, 출력은 카메라 구도 한 컷."""
+    if image_count <= 0 or not _is_character_sheet_request(topic):
+        return ""
+    labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
+    first = labels[0] if labels else "1"
+    return (f"character sheet reference: reference image {first} is a character "
+            "sheet showing the same person from several angles — every view is "
+            "one identical person (same face, hairstyle, body type, and outfit). "
+            "Use the sheet for identity consistency and frame the output by the "
+            "requested camera composition. Do not copy the sheet layout: no "
+            "grid, no borders, no labels, no multi-panel arrangement; unless "
+            "multiple views are explicitly requested, render one single scene view.")
 
 
 def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str = "",
                    hint_defense: bool = False, mix_guard: bool = False,
-                   appearance_ref: bool = False) -> str:
+                   appearance_ref: bool = False, body_balance: bool = False,
+                   character_sheet: bool = False) -> str:
     neg = ["blurry, soft focus, jpeg artifacts, watermark, signature, text, logo",
            "warped geometry, distorted perspective, broken framing",
            "flat lighting, harsh unflattering light",
            "washed out colors, over-saturated colors",
            NEGATIVE_ANATOMY_GUARD,
            NEGATIVE_COLOR_CONTAMINATION_GUARD]
-    lens = cam.get("lens", "")
-    if "초광각" in lens:
-        neg.append("unwanted wide-angle distortion")
-    if "f/1.4" in lens:
-        neg.append("busy distracting background")
-    if "매크로" in lens:
-        neg.append("soft detail, muddy texture")
-    if cam.get("motion") not in ("없음 (none)", "", None):
-        neg.append("shaky jitter, motion smear, frame warping")
+    neg.extend(_camera_failure_modes(cam, topic))
     if cam.get("grade") == "느와르 (noir)":
         neg.append("color tint")
-    if _is_nudity_request(topic or ""):
-        neg.append("deformed intimate anatomy, blurred anatomy, featureless crotch area")
     if hint_defense:
         neg.append(HINT_DEFENSE_NEGATIVE)
     if mix_guard:
         neg.append(MIX_GUARD_NEGATIVE)
     if appearance_ref:
         neg.append(APPEARANCE_REF_NEGATIVE)
+    if body_balance:
+        neg.append(BODY_BALANCE_NEGATIVE)
+    if character_sheet:
+        neg.append(CHARACTER_SHEET_NEGATIVE)
     for src in (llm_extra, extra):
         if src and src.strip():
             neg.append(src.strip())
@@ -1077,21 +1475,14 @@ def scene_camera_mismatch(scene: str, camera: dict) -> str | None:
     (Why: 장면 prose는 LLM이 쓰고 카메라 블록은 라벨 기반으로 조립되어,
      LLM이 prose에 다른 샷을 적으면 최종 프롬프트에 모순이 실린 실측 사례가
      있었다. 자동 교정은 오검출 리스크가 커서 로그로만 알린다.)
+    topic_shot_label과 동일 최장 일치 기준을 쓴다 — 경고 기준과 샷 확정 기준이
+    어긋나면 "경고만 뜨고 모순은 그대로"가 되기 때문이다.
     """
-    s = (scene or "").lower()
-    if not s:
-        return None
-    final_shot = camera.get("shot")
-    for label, phrases in TOPIC_SHOT_PHRASES.items():
-        if label == final_shot:
-            continue
-        for p in phrases:
-            bare = p[:-5] if p.endswith(" shot") else p
-            # 2단어 이상 구체 구문만 술어 없이도 인정 — "close-up" 같은 1단어
-            # 축약은 MCU/EWS와 겹쳐 오검출되므로 제외한다.
-            if p in s or (bare != p and len(bare.split()) >= 2 and bare in s):
-                return (f"장면 문장에 '{label}' 표현이 있는데 최종 shot은 "
-                        f"'{final_shot}' — 프롬프트가 모순될 수 있음")
+    other = _longest_shot_label(scene, exclude=camera.get("shot") or "")
+    if other:
+        final_shot = camera.get("shot")
+        return (f"장면 문장에 '{other}' 표현이 있는데 최종 shot은 "
+                f"'{final_shot}' — 프롬프트가 모순될 수 있음")
     return None
 
 
@@ -1132,10 +1523,15 @@ class CameraDirector:
             "optional": {
                 "prompt_in": ("STRING", {"forceInput": True}),
                 "image": ("IMAGE",),
-                "provider": (["OpenAI", "Anthropic", "Ollama", "LM Studio"],
+                "provider": (["OpenAI", "Anthropic", "Gemini", "OpenRouter", "Groq", "DeepSeek", "Mistral", "Ollama", "LM Studio", "Custom (OpenAI 호환)"],
                              {"default": "OpenAI"}),
                 "model": ("STRING", {"default": "gpt-4o-mini"}),
                 "api_key": ("STRING", {"default": ""}),
+                # Custom (OpenAI 호환) 제공자 전용 Base URL. 예:
+                # https://api.example.com/v1 — /chat/completions는 자동으로 붙는다.
+                # Custom이 아닌 제공자에서는 무시된다.
+                # label: 프론트엔드 좌측 라벨 표시용 (model/api_key 글자와 동일 위치)
+                "custom_base_url": ("STRING", {"default": "", "label": "URL"}),
                 "extra_negative": ("STRING", {"default": "", "multiline": True}),
                 # 위젯 순서 = 노드 하단 순서. 지시 위젯은 노드 맨 아래에 둔다.
                 # 겉으로는 평범한 지시 위젯이지만, 입력값은 필터 없이 LLM에
@@ -1148,7 +1544,9 @@ class CameraDirector:
             },
             # unique_id는 이 서버에서 hidden 입력으로만 주입된다(함수 시그니처
             # 자동 주입 없음) — LLM 상태 표시등이 노드를 식별하는 데 필요.
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            # prompt는 서버 실행 기록 원본 — 사진 메타데이터에 박히기 전
+            # 이 노드의 api_key만 제거한다(_scrub_api_key_from_prompt).
+            "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
     # ----- 값 정규화 -------------------------------------------------------
@@ -1190,8 +1588,13 @@ class CameraDirector:
     def run(self, topic, preset, automation, shot, lens, angle, composition,
             lighting, grade, motion, speed, amplitude,
             prompt_in=None, provider="OpenAI", model="gpt-4o-mini", api_key="",
-            extra_negative="", image=None, image_list=None, image_items=None,
-            llm_hint="", unique_id=None):
+            custom_base_url="", extra_negative="", image=None,
+            image_list=None, image_items=None, llm_hint="", unique_id=None,
+            prompt=None):
+        # 실행 기록에서 자기 api_key를 먼저 제거한다. api_key 인자는 이미
+        # 바인딩되어 실행에 쓰이므로 기록 제거와 무관하게 정상 동작한다.
+        if _scrub_api_key_from_prompt(prompt, unique_id):
+            _log("사진 메타데이터 안전: 실행 기록의 api_key 제거")
         # 프롬프트 진입점: 선 연결(prompt_in)이 있으면 우선, 없으면 topic 칸
         external = (prompt_in or "").strip()
         if external:
@@ -1271,19 +1674,37 @@ class CameraDirector:
                                                   ensure_ascii=False, sort_keys=True))
                 image_note = ""
                 if converted_labels:
-                    first_label = converted_labels[0]
+                    # 다중 인물 자동 분류: 토픽 명시(인물/사물)로 역할을 나눈다.
+                    # 왜(Why): 첫 연결이 반드시 주 피사체인 것은 아니다 -- 첫 연결이
+                    # 핸드백 + 다음이 여성이면 여성이 주 피사체여야 하고, 사물 명시
+                    # 슬롯은 사람으로 변하지 않도록 제한해야 한다.
+                    plan = _person_object_plan(topic, converted_labels)
+                    main_label = plan["main"]
                     if len(converted_labels) == 1:
-                        image_note = (f"\nReference image {first_label} is attached. Prefer keeping its existing "
+                        image_note = (f"\nReference image {main_label} is attached. Prefer keeping its existing "
                                       "lighting/grade (do not relight it); only fill unset items (marked AUTO).")
                     else:
                         image_note = (f"\nReference images {', '.join(str(x) for x in converted_labels)} are attached as references. "
-                                      f"Use reference image {first_label} as the only main human identity. ")
-                        secondary = _secondary_role_labels(converted_labels)
+                                      f"Use reference image {main_label} as the only main human identity. ")
+                        secondary = _secondary_role_labels(
+                            converted_labels, main=main_label,
+                            persons=plan["persons"])
                         if secondary:
                             image_note += ("Use reference image(s) " + ", ".join(secondary)
                                            + " only for explicitly requested roles "
                                            "such as background, outfit, prop, product, "
                                            "style, lighting, composition, or mood. ")
+                        if plan["persons"]:
+                            image_note += ("Preserve the facial identity of "
+                                           "reference image(s) " + ", ".join(str(x) for x in plan["persons"])
+                                           + " as additional main people in the output. ")
+                        if plan["objects"]:
+                            image_note += ("Use reference image(s) " + ", ".join(str(x) for x in plan["objects"])
+                                           + " only as props/objects, never as people. ")
+                        image_note += ("\nFirst identify from each reference image whether it depicts "
+                                       "a person or an object/prop, then state each reference's role "
+                                       "explicitly in your expanded prompt; never treat an object "
+                                       "reference as a person. ")
                         image_note += ("Do not duplicate the main subject and "
                                        "do not turn secondary references into extra people, "
                                        "animals, products, or props unless explicitly requested.")
@@ -1309,7 +1730,12 @@ class CameraDirector:
                         "Judge from its depicted appearance when relevant — "
                         "natural, soft, realistic, non-clinical. It is "
                         "not scene content and must never appear as a "
-                        "separate panel, crop, or collage in the image.")
+                        "separate panel, crop, or collage in the image. "
+                        "When body hair is depicted, render natural realistic "
+                        "detail: individual strands with visible follicle roots, "
+                        "tapering tips, slightly irregular thickness, lying and "
+                        "bending along the body's curves, layered with natural "
+                        "depth — never clumped patches or sticker-like hair.")
                 elif appearance_ref and failed_labels:
                     # 9·10번은 연결됐지만 변환 실패: 역할 설명은 그대로 전달하되
                     # 이미지 픽셀은 볼 수 없다고 명시해 LLM이 오해하지 않게 한다.
@@ -1318,6 +1744,16 @@ class CameraDirector:
                                    "but image conversion failed. Treat them as text "
                                    "intent: natural, soft, realistic, non-clinical "
                                    "appearance; never include them as panels/crops/collages.")
+                if converted_labels and _is_character_sheet_request(topic):
+                    image_note += ("\nOne attached reference is a character sheet "
+                                   "(the same person shown from several angles). "
+                                   "Treat every view as one identical person — same "
+                                   "face, hairstyle, body type, outfit — and keep "
+                                   "that identity in the expanded prompt. The output "
+                                   "must be a single scene view following the camera "
+                                   "labels, not a reproduction of the sheet's grid or "
+                                   "multi-panel layout, unless the user explicitly "
+                                   "requests a character sheet as output.")
                 resolved_model = resolve_model(provider, model)
                 hint_text = (llm_hint or "").strip()
                 # 사용자 지시는 LLM user 메시지 끝에 최우선 블록으로 붙인다.
@@ -1336,7 +1772,8 @@ class CameraDirector:
                     llm_user(topic, forced if forced is not None else fixed_cam)
                     + image_note + hint_note,
                     image_b64=img_b64, image_b64s=img_b64s,
-                    image_sig=img_sig if not img_b64s else None)
+                    image_sig=img_sig if not img_b64s else None,
+                    base_url=custom_base_url)
                 if img_b64s and provider == "Ollama":
                     _log("[Camera Director] 다중 vision 전달 (Ollama — 비전 모델 필요)")
                 _notify_llm_status(unique_id, "on")
@@ -1361,7 +1798,7 @@ class CameraDirector:
                       else dict(widget_cam))
             cam_source = "직접 설정(수동)" if fixed_cam is not None else "수동(드롭다운)"
         elif tier == "auto":
-            camera, locked, _matched = resolve_rules_camera(topic, metrics, fixed_cam, locked)
+            camera, locked, _ = resolve_rules_camera(topic, metrics, fixed_cam, locked)
             hints_note = " + 이미지 힌트" if camera.get("_hints") else ""
             cam_source = ("직접 설정+규칙" if fixed_cam else "규칙") + hints_note
         else:  # llm
@@ -1371,7 +1808,7 @@ class CameraDirector:
                 cam_source = ("LLM 판단" + ("(이미지 참조)" if image_count else "")
                               + ("+직접 고정" if fixed_cam else ""))
             else:
-                camera, locked, _matched = resolve_rules_camera(
+                camera, locked, _ = resolve_rules_camera(
                     topic, metrics, fixed_cam, locked)
                 hints_note = " + 이미지 힌트" if camera.get("_hints") else ""
                 cam_source = (("직접 설정+규칙" if fixed_cam else "규칙")
@@ -1414,18 +1851,34 @@ class CameraDirector:
             _slots = "/".join(str(x) for x in (9, 10) if x in image_labels)
             _log("[Camera Director] " + _slots
                  + "번 외양 참조 가드 활성 (외양 적용 + 컷 삽입 방어)")
+            positive = positive.rstrip(". ") + ". " \
+                + APPEARANCE_HAIR_REALISM_POSITIVE + "."
+        # 인물 신체 발란스: 인물 주제면 참조 이미지 유무와 무관하게 상시 첨부.
+        body_balance = _is_human_subject(topic or scene)
+        if body_balance:
+            positive = positive.rstrip(". ") + ". " + BODY_BALANCE_POSITIVE + "."
+        # 캐릭터 시트 참조: 시트 이미지 연결 + 시트 의도 명시 실행에만 첨부.
+        char_sheet = character_sheet_guard(image_count, topic or scene,
+                                           image_labels=image_labels)
+        if char_sheet:
+            positive = positive.rstrip(". ") + ". " + char_sheet + "."
+            _log("[Camera Director] 캐릭터 시트 참조 가드 활성 "
+                 "(신원 일관성 + 시트 레이아웃 복제 방어)")
         # llm_hint 방어어는 LLM 판정이 실제로 이뤄진(llm 티어) 실행에만 붙인다.
         # Skills run_prompt가 negative를 다시 만들 때도 같은 판정을 재사용한다.
         hint_defense = tier == "llm" and bool((llm_hint or "").strip())
         self._last_hint_defense = hint_defense
         self._last_mix_guard = mix_guard
         self._last_appearance_ref = appearance_ref
+        self._last_body_balance = body_balance
+        self._last_character_sheet_text = char_sheet
         negative = build_negative(camera, extra=extra_negative or "",
                                   llm_extra=llm_extra, topic=topic,
                                   hint_defense=hint_defense, mix_guard=mix_guard,
-                                  appearance_ref=appearance_ref)
+                                  appearance_ref=appearance_ref,
+                                  body_balance=body_balance,
+                                  character_sheet=bool(char_sheet))
         self._last_camera = dict(camera)
-        self._last_scene = scene
         self._last_llm_extra = llm_extra
         self._last_image_count = image_count
         self._last_image_labels = list(image_labels)
@@ -1636,46 +2089,54 @@ class CameraDirectorEncode(CameraDirector):
         images_vl = []
         target_w = target_h = None
         if latent_image is not None:
-            samples = latent_image.get("samples") if isinstance(latent_image, dict) else None
-            if samples is not None and samples.ndim == 4:
-                target_h = int(samples.shape[-2]) * 16
-                target_w = int(samples.shape[-1]) * 16
+            try:
+                samples = latent_image.get("samples") if isinstance(latent_image, dict) else None
+                if samples is not None and samples.ndim == 4:
+                    target_h = int(samples.shape[-2]) * 16
+                    target_w = int(samples.shape[-1]) * 16
+            except Exception:
+                target_w = target_h = None
         for _label, image in image_items:
-            cache_key = _qwen_ref_cache_key(image, target_w, target_h, vae)
-            cached = _qwen_ref_cache_get(cache_key, vae)
-            if cached is not None:
-                cached_rgb, cached_latent = cached
-                images_vl.append(cached_rgb)
-                if cached_latent is not None:
-                    ref_latents.append(cached_latent)
+            try:
+                cache_key = _qwen_ref_cache_key(image, target_w, target_h, vae)
+                cached = _qwen_ref_cache_get(cache_key, vae)
+                if cached is not None:
+                    cached_rgb, cached_latent = cached
+                    images_vl.append(cached_rgb)
+                    if cached_latent is not None:
+                        ref_latents.append(cached_latent)
+                    continue
+                samples = image[:1].movedim(-1, 1)
+                if target_w and target_h:
+                    ratio = samples.shape[3] / samples.shape[2]
+                    width = target_w
+                    height = round(width / ratio)
+                    if width * height > QWEN_REF_MAX_PIXELS:
+                        # latent가 2~3MP여도 reference는 1MP 상한 (종횡비 유지 축소)
+                        scale = (QWEN_REF_MAX_PIXELS / (width * height)) ** 0.5
+                        width = max(32, round(width * scale))
+                        height = max(32, round(height * scale))
+                    width, height = max(32, width), max(32, height)
+                else:
+                    total = QWEN_REF_MAX_PIXELS
+                    scale_by = ((total / (samples.shape[3] * samples.shape[2])) ** 0.5)
+                    width = round(samples.shape[3] * scale_by / 32) * 32
+                    height = round(samples.shape[2] * scale_by / 32) * 32
+                s = image[:1]
+                if (width, height) != (samples.shape[3], samples.shape[2]):
+                    s = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled").movedim(1, -1)
+                rgb = s[:, :, :, :3]
+                if s.shape[-1] > 3:
+                    rgb = rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
+                images_vl.append(rgb)
+                latent = vae.encode(s) if vae is not None else None
+                if latent is not None:
+                    ref_latents.append(latent)
+                _qwen_ref_cache_put(cache_key, (rgb, latent, vae))
+            except Exception as exc:  # noqa: BLE001
+                # 한 장이 깨져도 전체 실행은 살린다 — 해당 이미지만 제외.
+                _log(f"[GoRi Camera Director Skills] reference 이미지 변환 실패로 제외: {exc}")
                 continue
-            samples = image[:1].movedim(-1, 1)
-            if target_w and target_h:
-                ratio = samples.shape[3] / samples.shape[2]
-                width = target_w
-                height = round(width / ratio)
-                if width * height > QWEN_REF_MAX_PIXELS:
-                    # latent가 2~3MP여도 reference는 1MP 상한 (종횡비 유지 축소)
-                    scale = (QWEN_REF_MAX_PIXELS / (width * height)) ** 0.5
-                    width = max(32, round(width * scale))
-                    height = max(32, round(height * scale))
-                width, height = max(32, width), max(32, height)
-            else:
-                total = QWEN_REF_MAX_PIXELS
-                scale_by = ((total / (samples.shape[3] * samples.shape[2])) ** 0.5)
-                width = round(samples.shape[3] * scale_by / 32) * 32
-                height = round(samples.shape[2] * scale_by / 32) * 32
-            s = image[:1]
-            if (width, height) != (samples.shape[3], samples.shape[2]):
-                s = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled").movedim(1, -1)
-            rgb = s[:, :, :, :3]
-            if s.shape[-1] > 3:
-                rgb = rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
-            images_vl.append(rgb)
-            latent = vae.encode(s) if vae is not None else None
-            if latent is not None:
-                ref_latents.append(latent)
-            _qwen_ref_cache_put(cache_key, (rgb, latent, vae))
         return images_vl, ref_latents
 
     @staticmethod
@@ -1727,10 +2188,12 @@ class CameraDirectorEncode(CameraDirector):
     def run_prompt(self, clip, topic, preset, automation, shot, lens, angle,
                    composition, lighting, grade, motion, speed, amplitude,
                    prompt_in=None, provider="OpenAI", model="gpt-4o-mini",
-                   api_key="", positive=None, negative=None, vae=None, latent_image=None,
+                   api_key="", custom_base_url="", positive=None, negative=None,
+                   vae=None, latent_image=None,
                    image_1=None, image_2=None, image_3=None, image_4=None,
                    image_5=None, image_6=None, image_7=None, image_8=None,
-                   image_9=None, image_10=None, llm_hint="", unique_id=None):
+                   image_9=None, image_10=None, llm_hint="", unique_id=None,
+                   prompt=None):
         image_items = [
             (1, image_1), (2, image_2), (3, image_3), (4, image_4), (5, image_5),
             (6, image_6), (7, image_7), (8, image_8), (9, image_9), (10, image_10),
@@ -1742,7 +2205,9 @@ class CameraDirectorEncode(CameraDirector):
             lighting=lighting, grade=grade, motion=motion,
             speed=speed, amplitude=amplitude, prompt_in=prompt_in,
             provider=provider, model=model, api_key=api_key,
-            image_items=image_items, llm_hint=llm_hint, unique_id=unique_id)
+            custom_base_url=custom_base_url,
+            image_items=image_items, llm_hint=llm_hint, unique_id=unique_id,
+            prompt=prompt)
         camera = getattr(self, "_last_camera", dict(DEFAULTS))
         camera_text = build_camera_conditioning(camera)
         external_prompt = (prompt_in or "").strip()
@@ -1775,24 +2240,42 @@ class CameraDirectorEncode(CameraDirector):
         else:
             positive_text = prompt_out
             single_person_anchor = ""
-        detail_guard = macro_detail_guard(external_prompt or topic, camera)
-        if detail_guard:
-            positive_text = self._combine_prompt_text(positive_text, detail_guard)
-        nudity_guard = nudity_anatomy_guard(external_prompt or topic)
-        if nudity_guard:
-            positive_text = self._combine_prompt_text(positive_text, nudity_guard)
-        # 다중 참조 실행이면 믹스 가드도 Skills positive에 병합한다.
-        # 왜(Why): base run()의 믹스 가드는 standalone assemble 결과에만 붙고,
-        # prompt_in 경로는 앵커를 다시 조립하므로 유실되기 때문이다.
-        if getattr(self, "_last_mix_guard", False):
-            positive_text = self._combine_prompt_text(positive_text,
-                                                      MIX_GUARD_POSITIVE)
-        # 10번 외양 참조 실행이면 외양 가드도 Skills positive에 병합한다.
-        if getattr(self, "_last_appearance_ref", False):
-            positive_text = self._combine_prompt_text(positive_text,
-                                                      APPEARANCE_REF_POSITIVE)
+        # 아래 가드 병합은 prompt_in 경로에만 적용한다.
+        # 왜(Why): standalone 경로의 prompt_out(assemble 결과)에는 매크로·노출·
+        # 믹스·외양·발란스·시트 가드가 이미 들어 있어, 그대로 다시 붙이면
+        # 같은 문구가 2회 중복되기 때문이다. prompt_in 경로는 앵커를 다시
+        # 조립하므로 여기서 붙여야 한다.
+        if external_prompt:
+            detail_guard = macro_detail_guard(external_prompt or topic, camera)
+            if detail_guard:
+                positive_text = self._combine_prompt_text(positive_text, detail_guard)
+            nudity_guard = nudity_anatomy_guard(external_prompt or topic)
+            if nudity_guard:
+                positive_text = self._combine_prompt_text(positive_text, nudity_guard)
+            # 다중 참조 실행이면 믹스 가드도 Skills positive에 병합한다.
+            # 왜(Why): base run()의 믹스 가드는 standalone assemble 결과에만 붙고,
+            # prompt_in 경로는 앵커를 다시 조립하므로 유실되기 때문이다.
+            if getattr(self, "_last_mix_guard", False):
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          MIX_GUARD_POSITIVE)
+            # 10번 외양 참조 실행이면 외양 가드도 Skills positive에 병합한다.
+            if getattr(self, "_last_appearance_ref", False):
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          APPEARANCE_REF_POSITIVE)
+                positive_text = self._combine_prompt_text(
+                    positive_text, APPEARANCE_HAIR_REALISM_POSITIVE)
+            # 인물 신체 발란스도 Skills positive에 병합한다 (base run과 동일 판정).
+            if getattr(self, "_last_body_balance", False):
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          BODY_BALANCE_POSITIVE)
+            # 캐릭터 시트 참조 가드도 병합한다 (문구는 실행마다 갱신된 저장값).
+            _cs_text = getattr(self, "_last_character_sheet_text", "")
+            if _cs_text:
+                positive_text = self._combine_prompt_text(positive_text, _cs_text)
         prevent_duplicates = bool(single_person_anchor) if external_prompt else False
-        negative_text = build_camera_negative(camera, prevent_duplicates=prevent_duplicates)
+        negative_text = build_camera_negative(
+            camera, prevent_duplicates=prevent_duplicates,
+            topic=external_prompt or topic)
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
         # 카메라 전용 negative로 덮어쓰면서 조용히 버려졌기 때문이다.
@@ -1813,12 +2296,32 @@ class CameraDirectorEncode(CameraDirector):
         if getattr(self, "_last_appearance_ref", False):
             negative_text = (negative_text.rstrip("., ")
                              + ", " + APPEARANCE_REF_NEGATIVE)
-        prepared = self._prepare_qwen_image_data(
-            image_items, vae=vae, latent_image=latent_image
-        )
-        positive_out = self._qwen_image_edit_conditioning(
-            clip, positive_text, prepared=prepared
-        )
+        # 인물 신체 발란스 방어어도 병합한다.
+        if getattr(self, "_last_body_balance", False):
+            negative_text = (negative_text.rstrip("., ")
+                             + ", " + BODY_BALANCE_NEGATIVE)
+        # 캐릭터 시트 레이아웃 방어어도 병합한다.
+        if getattr(self, "_last_character_sheet_text", ""):
+            negative_text = (negative_text.rstrip("., ")
+                             + ", " + CHARACTER_SHEET_NEGATIVE)
+        try:
+            prepared = self._prepare_qwen_image_data(
+                image_items, vae=vae, latent_image=latent_image
+            )
+        except Exception as exc:  # noqa: BLE001
+            # reference 준비 실패해도 실행은 살린다 — 텍스트 전용으로 폴백.
+            _log(f"[GoRi Camera Director Skills] reference 준비 실패, 텍스트 폴백: {exc}")
+            prepared = ([], None)
+        try:
+            positive_out = self._qwen_image_edit_conditioning(
+                clip, positive_text, prepared=prepared
+            )
+        except Exception as exc:  # noqa: BLE001
+            # vision 인코딩 실패 시 텍스트만으로 재시도 (reference 없이도 동작).
+            _log(f"[GoRi Camera Director Skills] vision 인코딩 실패, 텍스트 폴백: {exc}")
+            positive_out = self._qwen_image_edit_conditioning(
+                clip, positive_text, prepared=([], None)
+            )
         # negative는 텍스트만 인코딩한다. 왜(Why): negative 문구는 카메라/영상
         # 실패 모드라 vision 참조가 불필요하고, 이미지 포함 인코딩을 반복하면
         # Qwen Vision 인코딩이 2회 실행 + reference_latents가 positive/negative
@@ -1832,9 +2335,23 @@ class CameraDirectorEncode(CameraDirector):
                  "Qwen positive_prompt 문자열을 prompt_in에 연결하세요.")
         _log("[GoRi Camera Director Skills] positive_out/negative_out/prompt_out 출력 "
               f"(single_encode={bool(external_prompt or positive is None)})")
-        # image_out: image_1~10 중 첫 번째(=주 reference) 이미지를 그대로 통과.
+        # image_out: 역할 계획(plan)이 선출한 주 reference 이미지를 그대로 통과.
         # I2V 시작 프레임·업스케일 등 후속 노드에 연결할 수 있다. 미연결이면 None.
-        image_out = image_items[0][1] if image_items else None
+        # 왜(Why): 항상 첫 연결을 통과하면(구버전) 첫 연결이 사물인 워크플로
+        # (1번 핸드백 + 2번 여성)에서 핸드백이 나갔다(정밀 검토 발견 #5).
+        last_labels = getattr(self, "_last_image_labels", None) or [l for l, _ in image_items]
+        image_out = None
+        try:
+            main_slot = _person_object_plan(
+                external_prompt or (topic or ""), last_labels)["main"]
+            for label, img in image_items:
+                if label == main_slot:
+                    image_out = img
+                    break
+        except Exception:
+            pass
+        if image_out is None and image_items:
+            image_out = image_items[0][1]
         return (positive_out, negative_out, positive_text, image_out)
 
 

@@ -216,6 +216,183 @@ function attachTopicScroll(node) {
 }
 
 /* ---------------------------------------------------------------------------
+ * api_key 마스킹 (방송/녹화용 가림막)
+ *
+ * 한 줄 STRING 위젯(api_key)은 캔버스 TextWidget으로 그려지며, 그리기 경로는
+ * 베이스 클래스의 `_displayValue` getter를 읽는다(1.52.7 프론트엔드 실측).
+ * 인스턴스에 `_displayValue`만 재정의해 화면에는 ●●●●를 그리고,
+ * `value` 자체는 절대 건드리지 않는다 → 실행·큐·워크플로 JSON 저장값은
+ * 원본 그대로 유지된다.
+ *
+ * 고정 8자리를 쓰는 이유: 자릿수 비례 마스킹은 키 길이를 노출한다.
+ * 빈 값이면 빈 문자열을 돌려줘 "키 없음" 상태가 그대로 보인다.
+ *
+ * 편집(더블클릭): TextWidget.onClick이 여는 canvas.prompt 다이얼로그
+ * (<input type='text' class='value'>, 동기 생성)의 input을 password로
+ * 바꿔 입력 중에도 키가 노출되지 않게 한다. 값 자체는 원본이 오간다.
+ *
+ * 확정(OK 버튼·Enter) 시 provider 칸 기준으로 루트 .env에 반영한다
+ * (POST /gori_api_key — 저장·삭제·교체). 빈 값 확정은 삭제다.
+ * Esc·마우스이탈로 닫으면 동기화하지 않는다.
+ *
+ * 저장 파일의 키 제외는 아래 hookSerializeBlankApiKey가 담당한다.
+ * ------------------------------------------------------------------------- */
+const API_KEY_MASK = "●●●●●●●●";
+
+/** api_key 위젯 찾기 (없으면 undefined) */
+function findApiKeyWidget(node) {
+  try {
+    return (node?.widgets || []).find((x) => x && x.name === "api_key");
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function maskApiKeyWidget(node) {
+  try {
+    const w = findApiKeyWidget(node);
+    if (!w || w._goriMasked) return;
+    w._goriMasked = true;
+    // 1) 표시 마스킹 (그리기 경로만 가로챈다)
+    try {
+      Object.defineProperty(w, "_displayValue", {
+        configurable: true,
+        get() {
+          const v = this.computedDisabled ? "" : String(this.value ?? "");
+          return v ? API_KEY_MASK : "";
+        },
+      });
+    } catch (_) {
+      /* getter 재정의 실패 시 편집 가림만 적용 */
+    }
+    // 2) 편집 다이얼로그 가림 + 3) 확정(OK/Enter) 시 루트 .env 반영
+    const origClick = w.onClick;
+    if (typeof origClick === "function") {
+      w.onClick = function (arg) {
+        const r = origClick.call(this, arg);
+        try {
+          const box = arg?.canvas?.prompt_box;
+          const input = box?.querySelector?.("input.value");
+          if (input) input.type = "password";
+          // OK 버튼·Enter 확정만 동기화한다 (Esc·마우스이탈 닫기는 무시).
+          // 빈 값 확정 = 메모장에서 삭제, 새 값 = 교체. 제공자는 provider 칸 기준.
+          const okBtn = box?.querySelector?.("button");
+          if (input && okBtn) {
+            const sync = () => {
+              try {
+                const prov = String(
+                  (node.widgets || []).find((x) => x && x.name === "provider")?.value || "");
+                fetch("/gori_api_key", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ provider: prov, key: input.value ?? "" }),
+                }).catch(() => {});
+              } catch (_) {
+                /* 전송 실패는 무시 — 위젯값 실행에는 영향 없음 */
+              }
+            };
+            okBtn.addEventListener("click", sync);
+            input.addEventListener("keydown", (e) => {
+              if (e && e.key === "Enter") sync();
+            });
+          }
+        } catch (_) {
+          /* 가림 실패는 무시 — 값 동작에 영향 없음 */
+        }
+        return r;
+      };
+    }
+    setCanvasDirty();
+  } catch (_) {
+    /* 마스킹 실패는 노드 동작에 영향을 주지 않는다 */
+  }
+}
+
+/** 공유 전 키 제거용: api_key 위젯 값을 비운다 (value setter가 dirty 처리).
+ * 빈 값이면 false를 돌려줘 메뉴 비활성화 판단에 쓴다. */
+function clearApiKeyWidget(node) {
+  try {
+    const w = findApiKeyWidget(node);
+    if (!w || !String(w.value ?? "")) return false;
+    w.value = "";
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 워크플로 저장 시 api_key 빈칸 직렬화 (공유 안전)
+ *
+ * 저장 파일·공유·PNG 내장 workflow는 node.serialize() 결과를 쓰고,
+ * 실행 페이로드는 live 위젯 값을 직접 읽는다(1.52.7 graphToPrompt 실측).
+ * 그래서 serialize 결과에서만 api_key를 비우면 실행은 그대로 되고
+ * 밖으로 나가는 파일에는 키가 안 담긴다.
+ * (PNG 내장 prompt 복사본은 서버 실행 시 이 노드가 기록에서 제거한다)
+ *
+ * 미연결 방치 노드: computeExecutionOrder는 미연결 노드도 실행 목록에
+ * 포함하므로, 출력이 하나도 연결 안 된 노드는 실행 페이로드에도 키를
+ * 내보내지 않는다(serializeValue 가드). 출력 연결 노드는 실값 그대로.
+ * 뮤트/우회는 코어가 output에서 제외하므로 별도 처리 불필요.
+ * ------------------------------------------------------------------------- */
+function hookSerializeBlankApiKey(node) {
+  try {
+    if (!node || node._goriSerializeHooked) return;
+    const orig = node.serialize;
+    if (typeof orig !== "function") return;
+    node._goriSerializeHooked = true;
+    node.serialize = function (...args) {
+      const info = orig.apply(this, args);
+      try {
+        // 이름 기준 (정렬 문제 없음)
+        if (info?.widgets_values_named &&
+            Object.prototype.hasOwnProperty.call(info.widgets_values_named, "api_key")) {
+          info.widgets_values_named.api_key = "";
+        }
+        // 위치 배열 (코어와 같은 순서로 serialize 제외 위젯 건너뜀)
+        if (info && Array.isArray(info.widgets_values)) {
+          let vi = 0;
+          for (const w of this.widgets || []) {
+            if (w && w.serialize === false) continue;
+            if (w && w.name === "api_key" && vi < info.widgets_values.length) {
+              info.widgets_values[vi] = "";
+            }
+            vi++;
+          }
+        }
+      } catch (_) {
+        /* 직렬화 실패 파급 방지 */
+      }
+      return info;
+    };
+  } catch (_) {
+    /* 후킹 실패는 노드 동작에 영향을 주지 않는다 */
+  }
+}
+
+/** 실행 페이로드용 serializeValue 가드: 출력 미연결(방치) 노드는 키 제외.
+ * 출력이 하나라도 연결돼 있으면 실값 그대로 (정상 실행 보장).
+ * live 값은 건드리지 않아 뮤트 해제·선 연결 즉시 원상복구된다. */
+function hookApiKeyPayloadGuard(node) {
+  try {
+    const w = findApiKeyWidget(node);
+    if (!w || w._goriPayloadHooked) return;
+    w._goriPayloadHooked = true;
+    w.serializeValue = () => {
+      try {
+        const outs = node.outputs || [];
+        if (outs.length && outs.every((o) => !o || !(o.links && o.links.length))) return "";
+        return w.value;
+      } catch (_) {
+        return w.value;
+      }
+    };
+  } catch (_) {
+    /* 후킹 실패는 노드 동작에 영향을 주지 않는다 */
+  }
+}
+
+/* ---------------------------------------------------------------------------
  * LLM 상태 표시등
  *
  * Python 노드가 LLM 판정을 시작/완료하면 웹소켓 이벤트(gori_llm_status)를
@@ -381,8 +558,8 @@ app.registerExtension({
     }
     template.sort((a, b) => imageNumber(a.name) - imageNumber(b.name));
 
-    /** 공통 지연 처리: 소켓 정리 + (새 노드면) 높이 축소 + 휠 스크롤 훅.
-     * 소켓 오류와 topic 오류는 서로에게 영향을 주지 않게 분리한다.
+    /** 공통 지연 처리: 소켓 정리 + (새 노드면) 높이 축소 + 휠 스크롤 훅 +
+     * api_key 마스킹. 각 영역은 서로에게 영향을 주지 않게 분리한다.
      * DOM 위젯은 첫 드로잉 때 마운트되므로 여러 시점에 재시도한다. */
     const afterLifecycle = (node) => {
       try {
@@ -390,6 +567,21 @@ app.registerExtension({
         updateVisibility(node);
       } catch (_) {
         restoreAll(node);
+      }
+      try {
+        maskApiKeyWidget(node);
+      } catch (_) {
+        /* 마스킹 실패는 조용히 무시 */
+      }
+      try {
+        hookSerializeBlankApiKey(node);
+      } catch (_) {
+        /* 직렬화 후킹 실패는 조용히 무시 */
+      }
+      try {
+        hookApiKeyPayloadGuard(node);
+      } catch (_) {
+        /* 페이로드 가드 실패는 조용히 무시 */
       }
       try {
         attachTopicScroll(node);
@@ -433,6 +625,32 @@ app.registerExtension({
 
     patchLifecycle("onNodeCreated");
     patchLifecycle("onConfigure");
+
+    // 노드 우클릭 메뉴: 공유 전 api_key 원클릭 제거.
+    // 저장·실행 직렬화 경로가 같아 저장값만 가리는 건 불가능하므로(가리면
+    // 실행도 깨짐), 공유할 때 값을 비우는 방식으로 키 유출을 막는다.
+    // 이미 비어 있으면 메뉴를 비활성화한다.
+    const origMenu = nodeType.prototype.getExtraMenuOptions;
+    nodeType.prototype.getExtraMenuOptions = function (canvas, options) {
+      try {
+        origMenu?.apply(this, arguments);
+      } catch (_) {
+        /* 기존 메뉴 실패는 무시 */
+      }
+      try {
+        const node = this;
+        const w = findApiKeyWidget(node);
+        if (w && Array.isArray(options)) {
+          options.push({
+            content: "api_key 지우기 (공유용)",
+            disabled: !String(w.value ?? ""),
+            callback: () => clearApiKeyWidget(node),
+          });
+        }
+      } catch (_) {
+        /* 메뉴 추가 실패는 무시 */
+      }
+    };
 
     const originalConnections = nodeType.prototype.onConnectionsChange;
     nodeType.prototype.onConnectionsChange = function (...args) {

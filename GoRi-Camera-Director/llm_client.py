@@ -2,7 +2,8 @@
 """llm_client.py — Camera Director용 LLM 호출 클라이언트.
 
 표준 라이브러리 중심(urllib). vision 입력 변환은 ComfyUI 환경의 PIL/torch/numpy를 사용한다.
-- provider: OpenAI / Anthropic / Ollama(로컬) / LM Studio(로컬)
+- provider: OpenAI / Anthropic / Gemini / OpenRouter / Groq / DeepSeek / Mistral /
+            Ollama(로컬) / LM Studio(로컬)
 - 응답에서 JSON만 추출 (code-fence 허용)
 - 프로세스 내 캐시: 같은 입력 → 네트워크 호출 0회
 """
@@ -17,21 +18,77 @@ import threading
 import urllib.error
 import urllib.request
 
-DEFAULT_TIMEOUT = 45  # 초 (클라우드 API 기준)
+DEFAULT_TIMEOUT = 45  # 초 (클우드 API 기준)
 # 로컬 LLM(Ollama/LM Studio)은 RTX 8GB급 GPU에서 비전 추론만 수십 초~수분
 # 걸릴 수 있다. 클라우드용 기본 타임아웃으로 끊기면 LLM 판정이 항상 실패해
-# 규칙 폴백(빨간불)으로 떨어지므로, 로컬 provider는 넉넉한 상한을 쓴다.
+# 규칙 폰백(빨간불)으로 떨어지므로, 로컬 provider는 넉넉한 상한을 쓴다.
 LOCAL_TIMEOUT = 300  # 초
 
 _LOCAL_PROVIDERS = ("Ollama", "LM Studio")
+# OpenAI / LM Studio / OpenRouter / Groq / DeepSeek / Mistral은
+# 메시지 규격이 OpenAI chat completions과 동일하다.
+_OPENAI_COMPATIBLE_PROVIDERS = (
+    "OpenAI", "LM Studio", "OpenRouter", "Groq", "DeepSeek", "Mistral")
+
+_API_KEY_ENV = {
+    "OpenAI": "OPENAI_API_KEY",
+    "Anthropic": "ANTHROPIC_API_KEY",
+    "Gemini": "GEMINI_API_KEY",
+    "OpenRouter": "OPENROUTER_API_KEY",
+    "Groq": "GROQ_API_KEY",
+    "DeepSeek": "DEEPSEEK_API_KEY",
+    "Mistral": "MISTRAL_API_KEY",
+}
 
 _cache: dict = {}
 _cache_lock = threading.Lock()
 _CACHE_MAX = 256  # LLM 응답 캐시 상한 (장시간 세션의 무제한 성장 방지)
 
+# ComfyUI 루트 .env 폴백 (표준 방식). 노드 폴더 밖이라 폴더째 압축 공유에도
+# 키가 딸려가지 않는다. 우선순위: 위젯 입력 > .env 파일 > OS 환경변수.
+_ENV_FILE_OVERRIDE = None  # 테스트 주입용 (None이면 자동 탐색)
+
+
+def _env_file_path():
+    """ComfyUI 루트의 .env 경로. 못 찾으면 None (조용히 미사용)."""
+    if _ENV_FILE_OVERRIDE is not None:
+        return _ENV_FILE_OVERRIDE
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.dirname(os.path.dirname(here))
+        if os.path.isfile(os.path.join(root, "main.py")):
+            return os.path.join(root, ".env")
+    except Exception:
+        pass
+    return None
+
+
+def _read_env_file_key(env_name: str) -> str:
+    """루트 .env에서 지정 키를 읽는다. 없으면 "" (stdlib만 사용)."""
+    if not env_name:
+        return ""
+    path = _env_file_path()
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == env_name:
+                    v = v.strip()
+                    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                        v = v[1:-1]
+                    return v.strip()
+    except (OSError, UnicodeError):
+        pass
+    return ""
+
 
 class LLMError(RuntimeError):
-    """LLM 호출 실패 — 호출자는 이 예외를 잡고 규칙(auto) 티어로 폴백한다."""
+    """LLM 호출 실패 — 호출자는 이 예외를 잡고 규칙(auto) 티어로 폰백한다."""
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +96,7 @@ class LLMError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def extract_json(text: str) -> dict:
-    """응답 문자열에서 JSON 객체만 골라 dict로 반환한다."""
+    """응답 문자열에서 JSON 객첼만 골라 dict로 반환한다."""
     if not text:
         raise LLMError("빈 응답")
     t = text.strip()
@@ -89,21 +146,25 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
 
 
 def _content_from(provider: str, raw: dict) -> str:
+    provider = provider or ""
     try:
-        if provider in ("OpenAI", "LM Studio"):
+        if provider in _OPENAI_COMPATIBLE_PROVIDERS or provider.startswith("Custom"):
             return raw["choices"][0]["message"]["content"] or ""
         if provider == "Anthropic":
             blocks = raw.get("content") or []
             return "".join(b.get("text", "") for b in blocks)
         if provider == "Ollama":
             return raw["message"]["content"] or ""
+        if provider == "Gemini":
+            parts = raw.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            return "".join(p.get("text", "") for p in parts)
     except (KeyError, IndexError, TypeError) as e:
         raise LLMError(f"응답 형식 해석 실패: {e}") from e
     raise LLMError(f"알 수 없는 provider: {provider}")
 
 
 # ---------------------------------------------------------------------------
-# 이미지 (PIL → PNG base64). 비전 전달용. 실패 시 None (폴백은 규칙 티어가 담당)
+# 이미지 (PIL → PNG base64). 비전 전달용. 실패 시 None (폰백은 규칙 티어가 담당)
 # ---------------------------------------------------------------------------
 
 def image_to_b64(image, max_side: int = 768):
@@ -161,54 +222,140 @@ def _cache_key(provider: str, model: str, system: str, user: str,
         "\n".join([provider, model, system, user, img_ref]).encode("utf-8")).hexdigest()
 
 
+def _build_openai_messages(system: str, user: str, image_list: list) -> list:
+    """OpenAI chat completions 메시지 규격을 구성한다."""
+    if image_list:
+        user_block = [{"type": "text", "text": user}]
+        for b64 in image_list:
+            user_block.append(
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/png;base64," + b64}})
+        return [{"role": "system", "content": system},
+                {"role": "user", "content": user_block}]
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": user}]
+
+
+def _openai_compatible_chat(endpoint: str, model: str, api_key: str,
+                            system: str, user: str, image_list: list,
+                            timeout: int, extra_headers: dict | None = None) -> dict:
+    """OpenAI 호환 엔드포인트에 요청한다."""
+    msgs = _build_openai_messages(system, user, image_list)
+    # 키가 없는 로컬 서버(LM Studio)는 Authorization 헤더를 아예 보내지 않는다.
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    if extra_headers:
+        headers.update(extra_headers)
+    return _post(
+        endpoint,
+        {"model": model, "messages": msgs, "temperature": 0.4},
+        headers, timeout)
+
+
+def _normalize_custom_endpoint(base_url: str) -> str:
+    """사용자가 입력한 Base URL을 chat/completions 엔드포인트로 정규화한다.
+
+    허용 입력: `https://api.example.com/v1`, 끝 슬래시 포함, 이미
+    `/chat/completions`가 붙은 전체 URL. URL이 비면 명확한 안내와 함께 실패한다.
+    """
+    u = (base_url or "").strip().rstrip("/")
+    if not u:
+        raise LLMError(
+            "Custom (OpenAI 호환): Base URL이 비어 있음 — 노드의 custom_base_url 칸에 "
+            "예: https://api.example.com/v1 (규칙으로 폰백)")
+    if u.endswith("/chat/completions"):
+        return u
+    return u + "/chat/completions"
+
+
 def chat(provider: str, model: str, api_key: str,
          system: str, user: str, timeout: int = DEFAULT_TIMEOUT,
-         image_b64=None, image_sig=None, image_b64s=None) -> dict:
+         image_b64=None, image_sig=None, image_b64s=None,
+         base_url: str = "") -> dict:
     """LLM에 질의하고 JSON 객체를 돌려준다. 실패 시 LLMError.
 
-    - OpenAI/Anthropic: 키가 없으면 즉시 실패(네트워크 호출 없음)
+    - OpenAI/Anthropic/Gemini/OpenRouter/Groq/DeepSeek/Mistral: 위젯 키가
+      비면 루트 .env → OS 환경변수 순으로 찾고, 없으면 즉시 실패(네트워크
+      호출 없음). 환경변수 이름은 _API_KEY_ENV 참조.
+    - Custom (OpenAI 호환): base_url로 지정한 임의 엔드포인트에 OpenAI
+      chat/completions 규격으로 호출. 키는 선택(키 없는 게이트웨이 허용),
+      model 칸은 필수. Base URL이 localhost면 로컬 타임아웃 적용.
     - Ollama: 로컬(localhost:11434), 키 불필요
     - LM Studio: 로컬 OpenAI 호환 서버(localhost:1234/v1), 키 불필요
     - image_b64: PNG base64 1장 — 비전 전달 (지원 모델만). 캐시 키에 이미지 서명 포함
-    - image_b64s: PNG base64 여러 장 — OpenAI/Anthropic/Ollama/LM Studio 다중 비전 전달
+    - image_b64s: PNG base64 여러 장 — OpenAI/Anthropic/Ollama/LM Studio/Gemini
+      등 다중 비전 전달
     """
+    provider = provider or ""
+    is_custom = provider.startswith("Custom")
     image_list = [b for b in (image_b64s or []) if b]
     if not image_list and image_b64:
         image_list = [image_b64]
+    if is_custom:
+        # 캐시 키/타임아웃 판정에 엔드포인트가 필요하므로 캐시 조회 전에 정규화.
+        endpoint = _normalize_custom_endpoint(base_url)
     # 로컬 provider는 호출자가 짧은 타임아웃을 넘겨도 LOCAL_TIMEOUT 이하로
-    # 내려가지 않게 상향한다. (Why: 로컬 비전 추론이 기본 45초를 초과해
-    # 항상 timed out → 빨간불 폴백이 되는 사례 방지)
-    if provider in _LOCAL_PROVIDERS:
+    # 날려가지 않게 상향한다. (Why: 로컬 비전 추론이 기본 45초를 초과해
+    # 항상 timed out → 빨간불 폰백이 되는 사례 방지)
+    if provider in _LOCAL_PROVIDERS or (
+            is_custom and any(h in (base_url or "").lower()
+                              for h in ("localhost", "127.0.0.1"))):
         timeout = max(timeout, LOCAL_TIMEOUT)
-    key = _cache_key(provider, model, system, user, image_b64, image_sig, image_list)
+    # Custom은 엔드포인트별로 캐시를 분리해야 한다(같은 model·텍스트라도
+    # 다른 게이트웨이의 응답은 다를 수 있다).
+    cache_provider = f"Custom|{endpoint}" if is_custom else provider
+    key = _cache_key(cache_provider, model, system, user, image_b64, image_sig, image_list)
     with _cache_lock:
         if key in _cache:
             return _cache[key]
 
     api_key = (api_key or "").strip()
-    if not api_key and provider not in ("Ollama", "LM Studio"):
-        env = "OPENAI_API_KEY" if provider == "OpenAI" else "ANTHROPIC_API_KEY"
-        api_key = os.environ.get(env, "").strip()
+    if not api_key and provider not in ("Ollama", "LM Studio") and not is_custom:
+        env = _API_KEY_ENV.get(provider)
+        # 우선순위: 위젯 입력 > 루트 .env 파일 > OS 환경변수
+        api_key = _read_env_file_key(env) if env else ""
         if not api_key:
-            raise LLMError(f"API 키 없음 ({env} 환경변수 또는 노드 api_key 필요 — 규칙으로 폴백)")
+            api_key = os.environ.get(env, "").strip() if env else ""
+        if not api_key:
+            raise LLMError(
+                f"API 키 없음 ({env or provider} 환경변수·루트 .env 또는 노드 api_key 필요 — 규칙으로 폰백)")
 
-    if provider == "OpenAI":
-        if image_list:
-            user_block = [{"type": "text", "text": user}]
-            for b64 in image_list:
-                user_block.append(
-                    {"type": "image_url",
-                     "image_url": {"url": "data:image/png;base64," + b64}})
-            msgs = [{"role": "system", "content": system},
-                    {"role": "user", "content": user_block}]
-        else:
-            msgs = [{"role": "system", "content": system},
-                    {"role": "user", "content": user}]
-        raw = _post(
-            "https://api.openai.com/v1/chat/completions",
-            {"model": model or "gpt-4o-mini", "messages": msgs,
-             "temperature": 0.4},
-            {"Authorization": f"Bearer {api_key}"}, timeout)
+    if is_custom:
+        if not (model or "").strip():
+            raise LLMError(
+                "Custom (OpenAI 호환): model 칸이 비어 있음 — 엔드포인트가 제공하는 "
+                "모델명을 입력하세요 (예: qwen2.5-vl)")
+        raw = _openai_compatible_chat(
+            endpoint, model.strip(), api_key, system, user, image_list, timeout)
+    elif provider in _OPENAI_COMPATIBLE_PROVIDERS:
+        # OpenAI 호환 엔드포인트별 매핑
+        endpoints = {
+            "OpenAI": "https://api.openai.com/v1/chat/completions",
+            "LM Studio": "http://localhost:1234/v1/chat/completions",
+            "OpenRouter": "https://openrouter.ai/api/v1/chat/completions",
+            "Groq": "https://api.groq.com/openai/v1/chat/completions",
+            "DeepSeek": "https://api.deepseek.com/chat/completions",
+            "Mistral": "https://api.mistral.ai/v1/chat/completions",
+        }
+        defaults = {
+            "OpenAI": "gpt-4o-mini",
+            "LM Studio": "local-model",
+            "OpenRouter": "google/gemini-flash-1.5",
+            "Groq": "llama-3.2-90b-vision-preview",
+            "DeepSeek": "deepseek-chat",
+            "Mistral": "pixtral-12b-2409",
+        }
+        extra_headers = {}
+        if provider == "OpenRouter":
+            # OpenRouter는 출처 헤더를 권장한다.
+            extra_headers = {
+                "HTTP-Referer": "https://github.com/goriN/comfyui-GoRi-camera-director",
+                "X-Title": "GoRi Camera Director",
+            }
+        raw = _openai_compatible_chat(
+            endpoints[provider],
+            model or defaults[provider],
+            api_key, system, user, image_list, timeout,
+            extra_headers=extra_headers)
     elif provider == "Anthropic":
         if image_list:
             user_block = [{"type": "text", "text": user}]
@@ -226,6 +373,17 @@ def chat(provider: str, model: str, api_key: str,
              "system": system,
              "messages": [{"role": "user", "content": user_block}]},
             {"x-api-key": api_key, "anthropic-version": "2023-06-01"}, timeout)
+    elif provider == "Gemini":
+        # Gemini는 system 분리가 없고 URL에 키를 담는다.
+        parts = [{"text": system + "\n\n" + user}]
+        for b64 in image_list:
+            parts.append({"inline_data": {"mime_type": "image/png", "data": b64}})
+        raw = _post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model or 'gemini-1.5-flash'}:generateContent?key={api_key}",
+            {"contents": [{"role": "user", "parts": parts}],
+             "generationConfig": {"temperature": 0.4}},
+            {}, timeout)
     elif provider == "Ollama":
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": user}]
@@ -236,25 +394,6 @@ def chat(provider: str, model: str, api_key: str,
         payload = {"model": model or "llama3.2", "stream": False,
                    "messages": messages}
         raw = _post("http://localhost:11434/api/chat", payload, {}, timeout)
-    elif provider == "LM Studio":
-        # LM Studio OpenAI 호환 서버(localhost:1234). 키 불필요, 비전도
-        # OpenAI 규격(image_url data URL) 그대로. model이 비면 LM Studio가
-        # 현재 로드된 모델로 라우팅하는 자리표시자를 쓴다.
-        if image_list:
-            user_block = [{"type": "text", "text": user}]
-            for b64 in image_list:
-                user_block.append(
-                    {"type": "image_url",
-                     "image_url": {"url": "data:image/png;base64," + b64}})
-            msgs = [{"role": "system", "content": system},
-                    {"role": "user", "content": user_block}]
-        else:
-            msgs = [{"role": "system", "content": system},
-                    {"role": "user", "content": user}]
-        raw = _post("http://localhost:1234/v1/chat/completions",
-                    {"model": model or "local-model", "messages": msgs,
-                     "temperature": 0.4},
-                    {}, timeout)
     else:
         raise LLMError(f"알 수 없는 provider: {provider}")
 

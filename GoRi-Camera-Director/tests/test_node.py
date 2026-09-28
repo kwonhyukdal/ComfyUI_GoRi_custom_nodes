@@ -130,7 +130,7 @@ print("== llm 성공 경로 (네트워크 없이 stub으로 검증) ==")
 
 
 def _fake_chat(provider, model, api_key, system, user, timeout=45,
-               image_b64=None, image_sig=None, image_b64s=None):
+               image_b64=None, image_sig=None, image_b64s=None, base_url=""):
     return {
         "scene": "A cat asleep on a sunlit windowsill, dust motes drifting in the light.",
         "camera": {"shot": "근접 (CU)", "lens": "85mm f/1.4 (bokeh)", "angle": "로우앵글 (low angle)",
@@ -145,7 +145,7 @@ _calls = {"vision": 0}
 
 
 def _fake_vision_chat(provider, model, api_key, system, user, timeout=45,
-                      image_b64=None, image_sig=None, image_b64s=None):
+                      image_b64=None, image_sig=None, image_b64s=None, base_url=""):
     _calls["vision"] += 1
     VisionPayloads.append((provider, image_b64, image_sig, user, image_b64s))
     return {
@@ -636,7 +636,7 @@ print("-- B2: LLM extra negative 병합 --")
 
 
 def _fake_chat_neg(provider, model, api_key, system, user, timeout=45,
-                   image_b64=None, image_sig=None, image_b64s=None):
+                   image_b64=None, image_sig=None, image_b64s=None, base_url=""):
     return {
         "scene": "A cat asleep on a sunlit windowsill.",
         "camera": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)",
@@ -1232,9 +1232,10 @@ class _TimeoutProbe:
 
     def __call__(self, url, payload, headers, timeout):
         self.timeout = timeout
-        # provider별 응답 형식이 다르므로 OpenAI/Ollama 양쪽 키를 모두 제공
+        # provider별 응답 형식이 다르므로 OpenAI/Ollama/Gemini 키를 모두 제공
         return {"choices": [{"message": {"content": "{}"}}],
-                "message": {"content": "{}"}}
+                "message": {"content": "{}"},
+                "candidates": [{"content": {"parts": [{"text": "{}"}]}}]}
 
 
 llm_client.clear_cache()
@@ -1504,6 +1505,735 @@ try:
 finally:
     llm_client._post = _orig_post_r19
 llm_client.clear_cache()
+
+print("-- R20: 샷 명시 감지·모순 경고 기준 통일 (최장 일치) --")
+check("R20: 한글 '전신' 명시 → FS 샷 확정",
+      cd.topic_shot_label("여성이 파티 드레스를 입고 전신 모습을 보여주는 장면")
+      == "전신 (FS)")
+check("R20: 영문 bare 'full body' 명시 → FS 샷 확정",
+      cd.topic_shot_label("a woman showing her full body") == "전신 (FS)")
+check("R20: 규칙이 다른 샷을 골라도 명시 샷이 이긴다",
+      cd.topic_shot_label("전신으로 보여주는 인물") == "전신 (FS)"
+      and "전신" in cd.TOPIC_SHOT_PHRASES["전신 (FS)"])
+check("R20: 명시 샷 반영 시 모순 경고 없음",
+      cd.scene_camera_mismatch("전신 모습의 여성", {"shot": "전신 (FS)"}) is None)
+check("R20: 한글 중첩 — '중근접'은 CU가 아니라 MCU로 판정",
+      cd.topic_shot_label("얼굴 중근접 클로즈") == "중근접 (MCU)")
+check("R20: 한글 중첩 — '극원경'은 WS가 아니라 EWS로 판정",
+      cd.topic_shot_label("도시의 극원경 풍경") == "극원경 (EWS)")
+check("R20: LLM prose 모순 경고는 여전히 작동",
+      cd.scene_camera_mismatch("a medium close-up portrait",
+                               {"shot": "전신 (FS)"}) is not None)
+check("R20: 일치하는 장면(FS)은 무모순",
+      cd.scene_camera_mismatch("a full-length view of her outfit",
+                               {"shot": "전신 (FS)"}) is None)
+
+print("-- R21: 신체 발란스·캐릭터 시트 참조·외양 체모 실사감 --")
+_director_r21 = cd.CameraDirector()
+llm_client.clear_cache()
+_orig_post_r21 = llm_client._post
+_HintPost.payload = None
+llm_client._post = _HintPost()
+_kw_r21 = dict(preset=cd.CUSTOM, automation="규칙 (auto)",
+               shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+               lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO, speed=cd.AUTO,
+               amplitude=cd.AUTO, api_key="k")
+try:
+    # 1) 신체 발란스 — 인물 주제면 참조 유무 무관 첨부, 풍경은 미첨부
+    _p21a, _n21a, _ = _director_r21.run(topic="여성 인물", image_list=None, **_kw_r21)
+    check("R21: 인물 주제 positive에 신체 발란스 가드 포함",
+          "body balance: natural human proportions" in _p21a, _p21a[-200:])
+    check("R21: 인물 주제 negative에 발란스 방어어 포함",
+          "disproportionate limbs" in _n21a, _n21a[-200:])
+    llm_client.clear_cache()
+    _p21b, _n21b, _ = _director_r21.run(topic="도시 야경 풍경", image_list=None, **_kw_r21)
+    check("R21: 풍경 주제엔 발란스 가드 미첨부",
+          "body balance" not in _p21b and "disproportionate limbs" not in _n21b,
+          _p21b[-160:])
+    # 2) 캐릭터 시트 — 시트 의도 + 이미지 연결 시 가드, 없으면 미첨부
+    llm_client.clear_cache()
+    _p21c, _n21c, _ = _director_r21.run(
+        topic="캐릭터 시트를 참고해 같은 인물로 촬영", image_list=[VISION_IMG],
+        **_kw_r21)
+    check("R21: 시트 참조 positive에 신원 일관성 + 레이아웃 방지 문구",
+          "character sheet reference" in _p21c
+          and "one identical person" in _p21c
+          and "no multi-panel arrangement" in _p21c, _p21c[-260:])
+    check("R21: 시트 참조 negative에 시트 레이아웃 방어어",
+          "contact sheet" in _n21c and "sprite sheet" in _n21c, _n21c[-200:])
+    llm_client.clear_cache()
+    _p21d, _n21d, _ = _director_r21.run(
+        topic="여성 인물", image_list=[VISION_IMG], **_kw_r21)
+    check("R21: 시트 의도 없으면 시트 가드 미첨부",
+          "character sheet reference" not in _p21d
+          and "contact sheet" not in _n21d, _p21d[-160:])
+    # 3) 외양 체모 실사감 — 9/10 연결 시 체모 문구 + negative 방어어
+    llm_client.clear_cache()
+    _ten_r21 = [VISION_IMG] * 10
+    _p21e, _n21e, _ = _director_r21.run(topic="여성 인물", image_list=_ten_r21,
+                                        **_kw_r21)
+    check("R21: 외양 참조 positive에 체모 실사감 문구 포함",
+          "individual strands growing from the skin" in _p21e
+          and "no clumped patches" in _p21e, _p21e[-240:])
+    check("R21: 외양 참조 negative에 체모 방어어 포함",
+          "sticker-like body hair" in _n21e
+          and "clumped hair patches" in _n21e, _n21e[-200:])
+    check("R21: 발란스·외양 가드 플래그 저장 (Skills 병합용)",
+          _director_r21._last_body_balance is True
+          and _director_r21._last_appearance_ref is True, "flags")
+finally:
+    llm_client._post = _orig_post_r21
+llm_client.clear_cache()
+
+print("-- R22: 다중 인물 자동 분류 (인물/사물 역할 + 주체 자동 선출) --")
+# 1) 사물 역할 검출 헬퍼
+check("R22: 사물 역할 검출(이미지 2의 핸드백)",
+      cd._object_role_slots("이미지 2의 핸드백을 든 장면") == {2})
+check("R22: 사물 역할 검출(EN wristwatch from reference image 4)",
+      cd._object_role_slots("wristwatch from reference image 4") == {4})
+check("R22: 사물 역할 없으면 빈 집합",
+      cd._object_role_slots("여성 인물") == set())
+
+# 2) 역할 계획 — 주체 자동 선출 + 분류
+_plan_a = cd._person_object_plan("이미지 1번 핸드백, 이미지 2번 여성", [1, 2])
+check("R22: 첫 슬롯이 사물이면 다음 인물이 주 피사체",
+      _plan_a["main"] == 2 and _plan_a["objects"] == [1], str(_plan_a))
+_plan_b = cd._person_object_plan(
+    "이미지 1번 여성, 이미지 2번 핸드백, 이미지 3번 남성", [1, 2, 3])
+check("R22: 첫 슬롯이 인물이면 주체 유지 + 분류",
+      _plan_b["main"] == 1 and _plan_b["persons"] == [3]
+      and _plan_b["objects"] == [2], str(_plan_b))
+_plan_c = cd._person_object_plan("여성 인물", [1, 2])
+check("R22: 근거 없으면 기존 규약 유지",
+      _plan_c["main"] == 1 and _plan_c["persons"] == []
+      and _plan_c["objects"] == [], str(_plan_c))
+
+# 3) 가드 반영 — reference_guard / build_secondary_role_anchor / body_proportion_guard
+_guard_a = cd.reference_guard(2, [1, 2], "이미지 1번 핸드백, 이미지 2번 여성")
+check("R22: reference_guard가 여성 슬롯을 주 피사체로",
+      "as the only main human identity, use reference image(s) 1" in _guard_a,
+      _guard_a[:160])
+_guard_b = cd.reference_guard(3, [1, 2, 3],
+                              "이미지 1번 여성, 이미지 2번 핸드백을 든 장면, "
+                              "이미지 3번 남성과 여성이 서로 마주보기")
+check("R22: duo 가드에 사물 슬롯 소품 제한 문구 포함",
+      "only as props/objects, never as people" in _guard_b
+      and "reference image(s) 2" in _guard_b, _guard_b[:200])
+_anchor_a = cd.build_secondary_role_anchor(2, "이미지 1번 핸드백, 이미지 2번 여성",
+                                           [1, 2])
+check("R22: build_secondary_role_anchor가 여성 슬롯을 주체로",
+      "Use reference image 2 as the only main subject" in _anchor_a,
+      _anchor_a[:120])
+_body_a = cd.body_proportion_guard(2, "이미지 1번 핸드백, 이미지 2번 여성", [1, 2])
+check("R22: body_proportion_guard가 여성 슬롯을 identity/body 참조로",
+      "use reference image 2 as the identity and body reference" in _body_a,
+      _body_a[:120])
+
+# 4) 5인 단체 사진 일반화
+_anchor_b = cd.build_duo_person_anchor(
+    5, "이미지 2의 남성, 이미지 3의 여성, 이미지 4의 남성, 이미지 5의 여성과 함께 단체 사진",
+    [1, 2, 3, 4, 5])
+check("R22: 5인 단체 앵커(Five main people + 5 슬롯 매핑)",
+      "Five main people" in _anchor_b
+      and "reference image 2" in _anchor_b and "reference image 5" in _anchor_b,
+      _anchor_b[:200])
+
+# 5) LLM image_note 반영 (주체 교체 + 사물 소품 제한 + 내용 식별 지시)
+_director_r22 = cd.CameraDirector()
+llm_client.clear_cache()
+_orig_post_r22 = llm_client._post
+_HintPost.payload = None
+llm_client._post = _HintPost()
+_kw_r22 = dict(preset=cd.CUSTOM, automation="AI 판단 (llm)",
+               shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+               lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO, speed=cd.AUTO,
+               amplitude=cd.AUTO, api_key="k")
+try:
+    _director_r22.run(topic="이미지 1번 핸드백, 이미지 2번 여성",
+                      image_list=[VISION_IMG] * 2, **_kw_r22)
+    _msgs22 = _HintPost.payload["messages"]
+    _user22 = " ".join(
+        c.get("text", "") if isinstance(c, dict) else str(c)
+        for c in _msgs22[1]["content"]) if isinstance(_msgs22[1]["content"], list) \
+        else _msgs22[1]["content"]
+    check("R22: LLM 노트가 여성 슬롯을 주 피사체로 지정",
+          "Use reference image 2 as the only main human identity" in _user22,
+          _user22[-300:])
+    check("R22: LLM 노트가 사물 슬롯을 소품 제한",
+          "only as props/objects, never as people" in _user22, _user22[-300:])
+    check("R22: LLM 노트에 참조 내용 식별 지시 포함",
+          "whether it depicts a person or an object" in _user22, _user22[-300:])
+finally:
+    llm_client._post = _orig_post_r22
+llm_client.clear_cache()
+
+print("-- R23: 정밀 검토 후속 수정 (앵커 계획 연동·outfit 게이트·사물 어휘·image_out) --")
+# F1: identity 앵커가 역할 주체(실제 인물) 슬롯을 identity 소스로
+check("R23: identity 앵커가 사물 아닌 인물 슬롯(2번)을 identity 소스로",
+      cd.build_identity_anchor(2, "이미지 1번 핸드백을 든 장면, 이미지 2번 여성",
+                               [1, 2])
+      .startswith("Use reference image 2 as the exact identity source"))
+check("R23: 근거 없으면 identity 앵커는 첫 슬롯 유지(하위 호환)",
+      cd.build_identity_anchor(2, "여성 인물", [1, 2])
+      .startswith("Use reference image 1 as the exact identity source"))
+
+# F2: single 앵커가 유일 인물 슬롯으로 발화
+check("R23: single 앵커가 유일 인물 슬롯(2번)으로 발화",
+      cd.build_single_person_anchor(2, "이미지 1번 핸드백을 든 장면, 이미지 2번 여성",
+                                    [1, 2])
+      .startswith("Exactly one main person in the output, using reference image 2"))
+check("R23: duo 이상이면 single 앵커 억제 유지",
+      cd.build_single_person_anchor(2, "Image 1의 여성과 Image 2의 남성이 서로 마주보기",
+                                    [1, 2]) == "")
+
+# F3: outfit 게이트 정밀화 — 의상 슬롯만 제외, 다른 인물 duo 보존
+_t23 = "이미지 2의 원피스로 갈아입은 여성과 이미지 3번 남성이 서로 마주보기"
+check("R23: 혼합 의상+인물 씬에서 다른 인물 duo 보존",
+      cd.build_duo_person_anchor(3, _t23, [1, 2, 3]).startswith("Two main people"),
+      cd.build_duo_person_anchor(3, _t23, [1, 2, 3])[:80])
+check("R23: 혼합 씬에서 의상 슬롯만 인물 번호에서 제외",
+      2 not in cd._second_person_slots(_t23)
+      and 3 in cd._second_person_slots(_t23),
+      str(cd._second_person_slots(_t23)))
+check("R23: 순수 의상 실행은 duo 없음(구버전 동일)",
+      cd.build_duo_person_anchor(2, "이미지 2의 원피스를 여성에게 입히기", [1, 2]) == "")
+check("R23: 의상 슬롯 검출(이미지 2의 원피스)",
+      cd._clothing_role_slots("이미지 2의 원피스") == {2})
+
+# F4: 모호한 짧은 사물 어휘 오검출 제거
+check("R23: '검은 머리'가 사물로 오검출되지 않음",
+      cd._object_role_slots("이미지 2의 검은 머리를 가진 여성") == set())
+check("R23: 핸드백은 여전히 사물로 검출",
+      cd._object_role_slots("이미지 2의 핸드백") == {2})
+
+# F5: image_out이 실제 인물(주체) 이미지로 통과
+_enc_r23 = cd.CameraDirectorEncode()
+_kw_r23 = {"preset": cd.AUTO, "automation": "수동 (manual)",
+           "shot": cd.AUTO, "lens": cd.AUTO, "angle": cd.AUTO,
+           "composition": cd.AUTO, "lighting": cd.AUTO, "grade": cd.AUTO,
+           "motion": cd.AUTO, "speed": cd.AUTO, "amplitude": cd.AUTO,
+           "clip": fake_clip}
+_img_other = VISION_IMG * 0.5
+_out_mixed = _enc_r23.run_prompt(topic="이미지 1번 핸드백을 든 장면, 이미지 2번 여성",
+                                 image_1=VISION_IMG, image_2=_img_other, **_kw_r23)
+check("R23: image_out이 실제 인물(2번) 이미지로 통과",
+      _out_mixed[3] is _img_other, repr(type(_out_mixed[3])))
+_out_plain = _enc_r23.run_prompt(topic="여성 인물",
+                                 image_1=VISION_IMG, image_2=_img_other, **_kw_r23)
+check("R23: 근거 없으면 image_out은 첫 연결 유지(하위 호환)",
+      _out_plain[3] is VISION_IMG, repr(type(_out_plain[3])))
+
+
+print("-- R24: 신규 LLM 제공자 (Gemini / OpenRouter / Groq / DeepSeek / Mistral) --")
+_input_types_r24 = cd.CameraDirector.INPUT_TYPES()
+_provider_list = _input_types_r24["optional"]["provider"][0]
+check("R24: provider 목록에 Gemini 포함", "Gemini" in _provider_list, str(_provider_list))
+check("R24: provider 목록에 OpenRouter 포함", "OpenRouter" in _provider_list)
+check("R24: provider 목록에 Groq 포함", "Groq" in _provider_list)
+check("R24: provider 목록에 DeepSeek 포함", "DeepSeek" in _provider_list)
+check("R24: provider 목록에 Mistral 포함", "Mistral" in _provider_list)
+
+# 모델 교정
+for _p_r24, _d_r24 in {
+    "Gemini": "gemini-1.5-flash",
+    "OpenRouter": "google/gemini-flash-1.5",
+    "Groq": "llama-3.2-90b-vision-preview",
+    "DeepSeek": "deepseek-chat",
+    "Mistral": "pixtral-12b-2409",
+}.items():
+    check(f"R24: {_p_r24} 빈 모델 → 기본값",
+          cd.resolve_model(_p_r24, "") == _d_r24,
+          cd.resolve_model(_p_r24, ""))
+    if _p_r24 == "OpenRouter":
+        # OpenRouter는 OpenAI 모델도 프록시할 수 있어 교정하지 않는다.
+        check(f"R24: {_p_r24}는 OpenAI 모델명도 그대로 허용",
+              cd.resolve_model(_p_r24, "gpt-4o-mini") == "gpt-4o-mini",
+              cd.resolve_model(_p_r24, "gpt-4o-mini"))
+    else:
+        check(f"R24: {_p_r24}에 gpt-4o-mini 교정",
+              cd.resolve_model(_p_r24, "gpt-4o-mini") == _d_r24,
+              cd.resolve_model(_p_r24, "gpt-4o-mini"))
+check("R24: Gemini는 gemini- 접두사 유지",
+      cd.resolve_model("Gemini", "gemini-2.0-flash-exp") == "gemini-2.0-flash-exp")
+check("R24: OpenRouter는 자유 모델명 유지",
+      cd.resolve_model("OpenRouter", "meta-llama/llama-3.2-90b-vision-instruct:free")
+      == "meta-llama/llama-3.2-90b-vision-instruct:free")
+
+class _RecPost24:
+    url = None
+    payload = None
+    headers = None
+
+    def __call__(self, url, payload, headers, timeout):
+        _RecPost24.url, _RecPost24.payload, _RecPost24.headers = url, payload, headers
+        # OpenAI 호환 + Gemini 두 응답 형식 모두 커버
+        return {
+            "choices": [{"message": {"content": '{"scene":"x","camera":{}}'}}],
+            "candidates": [{"content": {"parts": [{"text": '{"scene":"x","camera":{}}'}]}}],
+        }
+
+llm_client.clear_cache()
+_orig_post_r24 = llm_client._post
+llm_client._post = _RecPost24()
+try:
+    # Gemini
+    llm_client.chat("Gemini", "gemini-1.5-flash", "DUMMY", "sys", "user text")
+    check("R24: Gemini endpoint 형식",
+          "generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+          in _RecPost24.url,
+          _RecPost24.url)
+    check("R24: Gemini 키는 URL 쿼리에 포함",
+          "key=DUMMY" in _RecPost24.url,
+          _RecPost24.url)
+    check("R24: Gemini payload는 contents.parts 구조",
+          "contents" in _RecPost24.payload
+          and "parts" in _RecPost24.payload["contents"][0],
+          str(_RecPost24.payload)[:200])
+
+    # Gemini vision
+    llm_client.clear_cache()
+    llm_client.chat("Gemini", "gemini-1.5-flash", "DUMMY", "sys", "look",
+                    image_b64="AAAA")
+    _parts24 = _RecPost24.payload["contents"][0]["parts"]
+    check("R24: Gemini 비전은 inline_data",
+          _parts24[1].get("inline_data", {}).get("mime_type") == "image/png",
+          str(_parts24)[:200])
+
+    # OpenRouter
+    llm_client.clear_cache()
+    llm_client.chat("OpenRouter", "google/gemini-flash-1.5", "DUMMY", "sys", "user text")
+    check("R24: OpenRouter endpoint",
+          _RecPost24.url == "https://openrouter.ai/api/v1/chat/completions",
+          _RecPost24.url)
+    check("R24: OpenRouter는 HTTP-Referer / X-Title 헤더 포함",
+          _RecPost24.headers.get("HTTP-Referer", "").startswith("https://github.com/")
+          and "X-Title" in _RecPost24.headers,
+          str(_RecPost24.headers))
+
+    # Groq
+    llm_client.clear_cache()
+    llm_client.chat("Groq", "llama-3.2-90b-vision-preview", "DUMMY", "sys", "user text")
+    check("R24: Groq endpoint",
+          _RecPost24.url == "https://api.groq.com/openai/v1/chat/completions",
+          _RecPost24.url)
+
+    # DeepSeek
+    llm_client.clear_cache()
+    llm_client.chat("DeepSeek", "deepseek-chat", "DUMMY", "sys", "user text")
+    check("R24: DeepSeek endpoint",
+          _RecPost24.url == "https://api.deepseek.com/chat/completions",
+          _RecPost24.url)
+
+    # Mistral
+    llm_client.clear_cache()
+    llm_client.chat("Mistral", "pixtral-12b-2409", "DUMMY", "sys", "user text")
+    check("R24: Mistral endpoint",
+          _RecPost24.url == "https://api.mistral.ai/v1/chat/completions",
+          _RecPost24.url)
+
+    # OpenAI 호환 비전 (Groq 예시)
+    llm_client.clear_cache()
+    llm_client.chat("Groq", "llama-3.2-90b-vision-preview", "DUMMY", "sys", "look",
+                    image_b64="AAAA")
+    _ub24 = _RecPost24.payload["messages"][1]["content"]
+    check("R24: OpenAI 호환 비전은 image_url data URL",
+          isinstance(_ub24, list) and _ub24[1]["type"] == "image_url"
+          and _ub24[1]["image_url"]["url"].startswith("data:image/png;base64,"),
+          str(_ub24)[:200])
+finally:
+    llm_client._post = _orig_post_r24
+llm_client.clear_cache()
+
+# 신규 클라우드 제공자는 기본 타임아웃(45초)을 유지해야 한다.
+_probe_r24_gemini = _TimeoutProbe()
+_probe_r24_openrouter = _TimeoutProbe()
+llm_client.clear_cache()
+_orig_post_r24t = llm_client._post
+try:
+    llm_client._post = _probe_r24_gemini
+    llm_client.chat("Gemini", "gemini-1.5-flash", "k", "sys", "user")
+    check("R24: Gemini 타임아웃은 기본 45초 유지",
+          _probe_r24_gemini.timeout == llm_client.DEFAULT_TIMEOUT,
+          f"timeout={_probe_r24_gemini.timeout}")
+    llm_client._post = _probe_r24_openrouter
+    llm_client.chat("OpenRouter", "x", "k", "sys", "user")
+    check("R24: OpenRouter 타임아웃은 기본 45초 유지",
+          _probe_r24_openrouter.timeout == llm_client.DEFAULT_TIMEOUT,
+          f"timeout={_probe_r24_openrouter.timeout}")
+finally:
+    llm_client._post = _orig_post_r24t
+llm_client.clear_cache()
+
+
+print("-- R25: Custom (OpenAI 호환) 제공자 — 임의 엔드포인트 연동 --")
+_input_types_r25 = cd.CameraDirector.INPUT_TYPES()
+check("R25: provider 목록에 Custom (OpenAI 호환) 포함",
+      "Custom (OpenAI 호환)" in _input_types_r25["optional"]["provider"][0],
+      str(_input_types_r25["optional"]["provider"][0]))
+check("R25: custom_base_url 위젯 존재",
+      "custom_base_url" in _input_types_r25["optional"],
+      str(list(_input_types_r25["optional"])))
+
+# 모델 교정: Custom은 사용자 입력값 그대로 (엔드포인트의 모델명을 직접 넣음)
+check("R25: Custom은 모델명 무교정",
+      cd.resolve_model("Custom (OpenAI 호환)", "my-org/my-model-x")
+      == "my-org/my-model-x",
+      cd.resolve_model("Custom (OpenAI 호환)", "my-org/my-model-x"))
+
+# 엔드포인트 정규화 3형태
+_norm = llm_client._normalize_custom_endpoint
+check("R25: Base URL 뒤 /chat/completions 자동 부착",
+      _norm("https://api.example.com/v1")
+      == "https://api.example.com/v1/chat/completions", _norm("https://api.example.com/v1"))
+check("R25: 끝 슬래시 정규화",
+      _norm("https://api.example.com/v1/")
+      == "https://api.example.com/v1/chat/completions", _norm("https://api.example.com/v1/"))
+check("R25: 전체 URL은 그대로 통과",
+      _norm("https://api.example.com/v1/chat/completions")
+      == "https://api.example.com/v1/chat/completions",
+      _norm("https://api.example.com/v1/chat/completions"))
+try:
+    _norm("   ")
+    check("R25: 빈 Base URL은 실패", False, "예외 없음")
+except llm_client.LLMError as e:
+    check("R25: 빈 Base URL은 명확한 안내와 함께 실패",
+          "custom_base_url" in str(e), str(e))
+
+class _RecPost25:
+    url = None
+    payload = None
+    headers = None
+    timeout = None
+
+    def __call__(self, url, payload, headers, timeout):
+        _RecPost25.url, _RecPost25.payload, _RecPost25.headers = url, payload, headers
+        _RecPost25.timeout = timeout
+        return {"choices": [{"message": {"content": '{"scene":"x","camera":{}}'}}]}
+
+_CUSTOM_LABEL = "Custom (OpenAI 호환)"
+
+# 호출 검증: URL·Bearer 헤더·payload
+llm_client.clear_cache()
+_orig_post_r25 = llm_client._post
+_probe25 = _RecPost25()
+llm_client._post = _probe25
+try:
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "SECRET", "sys", "user text",
+                    base_url="https://api.example.com/v1")
+    check("R25: Custom 호출 URL",
+          _probe25.url == "https://api.example.com/v1/chat/completions", str(_probe25.url))
+    check("R25: Custom Bearer 헤더",
+          _probe25.headers.get("Authorization") == "Bearer SECRET", str(_probe25.headers))
+    check("R25: Custom payload 모델명",
+          _probe25.payload.get("model") == "my-model", str(_probe25.payload)[:120])
+
+    # 키 없는 게이트웨이: Authorization 헤더 생략
+    llm_client.clear_cache()
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
+                    base_url="https://api.example.com/v1")
+    check("R25: Custom 키 없으면 Authorization 헤더 생략",
+          "Authorization" not in (_probe25.headers or {}), str(_probe25.headers))
+
+    # localhost Base URL → 로컬 타임아웃 상향
+    llm_client.clear_cache()
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
+                    base_url="http://127.0.0.1:8080/v1")
+    check("R25: Custom localhost는 로컬 타임아웃(300초)",
+          _probe25.timeout == llm_client.LOCAL_TIMEOUT, f"timeout={_probe25.timeout}")
+
+    # 원격 Base URL → 기본 타임아웃 유지
+    llm_client.clear_cache()
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
+                    base_url="https://api.example.com/v1")
+    check("R25: Custom 원격은 기본 타임아웃(45초)",
+          _probe25.timeout == llm_client.DEFAULT_TIMEOUT, f"timeout={_probe25.timeout}")
+
+    # model 비면 명확한 에러
+    llm_client.clear_cache()
+    try:
+        llm_client.chat(_CUSTOM_LABEL, "", "", "sys", "user text",
+                        base_url="https://api.example.com/v1")
+        check("R25: Custom 빈 model은 실패", False, "예외 없음")
+    except llm_client.LLMError as e:
+        check("R25: Custom 빈 model은 안내와 함께 실패",
+              "model" in str(e).lower(), str(e))
+
+    # 캐시 분리: 같은 model·텍스트라도 다른 엔드포인트는 재호출된다
+    llm_client.clear_cache()
+    _calls25 = {"n": 0}
+
+    def _counting_post25(url, payload, headers, timeout):
+        _calls25["n"] += 1
+        return {"choices": [{"message": {"content": '{"scene":"x","camera":{}}'}}]}
+
+    llm_client._post = _counting_post25
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
+                    base_url="https://api.one.com/v1")
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
+                    base_url="https://api.two.com/v1")
+    check("R25: 다른 엔드포인트는 캐시 공유 안 함 (2회 호출)",
+          _calls25["n"] == 2, f"calls={_calls25['n']}")
+    _calls25["n"] = 0
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
+                    base_url="https://api.one.com/v1")
+    check("R25: 같은 엔드포인트 재호출은 캐시 히트 (0회 호출)",
+          _calls25["n"] == 0, f"calls={_calls25['n']}")
+finally:
+    llm_client._post = _orig_post_r25
+llm_client.clear_cache()
+
+# 노드 경유(run_prompt) Custom 실행 — 로컬 게이트웨이 모킹
+class _NodePost25:
+    def __init__(self):
+        self.urls = []
+
+    def __call__(self, url, payload, headers, timeout):
+        self.urls.append(url)
+        return {"choices": [{"message": {"content":
+            '{"scene":"a woman in a red dress walks toward the camera",'
+            '"camera":{"shot":"중경 (MS)","lens":"50mm 표준 (standard)",'
+            '"angle":"수평 (eye-level)","composition":"삼분할 (rule of thirds)",'
+            '"lighting":"자연광 (natural)","grade":"뉴트럴 (neutral)",'
+            '"motion":"이동 (dolly in)","speed":"정상 (normal)",'
+            '"amplitude":"중간 (medium)"}}'}}]}
+
+_node_post25 = _NodePost25()
+_enc_r25 = cd.CameraDirectorEncode()
+_orig_post_r25n = llm_client._post
+llm_client._post = _node_post25
+llm_client.clear_cache()
+try:
+    _out_r25 = _enc_r25.run_prompt(
+        topic="여성 인물", preset=cd.AUTO, automation="AI 판단 (llm)",
+        shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+        composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
+        motion=cd.AUTO, speed=cd.AUTO, amplitude=cd.AUTO, clip=fake_clip,
+        provider=_CUSTOM_LABEL, model="gateway-model", api_key="",
+        custom_base_url="http://127.0.0.1:9000/v1")
+    check("R25: 노드 실행이 Custom 엔드포인트로 호출",
+          _node_post25.urls
+          and _node_post25.urls[0] == "http://127.0.0.1:9000/v1/chat/completions",
+          str(_node_post25.urls))
+    check("R25: Custom LLM 판정 결과가 카메라에 반영",
+          getattr(_enc_r25, "_last_camera", {}).get("shot") == "중경 (MS)",
+          str(getattr(_enc_r25, "_last_camera", {})))
+finally:
+    llm_client._post = _orig_post_r25n
+llm_client.clear_cache()
+
+print("-- R26: 사진 메타데이터 안전 (서버 기록 api_key 제거) --")
+check("R26: hidden에 prompt 선언",
+      cd.CameraDirector.INPUT_TYPES().get("hidden", {}).get("prompt") == "PROMPT",
+      str(cd.CameraDirector.INPUT_TYPES().get("hidden", {})))
+check("R26: Skills hidden에도 prompt 유지",
+      cd.CameraDirectorEncode.INPUT_TYPES().get("hidden", {}).get("prompt") == "PROMPT")
+import inspect as _inspect_r26
+check("R26: run/run_prompt가 prompt 인자 수신",
+      "prompt" in _inspect_r26.signature(cd.CameraDirector.run).parameters
+      and "prompt" in _inspect_r26.signature(cd.CameraDirectorEncode.run_prompt).parameters)
+
+
+def _prompt_r26(uid, key):
+    return {str(uid): {"class_type": "GoRi_CameraDirectorEncodeSkills",
+                       "inputs": {"api_key": key, "topic": "t"}},
+            "99": {"class_type": "GoRi_CameraDirectorEncodeSkills",
+                   "inputs": {"api_key": "other-key", "topic": "o"}}}
+
+
+check("R26: 자기 entry만 제거", cd._scrub_api_key_from_prompt(_prompt_r26(7, "sk-a"), 7) is True)
+_p_r26 = _prompt_r26(7, "sk-a")
+cd._scrub_api_key_from_prompt(_p_r26, 7)
+check("R26: 자기 키 빈칸", _p_r26["7"]["inputs"]["api_key"] == "")
+check("R26: 타 노드 키 보존", _p_r26["99"]["inputs"]["api_key"] == "other-key")
+check("R26: 문자열 unique_id도 동작",
+      cd._scrub_api_key_from_prompt(_prompt_r26(7, "sk-a"), "7") is True)
+check("R26: prompt None이면 False", cd._scrub_api_key_from_prompt(None, 7) is False)
+check("R26: prompt 비dict면 False", cd._scrub_api_key_from_prompt("x", 7) is False)
+check("R26: unique_id None이면 False",
+      cd._scrub_api_key_from_prompt(_prompt_r26(7, "sk-a"), None) is False)
+check("R26: 없는 id면 False",
+      cd._scrub_api_key_from_prompt(_prompt_r26(7, "sk-a"), 1234) is False)
+check("R26: 이미 빈 키면 False",
+      cd._scrub_api_key_from_prompt(_prompt_r26(7, ""), 7) is False)
+
+_enc_r26 = cd.CameraDirector()
+_p_exec_r26 = _prompt_r26(7, "sk-exec")
+_out_r26 = _enc_r26.run(topic="창가 고양이", preset=cd.AUTO, automation="규칙 (auto)",
+                        shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+                        composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
+                        motion=cd.AUTO, speed=cd.AUTO, amplitude=cd.AUTO,
+                        api_key="sk-exec", unique_id=7, prompt=_p_exec_r26)
+check("R26: 실행 후 기록 키 제거", _p_exec_r26["7"]["inputs"]["api_key"] == "")
+check("R26: 실행 결과 정상 (제거와 무관)", isinstance(_out_r26, tuple) and len(_out_r26) == 3)
+
+print("-- R27: 루트 .env 키 파일 (표준 방식) --")
+import tempfile as _tf_r27
+_tmpd_r27 = _tf_r27.mkdtemp()
+_envp_r27 = os.path.join(_tmpd_r27, ".env")
+with open(_envp_r27, "w", encoding="utf-8") as _f:
+    _f.write("# comment\nOPENAI_API_KEY=sk-file-1\nEMPTY=\nQUOTED=\"sk-q\"\n")
+_orig_env_override = llm_client._ENV_FILE_OVERRIDE
+llm_client._ENV_FILE_OVERRIDE = _envp_r27
+check("R27: .env 읽기", llm_client._read_env_file_key("OPENAI_API_KEY") == "sk-file-1")
+check("R27: 따옴표 처리", llm_client._read_env_file_key("QUOTED") == "sk-q")
+check("R27: 없는 키는 빈값", llm_client._read_env_file_key("NOPE") == "")
+check("R27: 빈 이름은 빈값", llm_client._read_env_file_key("") == "")
+
+check("R27: 저장(신규)", cd._write_env_file_key("GROQ_API_KEY", "gsk-new") is True)
+check("R27: 저장값 반영",
+      llm_client._read_env_file_key("GROQ_API_KEY") == "gsk-new")
+check("R27: 교체", cd._write_env_file_key("OPENAI_API_KEY", "sk-file-2") is True
+      and llm_client._read_env_file_key("OPENAI_API_KEY") == "sk-file-2")
+check("R27: 주석 보존", "# comment" in open(_envp_r27, encoding="utf-8").read())
+check("R27: 삭제(빈값)", cd._write_env_file_key("GROQ_API_KEY", "") is True
+      and llm_client._read_env_file_key("GROQ_API_KEY") == "")
+check("R27: 미등록 env 거부",
+      cd._write_env_file_key("EVIL_KEY", "x") is False)
+check("R27: 개행 키 거부",
+      cd._write_env_file_key("OPENAI_API_KEY", "a\nb") is False
+      and llm_client._read_env_file_key("OPENAI_API_KEY") == "sk-file-2")
+
+
+class _FilePost:
+    def __init__(self):
+        self.headers = None
+
+    def __call__(self, url, payload, headers, timeout):
+        _FilePost.headers = headers
+        return {"choices": [{"message": {
+            "content": '{"scene":"s","camera":{},"note":""}'}}]}
+
+
+_filepost_r27 = _FilePost()
+_orig_post_r27 = llm_client._post
+llm_client._post = _filepost_r27
+llm_client.clear_cache()
+try:
+    llm_client.chat("OpenAI", "gpt-4o-mini", "", "sys", "user")
+    check("R27: 위젯 빈칸이면 .env 키로 호출",
+          (_FilePost.headers or {}).get("Authorization") == "Bearer sk-file-2",
+          str(_FilePost.headers))
+    llm_client.clear_cache()
+    llm_client.chat("OpenAI", "gpt-4o-mini", "sk-widget", "sys", "user")
+    check("R27: 위젯값이 .env보다 우선",
+          (_FilePost.headers or {}).get("Authorization") == "Bearer sk-widget",
+          str(_FilePost.headers))
+    llm_client.clear_cache()
+    try:
+        llm_client.chat("DeepSeek", "deepseek-chat", "", "sys", "user")
+        check("R27: 키 전무 시 LLMError", False)
+    except llm_client.LLMError as _e:
+        check("R27: 키 전무 시 LLMError", ".env" in str(_e), str(_e))
+finally:
+    llm_client._post = _orig_post_r27
+    llm_client._ENV_FILE_OVERRIDE = _orig_env_override
+    llm_client.clear_cache()
+
+print("-- R28: 정밀 검토 후속 수정 7건 --")
+_cam_r28 = dict(cd.DEFAULTS)
+check("R28: Skills negative 노출 분기",
+      "deformed intimate anatomy" in cd.build_camera_negative(_cam_r28, topic="누드 초상"))
+check("R28: Skills negative 비노출 미첨부",
+      "deformed intimate anatomy" not in cd.build_camera_negative(_cam_r28, topic="공원 초상"))
+_cam_f14 = dict(cd.DEFAULTS, lens="85mm f/1.4 (bokeh)")
+check("R28: Skills negative f/1.4 분기",
+      "busy distracting background" in cd.build_camera_negative(_cam_f14))
+_cam_macro = dict(cd.DEFAULTS, lens="100mm 매크로 (macro)")
+_neg_macro = cd.build_camera_negative(_cam_macro)
+check("R28: Skills negative 매크로 분기",
+      "soft detail, muddy texture" in _neg_macro and "muddy detail" not in _neg_macro)
+
+_enc_r28 = cd.CameraDirectorEncode()
+_out_r28 = _enc_r28.run_prompt(
+    clip=fake_clip, topic="나체 여성 인물", preset=cd.AUTO, automation="수동 (manual)",
+    shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+    lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+    speed=cd.AUTO, amplitude=cd.AUTO,
+    image_1=VISION_IMG, image_2=VISION_IMG)
+_pos_r28 = _out_r28[2]
+check("R28: standalone 믹스 가드 중복 없음",
+      _pos_r28.count(cd.MIX_GUARD_POSITIVE) == 1, str(_pos_r28.count(cd.MIX_GUARD_POSITIVE)))
+check("R28: standalone 노출 가드 중복 없음",
+      _pos_r28.count("clearly defined natural intimate detail") == 1)
+_neg_r28 = _out_r28[1][0][1] if _out_r28[1] else ""
+check("R28: Skills negative에 노출 방어 포함",
+      "deformed intimate anatomy" in _neg_r28, _neg_r28[:200])
+
+_orig_prepare = cd.CameraDirectorEncode._prepare_qwen_image_data
+cd.CameraDirectorEncode._prepare_qwen_image_data = staticmethod(
+    lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+try:
+    _fb_r28 = _enc_r28.run_prompt(
+        clip=fake_clip, topic="고양이", preset=cd.AUTO, automation="수동 (manual)",
+        shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+        lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+        speed=cd.AUTO, amplitude=cd.AUTO)
+    check("R28: reference 준비 실패해도 실행 생존",
+          isinstance(_fb_r28, tuple) and len(_fb_r28) == 4)
+finally:
+    cd.CameraDirectorEncode._prepare_qwen_image_data = _orig_prepare
+
+
+class _QI28:
+    shape = (1, 8, 8, 3)
+
+    def __init__(self, bad=False):
+        self.bad = bad
+
+    def __getitem__(self, idx):
+        if self.bad:
+            raise RuntimeError("broken")
+        return self
+
+    def movedim(self, *a):
+        if self.bad:
+            raise RuntimeError("broken")
+        return self
+
+
+import types as _types_r28
+_m28 = _types_r28.ModuleType("comfy")
+_u28 = _types_r28.ModuleType("comfy.utils")
+_u28.common_upscale = lambda *a, **k: _QI28()
+_m28.utils = _u28
+_nh28 = _types_r28.ModuleType("node_helpers")
+_orig_mods = {k: sys.modules.get(k) for k in ("comfy", "comfy.utils", "node_helpers")}
+sys.modules["comfy"] = _m28
+sys.modules["comfy.utils"] = _u28
+sys.modules["node_helpers"] = _nh28
+_orig_key28 = cd._qwen_ref_cache_key
+cd._qwen_ref_cache_key = lambda image, w, h, vae: f"t28:{id(image)}"
+try:
+    _imgs28, _lats28 = cd.CameraDirectorEncode._prepare_qwen_image_data(
+        [(1, _QI28()), (2, _QI28(bad=True))], vae=None, latent_image=None)
+    check("R28: 깨진 이미지만 제외", len(_imgs28) == 1 and _lats28 in ([], None),
+          f"imgs={len(_imgs28)}")
+finally:
+    cd._qwen_ref_cache_key = _orig_key28
+    for _k, _v in _orig_mods.items():
+        if _v is None:
+            sys.modules.pop(_k, None)
+        else:
+            sys.modules[_k] = _v
+
+check("R28: provider None 교정 크래시 없음",
+      cd.resolve_model(None, "gpt-4o-mini") == "gpt-4o-mini")
+try:
+    llm_client.chat(None, "m", "", "s", "u")
+    check("R28: provider None은 LLMError", False)
+except llm_client.LLMError:
+    check("R28: provider None은 LLMError", True)
+except AttributeError as _e:
+    check("R28: provider None은 LLMError", False, f"AttributeError: {_e}")
+
+check("R28: 페이로드 검증 정상",
+      cd._valid_api_key_payload("OpenAI", "k") == ("OPENAI_API_KEY", "k"))
+check("R28: 비문자열 키 거부",
+      cd._valid_api_key_payload("OpenAI", 123) == (None, None))
+check("R28: Custom 제공자 거부",
+      cd._valid_api_key_payload("Custom (OpenAI 호환)", "k") == (None, None))
+check("R28: 9번 사물 분류 제외",
+      cd._person_object_plan("이미지 9의 가방", [9])["objects"] == [])
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
