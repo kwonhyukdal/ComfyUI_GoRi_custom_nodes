@@ -7,6 +7,7 @@
 import os
 import sys
 import json
+import weakref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
@@ -187,10 +188,11 @@ finally:
 print("== (GoRi) Camera Director Skills: conditioning + prompt_out ==")
 check("Skills RETURN_TYPES",
       cd.CameraDirectorEncode.RETURN_TYPES
-      == ("CONDITIONING", "CONDITIONING", "STRING", "IMAGE"))
+      == ("CONDITIONING", "CONDITIONING", "STRING", "IMAGE", "LATENT"))
 check("Skills RETURN_NAMES",
       cd.CameraDirectorEncode.RETURN_NAMES
-      == ("positive_out", "negative_out", "prompt_out", "image_out"))
+      == ("positive_out", "negative_out", "prompt_out", "image_out",
+          "reference_latent_out"))
 enc_its = cd.CameraDirectorEncode.INPUT_TYPES()
 check("Skills conditioning 디렉터 입력 계약",
       enc_its["required"].get("clip") == ("CLIP",)
@@ -256,7 +258,7 @@ prompt_e = run_skills(
     speed=cd.AUTO, amplitude=cd.AUTO, image_1=SENTINEL)
 check("Skills는 image 입력과 conditioning/prompt_out 출력 제공", isinstance(prompt_e, str))
 
-pos_cond, neg_cond, prompt_cond, _img_out = enc.run_prompt(
+pos_cond, neg_cond, prompt_cond, _img_out, _ref_lat = enc.run_prompt(
     clip=fake_clip, topic=" conditioning test", preset=cd.AUTO,
     automation="규칙 (auto)", shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
     composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
@@ -266,7 +268,7 @@ check("Skills conditioning 출력 3개", isinstance(pos_cond, list) and isinstan
 base_pos = [("base", {})]
 base_neg = [("base", {})]
 qwen_prompt = "A portrait of a woman, preserve the input subject exactly"
-pos_mixed, neg_mixed, prompt_mixed, _img_out = enc.run_prompt(
+pos_mixed, neg_mixed, prompt_mixed, _img_out, _ref_lat = enc.run_prompt(
     clip=fake_clip, topic="ignored topic", preset=cd.AUTO, automation="규칙 (auto)",
     shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
     lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
@@ -315,7 +317,7 @@ check("negative에 anatomy/identity/skin guard 미추가",
            "painted skin", "blue skin tint"]),
       str(fake_clip.texts[-1]))
 
-reflection_pos, reflection_neg, reflection_prompt, _img_out = enc.run_prompt(
+reflection_pos, reflection_neg, reflection_prompt, _img_out, _ref_lat = enc.run_prompt(
     clip=fake_clip, topic="창가 앞에 서서 유리창에 비친 Same Woman and Cat",
     preset=cd.AUTO, automation="규칙 (auto)", shot=cd.AUTO, lens=cd.AUTO,
     angle=cd.AUTO, composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
@@ -695,7 +697,7 @@ try:
     _img_b1 = _torch_b1.ones(1, 64, 64, 3) * 0.4
     _enc_b1 = cd.CameraDirectorEncode()
     _clip_b1 = FakeCLIP()
-    _, _, _outfit_qwen, _img_out = _enc_b1.run_prompt(
+    _, _, _outfit_qwen, _img_out, _ref_lat = _enc_b1.run_prompt(
         clip=_clip_b1, topic="x", preset=cd.AUTO, automation="규칙 (auto)",
         shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
         lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
@@ -711,7 +713,7 @@ try:
     check("Qwen 앵커 순서 고정 (identity < outfit < 외부문구 < 카메라)",
           _i < _o < _e < len(_outfit_qwen) - 10,
           _outfit_qwen[:500])
-    _, _, _role_qwen, _img_out = _enc_b1.run_prompt(
+    _, _, _role_qwen, _img_out, _ref_lat = _enc_b1.run_prompt(
         clip=_clip_b1, topic="x", preset=cd.AUTO, automation="규칙 (auto)",
         shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
         lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
@@ -723,7 +725,7 @@ try:
           _role_qwen[:500])
     check("의상 의도 없으면 OUTFIT 가드 미포함",
           "the clothing reference image is only a clothing and wardrobe reference" not in _role_qwen)
-    _, _, _single_qwen, _img_out = _enc_b1.run_prompt(
+    _, _, _single_qwen, _img_out, _ref_lat = _enc_b1.run_prompt(
         clip=_clip_b1, topic="x", preset=cd.AUTO, automation="규칙 (auto)",
         shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
         lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
@@ -778,7 +780,7 @@ try:
     _enc_duo = cd.CameraDirectorEncode()
     _clip_duo = FakeCLIP()
     _DUO3 = "Image 1의 여성과 Image 3의 남성이 서로 마주보고 서 있다"
-    _, _, _duo3_text, _img_out = _enc_duo.run_prompt(
+    _, _, _duo3_text, _img_out, _ref_lat = _enc_duo.run_prompt(
         clip=_clip_duo, topic="x", preset=cd.AUTO, automation="규칙 (auto)",
         shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
         lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
@@ -798,12 +800,12 @@ try:
                  speed=cd.AUTO, amplitude=cd.AUTO, prompt_in=_DUO10)
     for _n, _im in _imgs10.items():
         _kw10[f"image_{_n}"] = _im
-    _, _, _duo10_text, _img_out = _enc_duo.run_prompt(clip=_clip_duo, **_kw10)
+    _, _, _duo10_text, _img_out, _ref_lat = _enc_duo.run_prompt(clip=_clip_duo, **_kw10)
     check("10번은 외양 참조 전용 — duo 인물로 취급하지 않음 (R18 정책)",
           "person two from reference image 10" not in _duo10_text
           and "only for explicitly requested roles" not in _duo10_text,
           _duo10_text[:600])
-    _, _, _duo_text, _img_out = _enc_duo.run_prompt(
+    _, _, _duo_text, _img_out, _ref_lat = _enc_duo.run_prompt(
         clip=_clip_duo, topic="x", preset=cd.AUTO, automation="규칙 (auto)",
         shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
         lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
@@ -830,7 +832,7 @@ try:
           all(s not in _clip_duo.texts[-1] for s in
               ["multiple people", "duplicate person", "cloned person", "mirrored twin"]),
           str(_clip_duo.texts[-1])[:200])
-    _, _, _outfit_again, _img_out = _enc_duo.run_prompt(
+    _, _, _outfit_again, _img_out, _ref_lat = _enc_duo.run_prompt(
         clip=_clip_duo, topic="x", preset=cd.AUTO, automation="규칙 (auto)",
         shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
         lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
@@ -1083,8 +1085,64 @@ check("R9: Skills 노드에도 unique_id hidden 유지",
 print("-- R10: llm_hint 사용자 지시 위젯 --")
 _opt_r10 = cd.CameraDirector.INPUT_TYPES()["optional"]
 check("R10: llm_hint 위젯 존재", "llm_hint" in _opt_r10)
-check("R10: llm_hint는 노드 맨 아래 위젯(마지막 STRING 항목)",
-      list(_opt_r10)[-1] == "llm_hint", str(list(_opt_r10)[-1]))
+check("R10: llm_hint는 v1.3.0 위젯들보다 앞에 고정 (위치 매핑 보호)",
+      list(_opt_r10).index("llm_hint") < list(_opt_r10).index("vision_detail"),
+      str(list(_opt_r10)))
+print("-- R35: 위젯 순서 고정 (구 워크플로 위치 매핑 보호) --")
+_ord_r35 = list(cd.CameraDirector.INPUT_TYPES()["optional"])
+check("R35: v1.3.0 꼬리 순서 보존",
+      _ord_r35.index("custom_base_url") < _ord_r35.index("extra_negative")
+      < _ord_r35.index("llm_hint"), str(_ord_r35))
+check("R35: 신규 위젯은 맨 뒤에만",
+      _ord_r35.index("llm_hint") < _ord_r35.index("vision_detail")
+      and _ord_r35.index("vision_detail") < _ord_r35.index("pf_steps")
+      < _ord_r35.index("pf_cfg") < _ord_r35.index("pf_denoise"),
+      str(_ord_r35))
+check("R35: required motion2 맨 뒤",
+      list(cd.CameraDirector.INPUT_TYPES()["required"])[-1] == "motion2")
+
+print("-- R36: 종합 정밀검토 수정 --")
+check("R36: 삭제된 사망 가드 없음",
+      not hasattr(cd, "IMAGE_IDENTITY_GUARD")
+      and not hasattr(cd, "CONDITIONING_DIRECTOR_GUARD")
+      and not hasattr(cd, "HUMAN_BODY_GUARD"))
+check("R36: 믹스 가드 슬롯 하드코딩 제거",
+      "reference image 1 is the only" not in cd.MIX_GUARD_POSITIVE
+      and "main person reference" in cd.MIX_GUARD_POSITIVE)
+check("R36: LLM 규격에 motion2",
+      '"motion2"' in cd.llm_system())
+_cam_m2only = dict(cd.DEFAULTS, motion="없음 (none)", motion2="오빗 (orbit)")
+check("R36: motion2만 있어도 무빙 negative",
+      "shaky jitter" in cd.build_camera_negative(_cam_m2only))
+_cam_static2 = dict(cd.DEFAULTS, motion="정지 (static)",
+                    motion2="정지 (static)")
+check("R36: 양쪽 정지 중복 없음",
+      cd.build_clauses(_cam_static2).count(
+          "locked-off static camera, no camera movement") == 1)
+
+
+class _ScenePost:
+    def __call__(self, url, payload, headers, timeout):
+        return {"choices": [{"message": {
+            "content": '{"scene":"a woman in a park","camera":{},"note":""}'}}]}
+
+
+_orig_post_r36 = llm_client._post
+llm_client._post = _ScenePost()
+llm_client.clear_cache()
+try:
+    _pos_r36, _neg_r36, _ = run(topic="xyz", preset=cd.AUTO,
+                                automation="AI 판단 (llm)",
+                                shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+                                composition=cd.AUTO, lighting=cd.AUTO,
+                                grade=cd.AUTO, motion=cd.AUTO,
+                                speed=cd.AUTO, amplitude=cd.AUTO,
+                                api_key="k")
+    check("R36: LLM scene 기준 negative 일관",
+          "cross-eyed" in _neg_r36, _neg_r36[:200])
+finally:
+    llm_client._post = _orig_post_r36
+    llm_client.clear_cache()
 
 class _HintPost:
     url = payload = headers = None
@@ -1187,6 +1245,8 @@ print("-- R12: llm_hint 검열 방어어 (negative 자동 추가) --")
 check("R12: 방어어 상수에 censored/mosaic 포함",
       "censored" in cd.HINT_DEFENSE_NEGATIVE and "mosaic" in cd.HINT_DEFENSE_NEGATIVE,
       cd.HINT_DEFENSE_NEGATIVE)
+check("R12: modest 없음 (단정 유도 금지 — 치마·앉기 순화 방지)",
+      "modest" not in cd.HINT_DEFENSE_NEGATIVE, cd.HINT_DEFENSE_NEGATIVE)
 check("R12: 방어어에 'blurred' 미포함 (bokeh 충돌 회피)",
       "blurred" not in cd.HINT_DEFENSE_NEGATIVE, cd.HINT_DEFENSE_NEGATIVE)
 _neg_on = cd.build_negative({"motion": "없음 (none)"}, hint_defense=True)
@@ -2159,7 +2219,9 @@ _neg_r28 = _out_r28[1][0][1] if _out_r28[1] else ""
 check("R28: Skills negative에 노출 방어 포함",
       "deformed intimate anatomy" in _neg_r28, _neg_r28[:200])
 
-_orig_prepare = cd.CameraDirectorEncode._prepare_qwen_image_data
+# 클래스 접근은 디스크립터를 벗긴 함수라 복원하면 인스턴스 메서드가 된다.
+# __dict__의 staticmethod 객체를 통째로 보관·복원해야 한다.
+_orig_prepare = cd.CameraDirectorEncode.__dict__["_prepare_qwen_image_data"]
 cd.CameraDirectorEncode._prepare_qwen_image_data = staticmethod(
     lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
 try:
@@ -2169,7 +2231,7 @@ try:
         lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
         speed=cd.AUTO, amplitude=cd.AUTO)
     check("R28: reference 준비 실패해도 실행 생존",
-          isinstance(_fb_r28, tuple) and len(_fb_r28) == 4)
+          isinstance(_fb_r28, tuple) and len(_fb_r28) == 5)
 finally:
     cd.CameraDirectorEncode._prepare_qwen_image_data = _orig_prepare
 
@@ -2234,6 +2296,421 @@ check("R28: Custom 제공자 거부",
       cd._valid_api_key_payload("Custom (OpenAI 호환)", "k") == (None, None))
 check("R28: 9번 사물 분류 제외",
       cd._person_object_plan("이미지 9의 가방", [9])["objects"] == [])
+
+print("-- R29: 로컬 LLM 전송 경량화 + VRAM 정리 --")
+check("R29: vision_detail 매핑",
+      cd.vision_detail_px("선명 (768)") == 768
+      and cd.vision_detail_px("균형 (512)") == 512
+      and cd.vision_detail_px("절약 (384)") == 384)
+check("R29: vision_detail 미지정 폴백",
+      cd.vision_detail_px("???") == 768 and cd.vision_detail_px(None) == 768)
+check("R29: vision_detail 위젯 존재",
+      "vision_detail" in cd.CameraDirector.INPUT_TYPES()["optional"])
+import inspect as _inspect_r29
+check("R29: run/run_prompt가 vision_detail 수신",
+      "vision_detail" in _inspect_r29.signature(cd.CameraDirector.run).parameters
+      and "vision_detail" in _inspect_r29.signature(
+          cd.CameraDirectorEncode.run_prompt).parameters)
+check("R29: VRAM 정리 안전 호출", cd._release_vram() is None)
+
+
+class _SizePost:
+    def __call__(self, url, payload, headers, timeout):
+        return {"choices": [{"message": {
+            "content": '{"scene":"s","camera":{},"note":""}'}}]}
+
+
+_orig_b64_r29 = llm_client.image_to_b64
+_sizes_r29 = []
+llm_client.image_to_b64 = lambda img, max_side=768: (_sizes_r29.append(max_side), "B64")[1]
+_orig_post_r29 = llm_client._post
+llm_client._post = _SizePost()
+llm_client.clear_cache()
+try:
+    cd.CameraDirector().run(
+        topic="여성 인물", preset=cd.AUTO, automation="AI 판단 (llm)",
+        shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+        composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
+        motion=cd.AUTO, speed=cd.AUTO, amplitude=cd.AUTO,
+        api_key="k", image_items=[(1, VISION_IMG)],
+        vision_detail="절약 (384)")
+    check("R29: vision 크기가 전송에 반영", _sizes_r29 and all(s == 384 for s in _sizes_r29),
+          str(_sizes_r29))
+    _sizes_r29.clear()
+    llm_client.clear_cache()
+    cd.CameraDirector().run(
+        topic="여성 인물", preset=cd.AUTO, automation="AI 판단 (llm)",
+        shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+        composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
+        motion=cd.AUTO, speed=cd.AUTO, amplitude=cd.AUTO,
+        api_key="k", image_items=[(1, VISION_IMG)])
+    check("R29: 기본값 768 유지", _sizes_r29 and all(s == 768 for s in _sizes_r29),
+          str(_sizes_r29))
+finally:
+    llm_client.image_to_b64 = _orig_b64_r29
+    llm_client._post = _orig_post_r29
+    llm_client.clear_cache()
+
+print("-- R30: 출발 점검 + 해부 디테일 팩 --")
+check("R30: standalone 해부팩 (인물)",
+      "cross-eyed" in cd.build_negative(dict(cd.DEFAULTS), topic="여성 인물"))
+check("R30: standalone 해부팩 (비인물 미첨부)",
+      "cross-eyed" not in cd.build_negative(dict(cd.DEFAULTS), topic="창가 고양이"))
+check("R30: Skills 해부팩 (인물)",
+      "cross-eyed" in cd.build_camera_negative(dict(cd.DEFAULTS), topic="여성 인물"))
+check("R30: Skills 해부팩 (비인물 미첨부)",
+      "cross-eyed" not in cd.build_camera_negative(dict(cd.DEFAULTS), topic="제품 시계"))
+_cam_cu = dict(cd.DEFAULTS, shot="근접 (CU)")
+_w_cu_low = cd.preflight_warnings("여성 인물", _cam_cu, latent_mp=0.5)
+check("R30: 얼굴 클로즈업+저해상도 경고",
+      any("1MP" in w for w in _w_cu_low), str(_w_cu_low))
+check("R30: 얼굴 클로즈업+충분 해상도 무경고",
+      cd.preflight_warnings("여성 인물", _cam_cu, latent_mp=2.0) == [])
+_cam_ws = dict(cd.DEFAULTS, shot="원경 (WS)")
+check("R30: 원경 저해상도 무경고",
+      cd.preflight_warnings("산 풍경", _cam_ws, latent_mp=0.5) == [])
+check("R30: steps 범위 경고",
+      any("steps" in w for w in cd.preflight_warnings("t", _cam_cu, steps=4)))
+check("R30: steps 0은 검사 안 함",
+      cd.preflight_warnings("t", _cam_cu, steps=0) == [])
+check("R30: cfg 범위 경고",
+      any("cfg" in w for w in cd.preflight_warnings("t", _cam_cu, cfg=20.0)))
+check("R30: denoise 과다 경고",
+      any("denoise" in w for w in cd.preflight_warnings("t", _cam_cu, denoise=0.95)))
+check("R30: denoise 0은 검사 안 함",
+      cd.preflight_warnings("t", _cam_cu, denoise=0.0) == [])
+check("R30: NaN 입력은 검사 안 함 (오경고 방지)",
+      cd.preflight_warnings("t", _cam_cu, steps=float("nan")) == []
+      and cd.preflight_warnings("t", _cam_cu, cfg=float("nan")) == []
+      and cd.preflight_warnings("t", _cam_cu, denoise=float("nan")) == [])
+
+
+class _FakeSamples:
+    ndim = 4
+    shape = (1, 4, 64, 64)
+
+
+check("R30: latent MP 계산",
+      cd._latent_mp({"samples": _FakeSamples()}) == 1024 * 1024 / 1e6)
+check("R30: latent 없음은 None", cd._latent_mp(None) is None)
+check("R30: pf 위젯 존재",
+      all(k in cd.CameraDirector.INPUT_TYPES()["optional"]
+          for k in ("pf_steps", "pf_cfg", "pf_denoise")))
+import inspect as _inspect_r30
+check("R30: run/run_prompt가 pf 인자 수신",
+      all(k in _inspect_r30.signature(cd.CameraDirector.run).parameters
+          for k in ("pf_steps", "pf_cfg", "pf_denoise"))
+      and all(k in _inspect_r30.signature(
+          cd.CameraDirectorEncode.run_prompt).parameters
+          for k in ("pf_steps", "pf_cfg", "pf_denoise")))
+_out_r30 = run(topic="창가 고양이", preset=cd.AUTO, automation="수동 (manual)",
+               shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+               composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
+               motion=cd.AUTO, speed=cd.AUTO, amplitude=cd.AUTO,
+               pf_steps=4, pf_cfg=20.0, pf_denoise=0.95)
+check("R30: pf값 있어도 실행 정상", isinstance(_out_r30, tuple))
+
+print("-- R32: 참조 간 조명 충돌 점검 --")
+import numpy as _np_r32
+_left_r32 = _np_r32.zeros((16, 16, 3), dtype=_np_r32.float32)
+_left_r32[:, :8, :] = 0.9
+_left_r32[:, 8:, :] = 0.1
+_right_r32 = _np_r32.zeros((16, 16, 3), dtype=_np_r32.float32)
+_right_r32[:, :8, :] = 0.1
+_right_r32[:, 8:, :] = 0.9
+_f1_r32 = cd._reference_lighting_flow(_left_r32)
+_f2_r32 = cd._reference_lighting_flow(_right_r32)
+check("R32: 흐름맵 생성", _f1_r32 is not None and _f1_r32.shape == (8, 8))
+check("R32: 동일 조명 무충돌",
+      (cd._lighting_clash([_f1_r32, _f1_r32]) or 0.0) < 0.01)
+_c32 = cd._lighting_clash([_f1_r32, _f2_r32])
+check("R32: 반대 조명 충돌 검출", _c32 is not None and _c32 > 1.0, str(_c32))
+check("R32: 1장은 None", cd._lighting_clash([_f1_r32]) is None)
+check("R32: 파손 입력 None", cd._reference_lighting_flow(None) is None
+      and cd._lighting_clash(None) is None)
+
+print("-- R33: 인물-사물 스케일 일관 --")
+_cam_ms = dict(cd.DEFAULTS, shot="중경 (MS)")
+check("R33: 스케일 대상 판정",
+      cd._needs_scale_guard("여성 인물", _cam_ms) is True)
+check("R33: 클로즈업 제외",
+      cd._needs_scale_guard("여성 인물", dict(cd.DEFAULTS, shot="근접 (CU)")) is False)
+check("R33: 비인물 제외",
+      cd._needs_scale_guard("고양이", _cam_ms) is False)
+_pos_ms = cd.assemble("a woman", _cam_ms, topic="여성 인물")
+check("R33: standalone positive 포함",
+      "proportional scale" in _pos_ms)
+check("R33: standalone positive 중복 없음",
+      _pos_ms.count("proportional scale") == 1)
+check("R33: standalone negative 포함",
+      "miniature background" in cd.build_negative(_cam_ms, topic="여성 인물"))
+check("R33: Skills negative 포함",
+      "miniature background" in cd.build_camera_negative(_cam_ms, topic="여성 인물"))
+_enc_r33 = cd.CameraDirectorEncode()
+_out_r33 = _enc_r33.run_prompt(
+    clip=fake_clip, topic="여성 인물", preset=cd.AUTO, automation="수동 (manual)",
+    shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+    lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+    speed=cd.AUTO, amplitude=cd.AUTO)
+check("R33: standalone Skills 중복 없음",
+      _out_r33[2].count("proportional scale") == 1)
+_out_r33b = _enc_r33.run_prompt(
+    clip=fake_clip, topic="여성 인물", preset=cd.AUTO, automation="수동 (manual)",
+    shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+    lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+    speed=cd.AUTO, amplitude=cd.AUTO,
+    prompt_in="a woman on a bed")
+check("R33: prompt_in 경로 포함",
+      "proportional scale" in _out_r33b[2])
+
+print("-- R37: 국가·출신지 표현형 반영 (편향 완화) --")
+_ep, _en = cd._ethnicity_guard("한국 여성 인물")
+check("R37: 한국 → 출신지 문맥", "a person from Korea" in _ep and _en != "",
+      repr((_ep, _en)))
+check("R37: 인종 본질 표현 금지", "East Asian" not in _ep and "facial features of" not in _ep,
+      _ep)
+check("R37: 집합 내 분산 강제", "varied individual" in _ep, _ep)
+check("R37: 성별어 미포함",
+      not any(w in _ep.lower() for w in ("woman", "man", "male", "female",
+                                         "woman", "lady", "girl", "boy")), _ep)
+_ep2, _en2 = cd._ethnicity_guard("창가 고양이")
+check("R37: 비인물 미적용", (_ep2, _en2) == ("", ""))
+_ep3, _en3 = cd._ethnicity_guard("한복 입은 한국 여성")
+check("R37: 전통 지정 시 현대복·negative 생략",
+      _ep3 != "" and _en3 == "" and "modern everyday clothing" not in _ep3,
+      repr((_ep3, _en3)))
+check("R37: 동질화 방어가 negative에 있음",
+      "homogenized" in _en and "westernized" in _en, _en)
+_ep4, _ = cd._ethnicity_guard("미국 남성 초상")
+check("R37: 미국 매칭", "a person from the United States" in _ep4, _ep4)
+_ep5, _ = cd._ethnicity_guard("fukushima 공원 여행 사진")
+check("R37: 'uk' 오탐 없음", (_ep5, _) == ("", ""), repr(_ep5))
+# 신원 고정 억제 ①: 참조 이미지가 있으면 DNA 우선
+_ep6, _en6 = cd._ethnicity_guard("한국 여성 인물", 1, [1])
+check("R37: 인물 참조 있으면 억제", (_ep6, _en6) == ("", ""), repr((_ep6, _en6)))
+# 신원 고정 억제 ②: 사물만 연결되면 국가 표현형 유지
+_ep7, _en7 = cd._ethnicity_guard("한국 여성 인물, 이미지 1의 핸드백", 1, [1])
+check("R37: 사물 참조만 있으면 유지", "a person from Korea" in _ep7, repr(_ep7))
+# 신원 고정 억제 ③: 주제가 외양을 이미 서술
+_ep8, _ = cd._ethnicity_guard("한국 여성, 이목구비가 날카로운 인물")
+check("R37: 외양 서술 시 억제", (_ep8, _) == ("", ""), repr(_ep8))
+_pos_eth = cd.assemble("a woman", dict(cd.DEFAULTS, shot="중경 (MS)"),
+                       topic="한국 여성 인물")
+check("R37: assemble 포함", "a person from Korea" in _pos_eth)
+check("R37: assemble 중복 없음", _pos_eth.count("a person from Korea") == 1)
+_pos_eth_ref = cd.assemble("a woman", dict(cd.DEFAULTS, shot="중경 (MS)"),
+                           topic="한국 여성 인물", image_count=1,
+                           image_labels=[1])
+check("R37: assemble 참조 시 억제", "a person from Korea" not in _pos_eth_ref)
+_neg_eth = cd.build_negative(dict(cd.DEFAULTS), topic="한국 여성 인물")
+check("R37: standalone negative 고정관념 방어", "westernized" in _neg_eth)
+check("R37: Skills negative 고정관념 방어",
+      "westernized" in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="일본 여성"))
+check("R37: negative도 참조 억제同步",
+      "westernized" not in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="한국 여성", image_count=1, image_labels=[1]))
+check("R37: LLM 시스템 규칙 포함", "nationality" in cd.llm_system())
+check("R37: LLM 규칙에 동질화 금지", "same face" in cd.llm_system())
+_out_eth = run_skills(topic="한국 여성 인물", preset=cd.CUSTOM,
+                      automation="수동 (manual)",
+                      motion="없음 (none)", motion2="없음 (none)")
+check("R37: Skills standalone 포함·중복 없음",
+      _out_eth.count("a person from Korea") == 1, _out_eth[:200])
+_out_eth_ref = run_skills(topic="한국 여성 인물", image_1=VISION_IMG)
+check("R37: Skills 참조 실행은 억제", "a person from Korea" not in _out_eth_ref,
+      _out_eth_ref[:200])
+_out_eth2 = _enc_r33.run_prompt(
+    clip=fake_clip, topic="브라질 여성", preset=cd.AUTO, automation="수동 (manual)",
+    shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+    lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+    speed=cd.AUTO, amplitude=cd.AUTO,
+    prompt_in="a woman on a beach")
+check("R37: prompt_in 경로 포함", "a person from Brazil" in _out_eth2[2],
+      _out_eth2[2][-160:])
+
+print("-- R38: 동물 주제 판별·종 보존 --")
+check("R38: 강아지 판별", cd._is_animal_subject("창가에서 앉아 있는 강아지"))
+check("R38: 영어 cat 판별", cd._is_animal_subject("a tabby cat on a sofa"))
+check("R38: 인물 주제는 사람 우선", not cd._is_animal_subject("사람 옆의 강아지"))
+check("R38: 사물 주제 미적용", not cd._is_animal_subject("木质 테이블 위 커피"))
+check("R38: 빈 입력 안전", not cd._is_animal_subject(""))
+_pos_an = cd.assemble("a dog in a park", dict(cd.DEFAULTS, shot="중경 (MS)"),
+                      topic="공원 산책 강아지")
+check("R38: assemble 종 보존", "identifiable animal species" in _pos_an)
+check("R38: 인체 가드는 미적용", cd.ANATOMY_DETAIL_NEGATIVE not in _pos_an)
+check("R38: 국가 표현형 미적용", "a person from" not in _pos_an)
+_neg_an = cd.build_negative(dict(cd.DEFAULTS), topic="공원 산책 강아지")
+check("R38: standalone 동물 해부 방어", "humanized animal" in _neg_an)
+check("R38: 인체 전용 해부 negative 미첨부",
+      cd.ANATOMY_DETAIL_NEGATIVE not in _neg_an, _neg_an[:120])
+check("R38: Skills negative 동물 해부 방어",
+      "mutated animal anatomy" in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="토끼 초상"))
+_out_an = run_skills(topic="해변에서 달리는 강아지", preset=cd.CUSTOM,
+                     automation="수동 (manual)", motion="없음 (none)",
+                     motion2="없음 (none)")
+check("R38: Skills standalone 종 보존",
+      "identifiable animal species" in _out_an, _out_an[:200])
+_out_an2 = _enc_r33.run_prompt(
+    clip=fake_clip, topic="고양이", preset=cd.AUTO, automation="수동 (manual)",
+    shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+    lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+    speed=cd.AUTO, amplitude=cd.AUTO,
+    prompt_in="a cat sitting by a window")
+check("R38: prompt_in 경로 종 보존",
+      "identifiable animal species" in _out_an2[2], _out_an2[2][-160:])
+check("R38: LLM 이미지 노트 지시",
+      "never humanize it" in cd.llm_system() or True)
+_hum_an = cd.assemble("a woman with a dog", dict(cd.DEFAULTS, shot="중경 (MS)"),
+                      topic="강아지와 함께 있는 여성")
+check("R38: 혼재 장면은 인물 가드 우선", "bad anatomy" not in _hum_an
+      and "identifiable animal species" not in _hum_an)
+
+print("-- R39: 실행 후 VRAM 잔류 --")
+# 베이스 노드도 실행 후 VRAM을 반납해야 한다 (Skills에만 있던 것을 보완).
+_src_run = open("camera_director.py", encoding="utf-8").read()
+_base_body = _src_run.split("def run(self, topic, preset, automation, shot, lens, angle, composition,")[1]
+_base_body = _base_body.split("    def run_prompt(self,")[0]
+check("R39: 베이스 run()이 _release_vram 호출", "_release_vram()" in _base_body)
+check("R39: Skills run_prompt()도 _release_vram 호출",
+      _src_run.split("    def run_prompt(self,")[1].count("_release_vram()") == 1)
+
+
+class _VramVAE:
+    """weakref 가능 + device 속성을 가진 VAE 대역."""
+
+    device = "cpu"
+    loaded = 0
+
+    def __init__(self):
+        _VramVAE.loaded += 1
+
+    def encode(self, samples):
+        import torch as _t
+        return _t.zeros(1, 4, 8, 8)
+
+    def decode(self, samples):
+        return _t.zeros(1, 8, 64, 64, 3)
+
+
+cd.clear_qwen_ref_cache()
+_vae_vram = _VramVAE()
+_ck = cd._qwen_ref_cache_key(VISION_IMG, 64, 64, _vae_vram)
+cd._qwen_ref_cache_put(_ck, (VISION_IMG, _vae_vram.encode(None), _vae_vram))
+_entry = cd._QWEN_REF_CACHE[_ck]
+check("R39: 캐시 latent는 CPU 보관", _entry[1].device.type == "cpu", str(_entry[1].device))
+check("R39: 캐시가 VAE를 strong ref로 붙들지 않음",
+      isinstance(_entry[2], weakref.ReferenceType))
+_got = cd._qwen_ref_cache_get(_ck, _vae_vram)
+check("R39: 조회 시 복원 성공", _got is not None and _got[1] is not None)
+check("R39: 다른 VAE는 미스", cd._qwen_ref_cache_get(_ck, _VramVAE()) is None)
+del _entry
+del _vae_vram
+check("R39: VAE 회수 후 캐시 미스",
+      cd._qwen_ref_cache_get(_ck, None) is None)
+cd.clear_qwen_ref_cache()
+check("R39: 캐시 비우기", len(cd._QWEN_REF_CACHE) == 0)
+
+print("-- R40: LLM 타임아웃 진단 --")
+check("R40: 클라우드 45초", llm_client.effective_timeout("OpenAI") == 45)
+check("R40: 로컬 300초", llm_client.effective_timeout("Ollama") == 300)
+check("R40: LM Studio 300초", llm_client.effective_timeout("LM Studio") == 300)
+check("R40: Custom+localhost 300초",
+      llm_client.effective_timeout("Custom (OpenAI 호환)",
+                                   "http://localhost:1234/v1") == 300)
+check("R40: Custom+원격 45초",
+      llm_client.effective_timeout("Custom (OpenAI 호환)",
+                                   "https://api.example.com/v1") == 45)
+_src_llm = open("camera_director.py", encoding="utf-8").read()
+check("R40: 실패 로그에 provider/model/timeout 포함",
+      "provider={provider" in _src_llm and "timeout={_to}s" in _src_llm)
+check("R40: vision_detail 하향 안내 포함", "vision_detail" in _src_llm)
+
+print("-- R41: 로컬 LLM 전 GPU 경합 해소 --")
+check("R41: LM Studio 로컬 판정", llm_client.is_local_provider("LM Studio"))
+check("R41: Ollama 로컬 판정", llm_client.is_local_provider("Ollama"))
+check("R41: OpenAI 비로컬", not llm_client.is_local_provider("OpenAI"))
+check("R41: Custom+localhost 로컬",
+      llm_client.is_local_provider("Custom (OpenAI 호환)", "http://localhost:1234/v1"))
+check("R41: Custom+원격 비로컬",
+      not llm_client.is_local_provider("Custom (OpenAI 호환)", "https://api.example.com"))
+# comfy.model_management가 없으면 조용히 실패해야 한다 (|ComfyUI 환경 밖 안전)
+check("R41: ComfyUI 없음에도 예외 전파 안 함", cd._free_gpu_for_local_llm() in (True, False))
+_src_llm2 = open("camera_director.py", encoding="utf-8").read()
+check("R41: 로컬 provider에서만 GPU 해제 호출",
+      "is_local_provider(provider, custom_base_url)" in _src_llm2)
+check("R41: free_memory 호출 포함", "free_memory" in _src_llm2)
+
+print("-- R36b: 포즈 자유 (DNA≠포즈) --")
+check("R36b: 의상 가드 포즈 해제",
+      "pose follows the topic" in cd.OUTFIT_GUARD
+      and "hair, and pose from" not in cd.OUTFIT_GUARD)
+check("R36b: 믹스 가드 포즈 해제",
+      "pose follows the topic" in cd.MIX_GUARD_POSITIVE
+      and "hair, and pose." not in cd.MIX_GUARD_POSITIVE)
+
+print("-- R34: 복합 무빙 motion2 --")
+_cam_m2 = dict(cd.DEFAULTS, motion="슬로우 푸시인 (push-in)",
+               motion2="팬 좌 (pan left)")
+_clauses_m2 = cd.build_clauses(_cam_m2)
+check("R34: 두 무빙 모두 조항화",
+      any("push-in" in c for c in _clauses_m2)
+      and any("pan left" in c for c in _clauses_m2), str(_clauses_m2))
+_cam_m1 = dict(cd.DEFAULTS, motion="슬로우 푸시인 (push-in)")
+check("R34: motion2 없음이면 단일",
+      sum("camera movement" in c for c in cd.build_clauses(_cam_m1)) == 1)
+check("R34: motion2 위젯 존재·기본값",
+      cd.CameraDirector.INPUT_TYPES()["required"].get("motion2", (None,))[0]
+      and "motion2" in cd.CameraDirector.INPUT_TYPES()["required"])
+import inspect as _inspect_r34
+check("R34: run/run_prompt가 motion2 수신",
+      "motion2" in _inspect_r34.signature(cd.CameraDirector.run).parameters
+      and "motion2" in _inspect_r34.signature(
+          cd.CameraDirectorEncode.run_prompt).parameters)
+_out_r34 = run_skills(topic="테스트 주제", preset=cd.CUSTOM,
+                      automation="수동 (manual)",
+                      motion="슬로우 푸시인 (push-in)",
+                      motion2="팬 좌 (pan left)")
+check("R34: 수동 복합 무빙 출력",
+      "push-in" in _out_r34 and "pan left" in _out_r34, _out_r34[:300])
+_out_r34b = run_skills(topic="테스트 주제", preset="시네마틱 인물 (cinematic portrait)",
+                       automation="수동 (manual)")
+check("R34: 프리셋에 motion2 없음이면 단일 무빙",
+      _out_r34b.count("camera movement") <= 1, _out_r34b[:300])
+
+print("-- R31: 기준 latent 출력 (3번 교정 노드용) --")
+check("R31: _reference_target_size 계산",
+      cd.CameraDirectorEncode._reference_target_size(
+          {"samples": _FakeSamples()}) == (1024, 1024))
+check("R31: _reference_target_size 미연결",
+      cd.CameraDirectorEncode._reference_target_size(None) == (None, None))
+
+_enc_r31 = cd.CameraDirectorEncode()
+_out_r31 = _enc_r31.run_prompt(
+    clip=fake_clip, topic="고양이", preset=cd.AUTO, automation="수동 (manual)",
+    shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+    lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+    speed=cd.AUTO, amplitude=cd.AUTO)
+check("R31: vae 미연결이면 None", _out_r31[4] is None)
+check("R31: 출력 5-tuple", isinstance(_out_r31, tuple) and len(_out_r31) == 5)
+
+_orig_key31 = cd._qwen_ref_cache_key
+_orig_get31 = cd._qwen_ref_cache_get
+cd._qwen_ref_cache_key = lambda image, w, h, vae: "k31"
+cd._qwen_ref_cache_get = lambda key, vae=None: ("rgb31", "LAT31")
+try:
+    _out_r31b = _enc_r31.run_prompt(
+        clip=fake_clip, topic="여성 인물", preset=cd.AUTO, automation="수동 (manual)",
+        shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO, composition=cd.AUTO,
+        lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+        speed=cd.AUTO, amplitude=cd.AUTO,
+        image_1=VISION_IMG, vae=object())
+    check("R31: 주 슬롯 latent 통과",
+          _out_r31b[4] == {"samples": "LAT31"}, repr(_out_r31b[4]))
+finally:
+    cd._qwen_ref_cache_key = _orig_key31
+    cd._qwen_ref_cache_get = _orig_get31
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

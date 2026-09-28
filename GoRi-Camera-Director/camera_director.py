@@ -19,6 +19,7 @@ import re
 import sys
 import threading
 import time
+import weakref
 
 try:
     from . import llm_client
@@ -197,12 +198,14 @@ DEFAULTS = {
     "shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)",
     "composition": "삼분할 (rule of thirds)", "lighting": "흐린 부드러움 (soft overcast)",
     "grade": "시네마틱 필릭 (cinematic)", "motion": "없음 (none)",
+    "motion2": "없음 (none)",
     "speed": "보통 (normal)", "amplitude": "약간 (subtle)",
 }
 
 _TABLES = {
     "shot": SHOT, "lens": LENS, "angle": ANGLE, "composition": COMPOSITION,
     "lighting": LIGHTING, "grade": GRADE, "motion": MOTION,
+    "motion2": MOTION,
     "speed": SPEED, "amplitude": AMPLITUDE,
 }
 
@@ -287,6 +290,44 @@ def _notify_llm_status(node_id, state: str) -> None:
                          {"node": str(node_id), "state": state})
     except Exception:
         pass
+
+
+def _release_vram() -> None:
+    """실행 후 GPU 조각 반납. 왜(Why): reference VAE latent 캐시 등 실행 중
+    잡은 VRAM 조각이 다음 노드(KSampler 등)에 넘어가기 전 정리된다.
+    LRU 캐시 자체는 유지하므로(재실행 속도 불변) 수십 ms 비용뿐이다.
+    torch가 없어도 조용히 통과한다."""
+    try:
+        import gc as _gc
+        _gc.collect()
+        try:
+            import torch as _t
+            if hasattr(_t, "cuda") and _t.cuda.is_available():
+                _t.cuda.empty_cache()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _free_gpu_for_local_llm() -> bool:
+    """로컬 LLM 호출 전 ComfyUI 모델을 내려 GPU 자리를 비운다.
+
+    왜(Why): 로컬 LLM(LM Studio/Ollama)은 ComfyUI와 **별개 프로세스**라,
+    ComfyUI가 모델을 GPU에 앉힌 채면 LLM이 9B급 모델을 로드할 자리가 없다.
+    요청이 LM Studio 큐에 대기하다 300초 타임아웃 → 빨간불이 된다.
+    여기서 내리면 실제로 VRAM이 열리고, 이후 KSampler는 필요할 때 자동
+    재로드한다. 큰 값을 요청하되(8GB) 카드가 그만큼 비어 있으면 아무것도
+    내리지 않으므로 여유 있는 GPU에서는 비용이 0이다.
+    """
+    try:
+        import comfy.model_management as _mm
+        _dev = _mm.get_torch_device()
+        _mm.free_memory(1 << 33, _dev)
+        _release_vram()
+        return True
+    except Exception:
+        return False
 
 
 def _scrub_api_key_from_prompt(prompt, unique_id) -> bool:
@@ -446,6 +487,52 @@ def image_metrics(image) -> dict:
     return out
 
 
+def _reference_lighting_flow(image):
+    """reference 1장의 조명 흐름맵 (8x8 정규화). 실패 시 None.
+
+    왜(Why): 2장 이상 믹스 실행에서 참조 간 조명이 충돌하면(한 장은 좌광,
+    한 장은 우광) 합성 결과 조명이 깨진다. Keeper의 Retinex 근사와 동일
+    원리를 IMAGE 텐서/배열에 적용한다 (numpy만 사용).
+    """
+    try:
+        import numpy as _np
+        arr = image
+        if getattr(arr, "ndim", 0) == 4:
+            arr = arr[0]
+        if hasattr(arr, "detach"):
+            arr = arr.detach().cpu()
+        arr = arr.numpy() if hasattr(arr, "numpy") else _np.asarray(arr)
+        arr = _np.asarray(arr, dtype=_np.float32)
+        if arr.ndim != 3 or arr.shape[-1] < 3:
+            return None
+        lum = arr[..., :3].mean(axis=-1)
+        if lum.max() > 1.5:
+            lum = lum / 255.0
+        h, w = lum.shape
+        sh, sw = max(1, h // 8), max(1, w // 8)
+        small = lum[:sh * 8, :sw * 8].reshape(8, sh, 8, sw).mean(axis=(1, 3))
+        small = small - small.mean()
+        return (small / (float(small.std()) + 1e-6)).astype(_np.float32)
+    except Exception:
+        return None
+
+
+def _lighting_clash(flows) -> float | None:
+    """조명 흐름맵들 간 최대 MSE. 1장 이하·실패 시 None."""
+    try:
+        maps = [f for f in (flows or []) if f is not None]
+        if len(maps) < 2:
+            return None
+        worst = 0.0
+        for i in range(len(maps)):
+            for j in range(i + 1, len(maps)):
+                d = float(((maps[i] - maps[j]) ** 2).mean())
+                worst = max(worst, d)
+        return worst
+    except Exception:
+        return None
+
+
 def apply_image_hints(cam: dict, locked: set, metrics: dict) -> dict:
     """이미지 수치로 DEFAULTS인 항목만 조용히 바꾼다.
 
@@ -573,6 +660,19 @@ def resolve_rules_camera(topic: str, metrics: dict, fixed_cam, locked: set):
 # 조립 — 카메라 dict → 영문 조항 (혔스필드 하우스 블록 순서를 따름)
 # ---------------------------------------------------------------------------
 
+def _motion_clause(cam: dict, key: str) -> str:
+    """무빙 1개 분량의 영문 조항. 없음·빈값이면 "" (복합 무빙 공용)."""
+    label = cam.get(key, "")
+    text = MOTION.get(label, "")
+    if not text:
+        return ""
+    if label == "정지 (static)":
+        return text
+    bits = [AMPLITUDE.get(cam.get("amplitude"), ""),
+            SPEED.get(cam.get("speed"), ""), text]
+    return " ".join(b for b in bits if b) + " camera movement"
+
+
 def build_clauses(cam: dict) -> list:
     parts = [
         SHOT.get(cam.get("shot"), ""),
@@ -580,35 +680,22 @@ def build_clauses(cam: dict) -> list:
         ANGLE.get(cam.get("angle"), ""),
         COMPOSITION.get(cam.get("composition"), ""),
         LIGHTING.get(cam.get("lighting"), ""),
+        _motion_clause(cam, "motion"),
+        _motion_clause(cam, "motion2"),
     ]
-    motion = MOTION.get(cam.get("motion"), "")
-    if motion:
-        if cam.get("motion") == "정지 (static)":
-            parts.append(motion)
-        else:
-            bits = [AMPLITUDE.get(cam.get("amplitude"), ""),
-                    SPEED.get(cam.get("speed"), ""), motion]
-            parts.append(" ".join(b for b in bits if b) + " camera movement")
-    return [p for p in parts if p]
+    # 동일 문구 중복 제거 (예: motion/motion2 둘 다 정지).
+    out = []
+    for p in parts:
+        if p and p not in out:
+            out.append(p)
+    return out
 
 
 QUALITY_GUARD = (
     "high visual quality, "
     "natural human proportions when people are present, "
     "believable hands with five fingers, natural skin texture, "
-    "clear facial features, consistent subject identity"
-)
-
-IMAGE_IDENTITY_GUARD = (
-    "preserve the same subject identity as the reference image, "
-    "same facial structure, same hairstyle, same outfit, "
-    "same body proportions, same overall color identity"
-)
-
-CONDITIONING_DIRECTOR_GUARD = (
-    "GoRi Camera Director guard: preserve existing subject identity, facial identity lock, "
-    "facial structure, body proportions, natural anatomy, exactly two arms and two hands when visible, "
-    "natural skin tone, no duplicate body parts, background color does not tint the skin"
+     "clear facial features, consistent subject identity"
 )
 
 FACE_IDENTITY_GUARD = (
@@ -643,7 +730,7 @@ OUTFIT_GUARD = (
     "the clothing reference image is only a clothing and wardrobe reference, not a body reference, "
     "use the clothing from the clothing reference image as a separate garment layer "
     "placed on the person from the main reference image, preserve the original body shape, body proportions, "
-    "skin, face, hair, and pose from the main reference image, the garment must follow the existing human "
+    "skin, face, and hair from the main reference image, pose follows the topic, the garment must follow the existing human "
     "anatomy naturally, no clothing fusion with skin or body parts, no garment becoming "
     "body anatomy, no skin-like fabric on the garment, no melted garment edges, "
     "no body parts merging into clothing"
@@ -691,13 +778,6 @@ def _reference_items(image_items=None, image_list=None, image=None):
     return items
 
 
-HUMAN_BODY_GUARD = (
-    "body proportion preservation guard: preserve the original body proportions from the main human reference image, "
-    "same hip width, same waist-to-hip ratio, same torso length, same shoulder width, "
-    "do not exaggerate hips or pelvis, no widened pelvis, no exaggerated hourglass body, "
-    "natural body shape matching the reference image"
-)
-
 HUMAN_SUBJECT_KEYWORDS = (
     "woman", "women", "female", "girl", "lady", "human", "person", "people", "man", "men", "male",
     "fashion model", "portrait", "_character", "아이", "인물", "여성", "남성", "여자", "남자", "사람", "모델", " 인물"
@@ -717,6 +797,45 @@ def _is_human_subject(text: str) -> bool:
                          if k not in ("fashion model", "모델"))
         return any(keyword in t for keyword in keywords)
     return any(keyword in t for keyword in HUMAN_SUBJECT_KEYWORDS)
+
+
+# 동물 주제 판별. 왜(Why): 인물 키워드만 있어서 "강아지" 주제는 어떤 가드에도
+# 걸리지 않았다. 인체 가드는 그대로 미적용(오탐 없음)하지만 동물 해부·종 보존
+# 가드가 전혀 없으니 개가 사람 손을 갖거나 품종 초상화로 변하는 실패를 못 막는다.
+ANIMAL_SUBJECT_KEYWORDS = (
+    "cat", "kitten", "dog", "puppy", "horse", "bird", "parrot", "owl",
+    "rabbit", "bunny", "squirrel", "fox", "deer", "cow", "cattle", "sheep",
+    "goat", "pig", "bear", "wolf", "tiger", "lion", "leopard", "elephant",
+    "monkey", "panda", "penguin", "eagle", "duck", "swan", "seagull",
+    "snake", "turtle", "frog", "fish", "shark", "whale", "dolphin",
+    "hamster", "guinea pig", "ferret", "chameleon", "gecko", "parrotlet",
+    "고양이", "강아지", "애완동물", "반려동물", "동물", "말", "새", "앵무새",
+    "독수리", "앵무", "토끼", "다람쥐", "여우", "사슴", "소", "양", "염소",
+    "돼지", "곰", "호랑이", "사자", "원숭이", "판다", "펭귄", "오리", "백조",
+    "거북이", "뱀", "개구리", "물고기", "고래", "돌고래", "햄스터",
+)
+ANIMAL_SPECIES_POSITIVE = (
+    "one clearly identifiable animal species, accurate species proportions "
+    "(leg count, limb structure, muzzle, tail, ears), full animal body "
+    "anatomy, natural fur or feather texture, real animal proportions"
+)
+ANIMAL_ANATOMY_NEGATIVE = (
+    "humanized animal, human hands on an animal, human face on an animal body, "
+    "mutated animal anatomy, extra legs, missing legs, deformed paws, "
+    "fused limbs, wrong species, part human part animal, "
+    "cartoon caricature, exaggerated breed caricature, plastic toy animal, "
+    "stuffed animal, taxidermy mount, mascot costume"
+)
+
+
+def _is_animal_subject(text: str) -> bool:
+    """동물 주제면 True. 인물 키워드가 명시되면 사람 우선(장면 혼재 대응)."""
+    t = (text or "").lower()
+    if not t:
+        return False
+    if _is_human_subject(t):
+        return False
+    return any(keyword in t for keyword in ANIMAL_SUBJECT_KEYWORDS)
 
 
 def body_proportion_guard(image_count: int, topic: str, image_labels=None) -> str:
@@ -748,6 +867,24 @@ def outfit_guard(image_count: int, topic: str) -> str:
 
 
 MAX_REFERENCE_IMAGES = 10
+
+# LLM 비전 전송 크기. 왜(Why): 로컬 LLM 비전 추론이 느린 주범은 서버 연산이라
+# 노드가 빠르게 할 수 없고, 줄일 수 있는 건 전송 짐뿐이다. 기본값(768)은 기존
+# 동작 그대로 — 판단 디테일이 떨어질 수 있어 옵션으로만 제공한다.
+VISION_DETAIL = {
+    "선명 (768)": 768,
+    "균형 (512)": 512,
+    "절약 (384)": 384,
+}
+VISION_DETAIL_DEFAULT = "선명 (768)"
+
+
+def vision_detail_px(label: str) -> int:
+    """vision_detail 라벨 → 전송 한 변 px. 알 수 없으면 768(기존값)."""
+    try:
+        return int(VISION_DETAIL.get((label or "").strip(), 768))
+    except (ValueError, TypeError, AttributeError):
+        return 768
 
 
 def build_identity_anchor(image_count: int, topic: str, image_labels=None) -> str:
@@ -1179,6 +1316,13 @@ def assemble(scene: str, cam: dict, image_count: int = 0, topic: str = "", image
     nudity = nudity_anatomy_guard(topic or scene)
     if nudity:
         prompt = prompt.rstrip(". ") + ". " + nudity + "."
+    if _needs_scale_guard(topic or scene, cam):
+        prompt = prompt.rstrip(". ") + ". " + SCALE_COHERENCE_POSITIVE + "."
+    _eth_pos, _ = _ethnicity_guard(topic or scene, image_count, image_labels)
+    if _eth_pos:
+        prompt = prompt.rstrip(". ") + ". " + _eth_pos + "."
+    if _is_animal_subject(topic or scene):
+        prompt = prompt.rstrip(". ") + ". " + ANIMAL_SPECIES_POSITIVE + "."
     return add_quality_guard(prompt, image_count=image_count, topic=topic or scene,
                              image_labels=image_labels)
 
@@ -1249,20 +1393,220 @@ def _camera_failure_modes(cam: dict, topic: str = "") -> list:
         out.append("busy distracting background")
     if "매크로" in lens:
         out.append("soft detail, muddy texture")
-    if cam.get("motion") not in ("없음 (none)", "", None):
+    _m1, _m2 = cam.get("motion"), cam.get("motion2")
+    if (_m1 not in ("없음 (none)", "", None)
+            or _m2 not in ("없음 (none)", "", None)):
         out.append("shaky jitter, motion smear, frame warping")
     if _is_nudity_request(topic or ""):
         out.append("deformed intimate anatomy, blurred anatomy, featureless crotch area")
     return out
 
 
+# 해부 디테일 negative 팩 (눈·치아·귀·발·관절). 왜(Why): 기존 anatomy 가드가
+# 팔·손가락·얼굴 부위를 커버하지만 눈·치아 어긋남은 빠져 있었다. 인물 주제에만
+# 양쪽 negative(standalone + Skills)에 자동 첨부한다.
+ANATOMY_DETAIL_NEGATIVE = (
+    "cross-eyed, asymmetrical eyes, misaligned pupils, "
+    "deformed teeth, extra teeth, "
+    "deformed ears, malformed feet, extra toes, "
+    "broken joints, twisted knees"
+)
+
+
+# 스케일 일관 샷 — 인물 전신·주변이 함께 보이는 샷에서만 사물 스케일 점검.
+SCALE_SHOTS = ("중근접 (MCU)", "중경 (MS)", "전신 (FS)", "원경 (WS)")
+
+# 인물-사물 스케일 일관 문구. 왜(Why): 침대 같은 배경 사물이 인체 대비
+# 너무 작거나 크게 그려지는 원근·스케일 prior 흔들림을 프롬프트층에서 잡는다.
+# latent 당김으로는 스케일을 못 고치므로 이 가드가 담당한다.
+SCALE_COHERENCE_POSITIVE = (
+    "consistent proportional scale between the person and surrounding "
+    "furniture and background, natural perspective")
+SCALE_COHERENCE_NEGATIVE = (
+    "inconsistent object scale, miniature background, oversized person")
+
+
+def _needs_scale_guard(topic: str, cam: dict) -> bool:
+    """인물 + 전신·주변 가시 샷이면 스케일 가드 대상."""
+    try:
+        return bool(_is_human_subject(topic or "")
+                    and (cam or {}).get("shot", "") in SCALE_SHOTS)
+    except Exception:
+        return False
+
+
+# 국가·출신지 표현형 반영.
+# 왜(Why): "아랍"만 넣으면 수염·갈피·전통의상으로, "한국"만 넣으면 서구화로
+# 수렴한다(SDXL 인종 동질화 실증, Sci Rep 2025). 두 실패는 프롬프트 레벨에서
+# 막을 수 있다. 근거 3가지:
+#  1) 출처: EMNLP Findings 2023 "person from X" 문맥이 국가명 직접 표기보다
+#     고정관념·동질화가 적다 → 인종 본질 표현("East Asian facial features")
+#     대신 출신지 문맥을 쓴다.
+#  2) 분산: 같은 나라를 넣어도 사람마다 다른 얼굴이어야 한다. 집합 내 개별
+#     변이 문구를 positive에, "한 나라가 한 얼굴" 고정을 negative에 넣는다.
+#  3) 교차축: 인종 축만 건드리면 성별 등 다른 축이 29%에서 악화된다
+#     (EMNLP Findings 2025 InterMit) → 성별어는 절대 넣지 않는다.
+# 지역 묶음은 FairFace 7분류(CC BY 4.0, bias measurement 용)의 구획을 빌려
+# 국가→지역 대응에만 쓴다. 데이터셋 라벨이나 이미지를 동봉·복제하지 않는다.
+# 형식: 키워드튜플 → (지역, 영문 출신지 표기)
+ETHNICITY_GROUPS = (
+    (("한국", "korea", "korean"), "Korea"),
+    (("일본", "japan", "japanese"), "Japan"),
+    (("중국", "china", "chinese"), "China"),
+    (("태국", "thailand", "thai"), "Thailand"),
+    (("베트남", "vietnam", "vietnamese"), "Vietnam"),
+    (("인도", "india", "indian"), "India"),
+    (("미국", "america", "usa", "u.s"), "the United States"),
+    (("영국", "british", "england", "u.k", "united kingdom"),
+     "the United Kingdom"),
+    (("프랑스", "france", "french"), "France"),
+    (("독일", "germany", "german"), "Germany"),
+    (("브라질", "brazil", "brazilian"), "Brazil"),
+    (("멕시코", "mexico", "mexican"), "Mexico"),
+    (("이집트", "egypt", "egyptian"), "Egypt"),
+    (("아랍", "arab"), "an Arab country"),
+    (("나이지리아", "nigeria", "nigerian"), "Nigeria"),
+    (("케냐", "kenya", "kenyan"), "Kenya"),
+)
+TRADITIONAL_KEYWORDS = (
+    "한복", "기모노", "kimono", "hanfu", "traditional", "전통",
+    "사리", "sari", "히잡", "hijab", "터번", "turban",
+)
+# 주제에 이미 외양·얼굴 서술이 있으면 국가 표현형보다 그 서술이 우선이다.
+APPEARANCE_DESCRIBED_KEYWORDS = (
+    "얼굴", "외모", "외양", "이목구비", "얼굴형", "피부색", "피부톤",
+    "모발", "머리색", "얼박살",
+    "face", "facial features", "appearance", "complexion", "skin tone",
+    "hair color", "eye color", "freckle",
+)
+ETHNICITY_DIVERSITY_POSITIVE = "varied individual facial features within the group"
+ETHNICITY_MODERN_WEAR = "modern everyday clothing"
+ETHNICITY_STEREOTYPE_NEGATIVE = (
+    "westernized facial features, forced traditional costume, "
+    "historical costume by default, exotic stereotype, "
+    "every person from the same country looking identical, "
+    "one homogenized face type for a whole country"
+)
+
+
+def _ethnicity_identity_locked(topic: str, image_count: int,
+                               image_labels=None) -> bool:
+    """참조 이미지가 이미 신원을 고정했거나 주제가 외양을 서술하면 국가 표현형은 미첨부.
+
+    왜(Why): DNA(신원·외양)는 사용자가 준 픽셀 근거가 1순위다. 그 위에 국가
+    표현형을 덮으면 사용자가 정한 인물이 밀린다.
+    """
+    try:
+        text = (topic or "").lower()
+        if any(k in text for k in APPEARANCE_DESCRIBED_KEYWORDS):
+            return True
+        if image_count <= 0:
+            return False
+        plan = _person_object_plan(topic or "", image_labels)
+        return plan["main"] not in plan["objects"] or bool(plan["persons"])
+    except Exception:
+        return False
+
+
+def _ethnicity_guard(topic: str, image_count: int = 0,
+                     image_labels=None) -> tuple:
+    """(positive 조각, negative 조각). 조건 불충족이면 ("", "")."""
+    try:
+        t = (topic or "").lower()
+        if not _is_human_subject(topic or ""):
+            return "", ""
+        if _ethnicity_identity_locked(topic or "", image_count, image_labels):
+            return "", ""
+        for keywords, origin in ETHNICITY_GROUPS:
+            if any(k in t for k in keywords):
+                pos = f"a person from {origin}, {ETHNICITY_DIVERSITY_POSITIVE}"
+                neg = ""
+                if not any(k in t for k in TRADITIONAL_KEYWORDS):
+                    pos += ", " + ETHNICITY_MODERN_WEAR
+                    neg = ETHNICITY_STEREOTYPE_NEGATIVE
+                return pos, neg
+        return "", ""
+    except Exception:
+        return "", ""
+
+
+# 얼굴 클로즈업 샷 — latent가 작으면 얼굴 뭉개짐 확정이라 출발 점검 대상.
+FACE_CRITICAL_SHOTS = ("극접 (ECU)", "근접 (CU)")
+
+
+def _latent_mp(latent_image) -> float | None:
+    """sampling latent의 메가픽셀. 알 수 없으면 None (점검 생략)."""
+    try:
+        samples = latent_image.get("samples") if isinstance(latent_image, dict) else None
+        if samples is None or getattr(samples, "ndim", None) != 4:
+            return None
+        h, w = int(samples.shape[-2]) * 16, int(samples.shape[-1]) * 16
+        return (h * w) / 1e6
+    except Exception:
+        return None
+
+
+def _num_or_zero(v) -> float:
+    """위젯 수치 정규화. NaN·비수치는 0(검사 안 함)으로."""
+    try:
+        f = float(v)
+        if f != f:  # NaN
+            return 0
+        return f
+    except (ValueError, TypeError):
+        return 0
+
+
+def preflight_warnings(topic: str, camera: dict, latent_mp=None,
+                       steps: int = 0, cfg: float = 0.0,
+                       denoise: float = 0.0) -> list:
+    """출발 전 점검. 깨질 조합이면 경고 문구 목록 (0·빈값은 검사 안 함).
+
+    왜(Why): 얼굴 클로즈업+저해상도, 극단 CFG/스텝, 과다 denoise는 실행 전에
+    알 수 있는 확정 실패다. 모델 천장·시드 운은 여기서 못 잡는다.
+    순수 함수라 테스트가 직접 검증한다.
+    """
+    msgs = []
+    try:
+        steps = _num_or_zero(steps)
+        cfg = _num_or_zero(cfg)
+        denoise = _num_or_zero(denoise)
+        shot = (camera or {}).get("shot", "")
+        if (latent_mp is not None and shot in FACE_CRITICAL_SHOTS
+                and latent_mp < 1.0):
+            msgs.append(
+                f"얼굴 클로즈업({shot})인데 latent가 작음({latent_mp:.1f}MP) — "
+                "얼굴 뭉개짐 주의, 1MP 이상 권장")
+        if steps and (steps < 8 or steps > 150):
+            msgs.append(f"steps={steps} 범위 이탈 (8~150 권장) — 결과 불안정 가능")
+        if cfg and (cfg < 1.0 or cfg > 12.0):
+            msgs.append(f"cfg={cfg} 범위 이탈 (1.0~12.0 권장) — 파손·뻣뻣함 주의")
+        if denoise and not 0.0 < denoise <= 1.0:
+            msgs.append(f"denoise={denoise} 범위 이탈 (0 초과 1 이하)")
+        elif denoise and denoise > 0.9:
+            msgs.append(f"denoise={denoise} 과다 — 원본에서 멀어짐·재생성 뭉개짐 주의")
+    except Exception:
+        pass
+    return msgs
+
+
 def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
-                          topic: str = "") -> str:
-    """Build camera/video failure modes only, without identity or body guards."""
+                          topic: str = "", image_count: int = 0,
+                          image_labels=None) -> str:
+    """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
     neg = ["warped geometry, distorted perspective, broken framing"]
     neg.extend(_camera_failure_modes(cam, topic))
     if cam.get("grade") == "느와르 (noir)":
         neg.append("unwanted color cast")
+    if _is_human_subject(topic or ""):
+        neg.append(ANATOMY_DETAIL_NEGATIVE)
+    _, _eth_neg = _ethnicity_guard(topic or "", image_count, image_labels)
+    if _eth_neg:
+        neg.append(_eth_neg)
+    if _is_animal_subject(topic or ""):
+        neg.append(ANIMAL_ANATOMY_NEGATIVE)
+    if _needs_scale_guard(topic or "", cam):
+        neg.append(SCALE_COHERENCE_NEGATIVE)
     if prevent_duplicates:
         neg.extend(["multiple people", "duplicate person", "cloned person",
                     "mirrored twin", "background person"])
@@ -1274,7 +1618,7 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
 # 스스로 순화·블러·모자이크를 그리는 사례 방지. "blurred"는 bokeh와
 # 충돌하므로 의도적으로 제외했다. base run()과 Skills run_prompt 양쪽에서
 # 동일한 문구를 쓰므로 상수로 공유한다.)
-HINT_DEFENSE_NEGATIVE = "censored, mosaic, bar censor, pixelated, modest"
+HINT_DEFENSE_NEGATIVE = "censored, mosaic, bar censor, pixelated"
 
 
 # 다중 참조(2장 이상) 실행의 "믹스 변형" 방어어. (Why: 얼굴+의상 등 둘 이상의
@@ -1283,13 +1627,13 @@ HINT_DEFENSE_NEGATIVE = "censored, mosaic, bar censor, pixelated, modest"
 # 첫 번째 연결 이미지가 신원 소스라는 규약은 image_note/신원 앵커와 동일하다.
 # base run()과 Skills run_prompt 양쪽에서 공유한다.)
 MIX_GUARD_POSITIVE = (
-    "Reference mixing guard: reference image 1 is the only identity source "
+    "Reference mixing guard: the main person reference image is the only identity source "
     "(face, body shape, proportions); the other reference image(s) contribute "
     "only their requested role such as outfit, background, prop, product, "
     "style, lighting, composition, or mood. Garments from a clothing reference "
     "are a separate clothing layer placed over the main person's body, "
     "following the existing anatomy, preserving the main person's body shape, "
-    "skin, face, hair, and pose. No blending of two people into one, no mixed "
+    "skin, face, and hair; pose follows the topic. No blending of two people into one, no mixed "
     "facial features between references."
 )
 MIX_GUARD_NEGATIVE = ("clothing fusion with skin, melted garment edges, "
@@ -1376,7 +1720,8 @@ def character_sheet_guard(image_count: int, topic: str, image_labels=None) -> st
 def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str = "",
                    hint_defense: bool = False, mix_guard: bool = False,
                    appearance_ref: bool = False, body_balance: bool = False,
-                   character_sheet: bool = False) -> str:
+                   character_sheet: bool = False, image_count: int = 0,
+                   image_labels=None) -> str:
     neg = ["blurry, soft focus, jpeg artifacts, watermark, signature, text, logo",
            "warped geometry, distorted perspective, broken framing",
            "flat lighting, harsh unflattering light",
@@ -1386,6 +1731,15 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
     neg.extend(_camera_failure_modes(cam, topic))
     if cam.get("grade") == "느와르 (noir)":
         neg.append("color tint")
+    if _is_human_subject(topic or ""):
+        neg.append(ANATOMY_DETAIL_NEGATIVE)
+    _, _eth_neg_sa = _ethnicity_guard(topic or "", image_count, image_labels)
+    if _eth_neg_sa:
+        neg.append(_eth_neg_sa)
+    if _is_animal_subject(topic or ""):
+        neg.append(ANIMAL_ANATOMY_NEGATIVE)
+    if _needs_scale_guard(topic or "", cam):
+        neg.append(SCALE_COHERENCE_NEGATIVE)
     if hint_defense:
         neg.append(HINT_DEFENSE_NEGATIVE)
     if mix_guard:
@@ -1415,7 +1769,7 @@ def llm_system() -> str:
         '{"scene": "<English scene description, 1-3 sensory sentences, NO camera terms>",'
         ' "camera": {"shot": "<label>", "lens": "<label>", "angle": "<label>",'
         ' "composition": "<label>", "lighting": "<label>", "grade": "<label>",'
-        ' "motion": "<label>", "speed": "<label>", "amplitude": "<label>"},'
+        ' "motion": "<label>", "motion2": "<label>", "speed": "<label>", "amplitude": "<label>"},'
         ' "negative": "<optional extra English negative phrases>"}\n'
         "Rules:\n"
         "- Every camera value MUST be copied EXACTLY from the allowed labels below "
@@ -1436,6 +1790,11 @@ def llm_system() -> str:
         "description here)' — write a real description or no replacement at all.\n"
         "- The scene prose MUST agree with the camera labels you return (shot, lens, "
         "angle, composition). Do not contradict them.\n"
+        "- If the topic names a nationality/country, describe the person as a "
+        "person from that country with varied individual features; never give "
+        "everyone from one country the same face, never default to westernized "
+        "features, and never add traditional costume unless requested. Do not "
+        "mention the person's gender or ethnicity label explicitly.\n"
         f"Allowed labels: {json.dumps(allowed, ensure_ascii=False)}"
     )
 
@@ -1509,7 +1868,7 @@ class CameraDirector:
                                      "dynamicPrompts": False}),
                 "preset": (preset_names(),),
                 "automation": (["AI 판단 (llm)", "규칙 (auto)", "수동 (manual)"],
-                               {"default": "규칙 (auto)"}),
+                               {"default": "규칙 (auto)", "label": "automation ai"}),
                 "shot": ([AUTO] + list(SHOT),),
                 "lens": ([AUTO] + list(LENS),),
                 "angle": ([AUTO] + list(ANGLE),),
@@ -1519,6 +1878,8 @@ class CameraDirector:
                 "motion": ([AUTO] + list(MOTION),),
                 "speed": ([AUTO] + list(SPEED),),
                 "amplitude": ([AUTO] + list(AMPLITUDE),),
+                # 복합 무빙 2번째 슬롯 — 맨 뒤에 둬서 기존 워크플로 위치 매핑 보호.
+                "motion2": ([AUTO] + list(MOTION),),
             },
             "optional": {
                 "prompt_in": ("STRING", {"forceInput": True}),
@@ -1533,7 +1894,8 @@ class CameraDirector:
                 # label: 프론트엔드 좌측 라벨 표시용 (model/api_key 글자와 동일 위치)
                 "custom_base_url": ("STRING", {"default": "", "label": "URL"}),
                 "extra_negative": ("STRING", {"default": "", "multiline": True}),
-                # 위젯 순서 = 노드 하단 순서. 지시 위젯은 노드 맨 아래에 둔다.
+                # 위젯 순서 = 노드 표시 순서. llm_hint는 지시 위젯이라
+                # 하단 근처에 둔다 (맨 끝은 구 워크플로 호환용 추가 영역).
                 # 겉으로는 평범한 지시 위젯이지만, 입력값은 필터 없이 LLM에
                 # 그대로 전달된다(로컬 uncensored 모델과 함께 쓰면 자유 지시 가능).
                 "llm_hint": ("STRING", {
@@ -1541,6 +1903,18 @@ class CameraDirector:
                     "tooltip": "LLM에게 전달할 짧은 지시 (구도·조명·무드·장면 등). "
                                "AI 판단 (llm) 티어에서만 적용된다.",
                 }),
+                # --- 이후 추가 위젯은 반드시 맨 뒤에 둘 것 ---
+                # 왜(Why): 구 워크플로 파일의 위치 기반 매핑이 밀려
+                # custom_base_url 이하 값이 어긋나는 사고가 있었다.
+                # LLM 비전 전송 크기 — 로컬 LLM 전송 짐 조절용. 기본값은 기존 동작.
+                "vision_detail": (list(VISION_DETAIL), {"default": VISION_DETAIL_DEFAULT}),
+                # 출발 점검용 샘플러 값 — KSampler에 적은 값을 그대로 적는다.
+                # 0이면 검사 안 함 (미사용 선언).
+                "pf_steps": ("INT", {"default": 0, "min": 0, "max": 200,
+                                     "step": 1}),
+                "pf_cfg": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 30.0}),
+                "pf_denoise": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0,
+                                         "step": 0.01}),
             },
             # unique_id는 이 서버에서 hidden 입력으로만 주입된다(함수 시그니처
             # 자동 주입 없음) — LLM 상태 표시등이 노드를 식별하는 데 필요.
@@ -1586,11 +1960,12 @@ class CameraDirector:
 
     # ----- 본체 ------------------------------------------------------------
     def run(self, topic, preset, automation, shot, lens, angle, composition,
-            lighting, grade, motion, speed, amplitude,
+            lighting, grade, motion, speed, amplitude, motion2=AUTO,
             prompt_in=None, provider="OpenAI", model="gpt-4o-mini", api_key="",
             custom_base_url="", extra_negative="", image=None,
             image_list=None, image_items=None, llm_hint="", unique_id=None,
-            prompt=None):
+            prompt=None, vision_detail=VISION_DETAIL_DEFAULT,
+            pf_steps=0, pf_cfg=0.0, pf_denoise=0.0):
         # 실행 기록에서 자기 api_key를 먼저 제거한다. api_key 인자는 이미
         # 바인딩되어 실행에 쓰이므로 기록 제거와 무관하게 정상 동작한다.
         if _scrub_api_key_from_prompt(prompt, unique_id):
@@ -1610,7 +1985,8 @@ class CameraDirector:
         widget_pairs = [("shot", shot), ("lens", lens), ("angle", angle),
                         ("composition", composition), ("lighting", lighting),
                         ("grade", grade), ("motion", motion),
-                        ("speed", speed), ("amplitude", amplitude)]
+                        ("speed", speed), ("amplitude", amplitude),
+                        ("motion2", motion2)]
         widget_cam = self._widget_camera(**dict(widget_pairs))
 
         # 1) 카메라: 특정 프리셋 > 직접 설정(명시 항목만 고정) > tier 판정
@@ -1659,8 +2035,9 @@ class CameraDirector:
             llm_attempted = True
             try:
                 if reference_images:
+                    _vision_px = vision_detail_px(vision_detail)
                     for label, img in reference_items:
-                        encoded = llm_client.image_to_b64(img)
+                        encoded = llm_client.image_to_b64(img, max_side=_vision_px)
                         if encoded:
                             img_b64s.append(encoded)
                             converted_labels.append(label)
@@ -1708,6 +2085,12 @@ class CameraDirector:
                         image_note += ("Do not duplicate the main subject and "
                                        "do not turn secondary references into extra people, "
                                        "animals, products, or props unless explicitly requested.")
+                        if _is_animal_subject(topic or ""):
+                            # 동물 참조 장면: 종 고정 지시. 왜(Why): LLM이 개를 사람
+                            # 체형으로 서술하거나 품종 초상화로 부풀리는 경우가 있다.
+                            image_note += ("\nThe subject is an animal: keep its exact species, "
+                                           "proportions and markings, never humanize it and "
+                                           "never turn it into a caricature.")
                 elif failed_labels:
                     image_note = ("\nReference image conversion failed for slots: "
                                   + ", ".join(str(x) for x in failed_labels)
@@ -1767,6 +2150,12 @@ class CameraDirector:
                          + hint_text[:60].replace("\n", " "))
                 # LLM 구동 시작을 프론트엔드에 알려 model 위젯에 "작동 중" 표시등 켬
                 _notify_llm_status(unique_id, "busy")
+                # 로컬 LLM은 같은 GPU를 공유하므로 호출 직전에 ComfyUI 쪽 모델을
+                # 내린다. (클라우드 LLM은 원격이라 불필요해 건너뛴다)
+                if llm_client.is_local_provider(provider, custom_base_url):
+                    if _free_gpu_for_local_llm():
+                        _log(f"[Camera Director] 로컬 LLM({provider})을 위해 "
+                             f"ComfyUI 모델을 GPU에서 내림 (이후 샘플러에서 자동 재로드)")
                 llm_obj = llm_client.chat(
                     provider, resolved_model, api_key, llm_system(),
                     llm_user(topic, forced if forced is not None else fixed_cam)
@@ -1778,7 +2167,22 @@ class CameraDirector:
                     _log("[Camera Director] 다중 vision 전달 (Ollama — 비전 모델 필요)")
                 _notify_llm_status(unique_id, "on")
             except llm_client.LLMError as e:
-                _log(f"[Camera Director] LLM 실패 → 규칙(auto) 폴백: {e}")
+                # 왜(Why): "timed out"만으로는 클라우드 45초 기본값으로 끊긴
+                # 것인지 로컬 300초까지 버틴 것인지 구분할 수 없다. provider·
+                # model·실제 타임아웃을 함께 찍어 원인을 바로 특정하게 한다.
+                _to = llm_client.effective_timeout(provider, custom_base_url)
+                _hint = ""
+                if "timed out" in str(e).lower():
+                    _local = _to >= llm_client.LOCAL_TIMEOUT
+                    _hint = (f" | provider={provider or '없음'} model={model or '없음'} "
+                             f"timeout={_to}s (이미 {_to}초 대기 후 끊김 — "
+                             + ("로컬 LLM이 비전 추론에 실패했습니다. "
+                                "vision_detail을 512/384로 낮추거나 "
+                                "이미지 수를 줄여 보세요."
+                                if _local else
+                                "클라우드 기본 45초 초과입니다. vision_detail을 "
+                                "384로 낮추거나 이미지 수를 줄여 보세요."))
+                _log(f"[Camera Director] LLM 실패 → 규칙(auto) 폴백: {e}{_hint}")
                 llm_obj = None
                 _notify_llm_status(unique_id, "fail")
         else:
@@ -1835,6 +2239,11 @@ class CameraDirector:
         mismatch = scene_camera_mismatch(scene, camera)
         if mismatch:
             _log(f"[Camera Director] ⚠ {mismatch}")
+        # 출발 점검: 깨질 조합이면 콘솔 경고 (pf_* 0은 검사 안 함).
+        for _warn in preflight_warnings(topic or scene, camera,
+                                        steps=pf_steps, cfg=pf_cfg,
+                                        denoise=pf_denoise):
+            _log(f"[Camera Director] 출발 점검 ⚠ {_warn}")
         positive = assemble(scene, camera, image_count=image_count, topic=topic,
                             image_labels=image_labels)
         nudity_guard_text = nudity_anatomy_guard(topic or scene)
@@ -1846,6 +2255,12 @@ class CameraDirector:
             positive = positive.rstrip(". ") + ". " + MIX_GUARD_POSITIVE + "."
             _log("[Camera Director] 다중 참조 믹스 가드 활성 (연결 이미지 "
                  f"{image_count}장 — 융합/신원 혼합 방어)")
+            # 참조 간 조명 충돌 점검 (설정 불필요 — 픽셀 근거 자동).
+            _clash = _lighting_clash([_reference_lighting_flow(img)
+                                      for img in reference_images])
+            if _clash is not None and _clash > 1.0:
+                _log(f"[Camera Director] ⚠ 참조 간 조명 흐름 충돌({_clash:.2f}) — "
+                     f"합성 결과 조명이 어긋날 수 있음. 조명 방향이 같은 참조 권장")
         if appearance_ref:
             positive = positive.rstrip(". ") + ". " + APPEARANCE_REF_POSITIVE + "."
             _slots = "/".join(str(x) for x in (9, 10) if x in image_labels)
@@ -1873,11 +2288,14 @@ class CameraDirector:
         self._last_body_balance = body_balance
         self._last_character_sheet_text = char_sheet
         negative = build_negative(camera, extra=extra_negative or "",
-                                  llm_extra=llm_extra, topic=topic,
+                                  llm_extra=llm_extra,
+                                  topic=((topic or "") + " " + (scene or "")),
                                   hint_defense=hint_defense, mix_guard=mix_guard,
                                   appearance_ref=appearance_ref,
                                   body_balance=body_balance,
-                                  character_sheet=bool(char_sheet))
+                                  character_sheet=bool(char_sheet),
+                                  image_count=image_count,
+                                  image_labels=list(image_labels))
         self._last_camera = dict(camera)
         self._last_llm_extra = llm_extra
         self._last_image_count = image_count
@@ -1904,6 +2322,7 @@ class CameraDirector:
                 "provider": provider, "model": resolved_model,
             },
             elapsed_ms=int((time.perf_counter() - _t0) * 1000))
+        _release_vram()
         return (positive, negative, primary_image)
 
 
@@ -2011,19 +2430,48 @@ def _qwen_ref_cache_get(key, vae=None):
         cached = _QWEN_REF_CACHE.get(key)
     if cached is None:
         return None
-    rgb, latent, cached_vae = cached
-    if cached_vae is not vae:
-        # 왜(Why): 키의 id(vae)는 GC 후 재할당될 수 있어, 다른 VAE 객체의
-        # latent가 재사용되는 stale 가능성을 객체 동일성으로 한 번 더 막는다.
-        return None
+    rgb, latent, vae_ref = cached
+    # 왜(Why): 캐시가 VAE 객체를 강한 참조로 들면 그 VAE가 ComfyUI에서
+    # 영영 회수되지 않아 작업 끝난 뒤에도 VRAM을 붙잡는다. weakref로만
+    # 동일성 비교에 쓴다. 죽은 VAE면 캐시 미스로 보고 재인코딩한다.
+    try:
+        if vae_ref() is None:
+            # VAE가 회수됨 → 미스(재인코딩). 살아 있는 객체만 재사용한다.
+            return None
+        if vae_ref() is not vae:
+            return None
+    except TypeError:
+        # weakref 불가 객체면 강한 참조로 되돌린다(동작 동일, 단 만료 안 됨).
+        if vae_ref is not vae:
+            return None
+    if latent is not None:
+        # 캐시는 CPU에 둔다. GPU 텐서를 상주시키면 empty_cache()로도 안 풀린다.
+        # 조회할 때만 원래 VAE 디바이스로 되돌린다 (이동 비용 << VAE encode).
+        _dev = getattr(vae, "device", None) if vae is not None else None
+        if _dev is not None and hasattr(latent, "to"):
+            try:
+                latent = latent.to(_dev)
+            except Exception:
+                pass
     return rgb, latent
 
 
 def _qwen_ref_cache_put(key, value) -> None:
+    rgb, latent, vae = value
+    # 캐시에는 CPU latent + VAE weakref만 남긴다 (GPU 점유·VAE 상주 방지).
+    if latent is not None and hasattr(latent, "cpu"):
+        try:
+            latent = latent.cpu()
+        except Exception:
+            pass
+    try:
+        vae_ref = weakref.ref(vae)
+    except TypeError:
+        vae_ref = vae
     with _QWEN_REF_LOCK:
         if key in _QWEN_REF_CACHE:
             _QWEN_REF_CACHE_ORDER.remove(key)
-        _QWEN_REF_CACHE[key] = value
+        _QWEN_REF_CACHE[key] = (rgb, latent, vae_ref)
         _QWEN_REF_CACHE_ORDER.append(key)
         while len(_QWEN_REF_CACHE_ORDER) > _QWEN_REF_CACHE_MAX:
             _QWEN_REF_CACHE.pop(_QWEN_REF_CACHE_ORDER.pop(0), None)
@@ -2046,8 +2494,9 @@ def clear_qwen_ref_cache() -> None:
 # ---------------------------------------------------------------------------
 
 class CameraDirectorEncode(CameraDirector):
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING", "IMAGE")
-    RETURN_NAMES = ("positive_out", "negative_out", "prompt_out", "image_out")
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING", "IMAGE", "LATENT")
+    RETURN_NAMES = ("positive_out", "negative_out", "prompt_out", "image_out",
+                    "reference_latent_out")
     FUNCTION = "run_prompt"
     CATEGORY = "HF Skills/Camera"
     DESCRIPTION = ("주제와 1~10장의 레퍼런스 이미지로 카메라 연출을 구성한 영문 프롬프트를 "
@@ -2075,6 +2524,21 @@ class CameraDirectorEncode(CameraDirector):
                 "hidden": dict(base.get("hidden", {}))}
 
     @staticmethod
+    def _reference_target_size(latent_image):
+        """reference 목표 크기 (w, h). latent 미연결·파손이면 (None, None).
+
+        왜(Why): _prepare와 run_prompt(기준 latent 조회)가 같은 캐시 키를
+        써야 적중한다. 계산을 한 곳에 둔다.
+        """
+        try:
+            samples = latent_image.get("samples") if isinstance(latent_image, dict) else None
+            if samples is not None and samples.ndim == 4:
+                return (int(samples.shape[-1]) * 16, int(samples.shape[-2]) * 16)
+        except Exception:
+            pass
+        return (None, None)
+
+    @staticmethod
     def _prepare_qwen_image_data(image_items, vae=None, latent_image=None):
         """Prepare Qwen vision images and VAE reference latents once."""
         if not image_items or not all(hasattr(image, "movedim") for _label, image in image_items):
@@ -2087,15 +2551,7 @@ class CameraDirectorEncode(CameraDirector):
             return [], None
         ref_latents = []
         images_vl = []
-        target_w = target_h = None
-        if latent_image is not None:
-            try:
-                samples = latent_image.get("samples") if isinstance(latent_image, dict) else None
-                if samples is not None and samples.ndim == 4:
-                    target_h = int(samples.shape[-2]) * 16
-                    target_w = int(samples.shape[-1]) * 16
-            except Exception:
-                target_w = target_h = None
+        target_w, target_h = CameraDirectorEncode._reference_target_size(latent_image)
         for _label, image in image_items:
             try:
                 cache_key = _qwen_ref_cache_key(image, target_w, target_h, vae)
@@ -2187,13 +2643,15 @@ class CameraDirectorEncode(CameraDirector):
 
     def run_prompt(self, clip, topic, preset, automation, shot, lens, angle,
                    composition, lighting, grade, motion, speed, amplitude,
+                   motion2=AUTO,
                    prompt_in=None, provider="OpenAI", model="gpt-4o-mini",
                    api_key="", custom_base_url="", positive=None, negative=None,
                    vae=None, latent_image=None,
                    image_1=None, image_2=None, image_3=None, image_4=None,
                    image_5=None, image_6=None, image_7=None, image_8=None,
                    image_9=None, image_10=None, llm_hint="", unique_id=None,
-                   prompt=None):
+                   prompt=None, vision_detail=VISION_DETAIL_DEFAULT,
+                   pf_steps=0, pf_cfg=0.0, pf_denoise=0.0):
         image_items = [
             (1, image_1), (2, image_2), (3, image_3), (4, image_4), (5, image_5),
             (6, image_6), (7, image_7), (8, image_8), (9, image_9), (10, image_10),
@@ -2203,17 +2661,23 @@ class CameraDirectorEncode(CameraDirector):
             self, topic=topic, preset=preset, automation=automation,
             shot=shot, lens=lens, angle=angle, composition=composition,
             lighting=lighting, grade=grade, motion=motion,
-            speed=speed, amplitude=amplitude, prompt_in=prompt_in,
+            speed=speed, amplitude=amplitude, motion2=motion2, prompt_in=prompt_in,
             provider=provider, model=model, api_key=api_key,
             custom_base_url=custom_base_url,
             image_items=image_items, llm_hint=llm_hint, unique_id=unique_id,
-            prompt=prompt)
+            prompt=prompt, vision_detail=vision_detail,
+            pf_steps=pf_steps, pf_cfg=pf_cfg, pf_denoise=pf_denoise)
         camera = getattr(self, "_last_camera", dict(DEFAULTS))
         camera_text = build_camera_conditioning(camera)
         external_prompt = (prompt_in or "").strip()
+        # latent 크기 점검 (base run에는 latent가 없어 여기서만 가능).
+        for _warn in preflight_warnings(external_prompt or (topic or ""),
+                                        camera, latent_mp=_latent_mp(latent_image)):
+            _log(f"[Camera Director] 출발 점검 ⚠ {_warn}")
+        # 국가 표현형 가드는 참조 슬롯 정보를 함께 봐야 하므로 바깥에서 확보한다.
+        last_count = getattr(self, "_last_image_count", 0)
+        last_labels = getattr(self, "_last_image_labels", None)
         if external_prompt:
-            last_count = getattr(self, "_last_image_count", 0)
-            last_labels = getattr(self, "_last_image_labels", None)
             identity_anchor = build_identity_anchor(
                 last_count, external_prompt, image_labels=last_labels)
             body_anchor = build_body_proportion_anchor(
@@ -2272,10 +2736,29 @@ class CameraDirectorEncode(CameraDirector):
             _cs_text = getattr(self, "_last_character_sheet_text", "")
             if _cs_text:
                 positive_text = self._combine_prompt_text(positive_text, _cs_text)
+            # 스케일 일관 가드도 prompt_in 경로에 병합한다.
+            # (standalone는 assemble에 이미 포함. 외부 프롬프트 기준 판정)
+            if _needs_scale_guard(external_prompt or topic, camera):
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          SCALE_COHERENCE_POSITIVE)
+            # 국가 표현형 가드도 prompt_in 경로에 병합한다.
+            # (국가명은 한글 위젯 topic에만 있을 수 있어 양쪽 다 본다)
+            # 참조 이미지가 신원을 고정하는 실행은 억제된다 (positive/negative 동일 판정).
+            _eth_text_pi = " ".join(
+                x for x in (external_prompt, topic) if x)
+            _eth_pos_pi, _ = _ethnicity_guard(_eth_text_pi, last_count, last_labels)
+            if _eth_pos_pi:
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          _eth_pos_pi)
+            # 동물 종 보존 가드도 prompt_in 경로에 병합한다.
+            if _is_animal_subject(_eth_text_pi):
+                positive_text = self._combine_prompt_text(
+                    positive_text, ANIMAL_SPECIES_POSITIVE)
         prevent_duplicates = bool(single_person_anchor) if external_prompt else False
         negative_text = build_camera_negative(
             camera, prevent_duplicates=prevent_duplicates,
-            topic=external_prompt or topic)
+            topic=external_prompt or topic, image_count=last_count,
+            image_labels=last_labels)
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
         # 카메라 전용 negative로 덮어쓰면서 조용히 버려졌기 때문이다.
@@ -2341,6 +2824,7 @@ class CameraDirectorEncode(CameraDirector):
         # (1번 핸드백 + 2번 여성)에서 핸드백이 나갔다(정밀 검토 발견 #5).
         last_labels = getattr(self, "_last_image_labels", None) or [l for l, _ in image_items]
         image_out = None
+        main_slot = None
         try:
             main_slot = _person_object_plan(
                 external_prompt or (topic or ""), last_labels)["main"]
@@ -2352,6 +2836,28 @@ class CameraDirectorEncode(CameraDirector):
             pass
         if image_out is None and image_items:
             image_out = image_items[0][1]
-        return (positive_out, negative_out, positive_text, image_out)
+        # 기준 latent 출력 (3번 교정 노드용). _prepare가 이미 인코딩한 결과를
+        # 캐시 키로 조회만 한다 — 재인코딩 없음. vae 미연결이면 None.
+        # 왜(Why): 주 reference와 같은 슬롯의 latent라야 image_out과 짝이 맞는다.
+        reference_latent_out = None
+        try:
+            if vae is not None and image_items:
+                _main_img = None
+                for _label, _img in image_items:
+                    if _label == main_slot:
+                        _main_img = _img
+                        break
+                if _main_img is None:
+                    _main_img = image_items[0][1]
+                _tw, _th = CameraDirectorEncode._reference_target_size(latent_image)
+                _cached = _qwen_ref_cache_get(
+                    _qwen_ref_cache_key(_main_img, _tw, _th, vae), vae)
+                if _cached is not None and _cached[1] is not None:
+                    reference_latent_out = {"samples": _cached[1]}
+        except Exception:
+            reference_latent_out = None
+        _release_vram()
+        return (positive_out, negative_out, positive_text, image_out,
+                reference_latent_out)
 
 

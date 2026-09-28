@@ -267,6 +267,27 @@ def _normalize_custom_endpoint(base_url: str) -> str:
     return u + "/chat/completions"
 
 
+def is_local_provider(provider: str, base_url: str = "") -> bool:
+    """로컬(같은 머신) LLM인지. GPU 경합 판정·타임아웃 판정에 쓴다."""
+    if (provider or "") in _LOCAL_PROVIDERS:
+        return True
+    return bool((provider or "").startswith("Custom")
+                and any(h in (base_url or "").lower()
+                        for h in ("localhost", "127.0.0.1")))
+
+
+def effective_timeout(provider: str, base_url: str = "",
+                      timeout: int = DEFAULT_TIMEOUT) -> int:
+    """이 조합에서 실제 적용되는 타임아웃(초). 진단 로그용.
+
+    왜(Why): "timed out"만으로는 45초 클라우드 기본값으로 끊긴 것인지,
+    300초 로컬 상한까지 버틴 것인지 구분할 수 없어 원인 파악이 불가능했다.
+    """
+    if is_local_provider(provider, base_url):
+        return max(timeout, LOCAL_TIMEOUT)
+    return timeout
+
+
 def chat(provider: str, model: str, api_key: str,
          system: str, user: str, timeout: int = DEFAULT_TIMEOUT,
          image_b64=None, image_sig=None, image_b64s=None,

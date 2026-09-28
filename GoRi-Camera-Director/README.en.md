@@ -1,6 +1,8 @@
 # 🎥 (GoRi) Camera Director Skills
 
 > 🌐 [한국어 버전](README.md)
+>
+> ☕ If this helped, buy me a coffee: [Donate via PayPal](https://paypal.me/GoRi57788)
 
 > **Full Qwen-Image 2.1 support** — works the same reference-latents way as the Text Encode Qwen Image 2.1 node. 10 reference image inputs, native RGBA (transparency) passthrough, use your 2K native workflow as-is.
 
@@ -13,7 +15,7 @@
 
 Type a one-line topic (Korean OK), attach optional images and optional positive/negative conditioning, and **camera framing·lens·angle·lighting·grade·(video) motion** are composed automatically. Outputs are `positive_out` / `negative_out` conditioning, verification `prompt_out`, and main-reference passthrough `image_out`.
 
-- Package folder: `comfyui-GoRi-camera-director`
+- Package folder: `ComfyUI-GoRi-camera-director`
 - Node display name: `(GoRi) Camera Director Skills`
 - Outputs: `positive_out` (`CONDITIONING`), `negative_out` (`CONDITIONING`), `prompt_out` (`STRING`), `image_out` (`IMAGE`)
 - `clip` is the text encoder of your final Qwen Image model.
@@ -39,7 +41,7 @@ Type a one-line topic (Korean OK), attach optional images and optional positive/
 ```
 ComfyUI/
 └── custom_nodes/
-     └── comfyui-GoRi-camera-director/   ← copy this whole folder
+     └── ComfyUI-GoRi-camera-director/   ← copy this whole folder
 ```
 
 1. Copy this folder into `ComfyUI/custom_nodes/`
@@ -77,6 +79,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 - At high resolution, vision tensors and VAE latents of identical reference images are cached by content-hash + target-size key, never recomputed on repeat runs. This speeds up reference conditioning.
 - At 3MP+, KSampler steps, preview, and VAE decode dominate total time. When speed matters, generate at 2–3MP first, then upscale.
 - Video (I2V): `motion` is selectable. `image_1`–`image_10` are prompt-judgment inputs only, so connect the original `LoadImage` output straight into the I2V node for the start frame.
+- Compound motion: pick a second move in `motion2` to combine two camera moves (e.g. push-in + pan). Empty = single motion. Carries into video-model conditioning and H3 prompts as-is.
 
 ### Two prompt input paths (usable together)
 
@@ -98,6 +101,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 | `negative_out` | `CONDITIONING` | `KSampler.negative` | Keeps existing negative conditioning if any; only camera/video failure modes merged |
 | `prompt_out` | `STRING` | `Show Text` / other prompt-rewrite nodes | Debug string identical to the real positive string |
 | `image_out` | `IMAGE` | I2V start frame / upscale / Preview Image | The role planner's elected main reference (first connected if unelected), passed through. Empty when unconnected |
+| `reference_latent_out` | `LATENT` | pass-2 correction node / straight into VAE Decode | VAE latent of the same slot as the main reference (cache lookup, no re-encode). Empty without `vae` |
 
 With `prompt_in` connected, the Qwen prompt and camera phrases merge into one string, encoded once with the final model CLIP. Without `prompt_in`, a topic-based standalone prompt is encoded once. `positive` conditioning is ignored on the new path. Connecting `negative` conditioning preserves your negative, then adds only camera/video failure modes.
 
@@ -107,8 +111,48 @@ With `prompt_in` connected, the Qwen prompt and camera phrases merge into one st
 - `규칙 (auto)` uses the first connected image for brightness/contrast/saturation camera hints.
 - `AI 판단 (llm)` packs all connected images into a base64 list for multi-vision delivery to supporting providers.
 - With multiple images, the role planner's elected main subject (defaults to `Image 1`) stays fixed, and extra images serve only requested roles among background/outfit/props/product/style/lighting/composition/mood. Main person, face, body, clothes, product, and background subjects are never duplicated.
-- **Mix guard**: connecting 2+ images auto-adds fusion/identity-mixing defenses to positive·negative — outfit references are treated as a separate clothing layer over the body, with original body-ratio/skin/face/hair/pose preservation plus negative defenses like "clothing fusion with skin, mixed facial features, identity blending". (Console `믹스 가드 활성` log)
+- **Mix guard**: connecting 2+ images auto-adds fusion/identity-mixing defenses to positive·negative — outfit references are treated as a separate clothing layer over the body, with original body-ratio/skin/face/hair/pose preservation plus negative defenses like "clothing fusion with skin, mixed facial features, identity blending". (Console `믹스 가드 활성` log.) Clashing light flow between references (one left-lit, one right-lit) raises a console warning — automatic, pixel-grounded, no settings.
 - While feeding prompt judgment, the elected main reference image also passes through as `image_out` — wire it straight into an I2V start frame or upscale node.
+
+### Pre-flight (doomed-combo warnings)
+
+Copy your KSampler values into `pf_steps`·`pf_cfg`·`pf_denoise` as-is
+(0 skips the check) for console warnings before the run:
+
+| Field | Copy from | e.g. |
+|---|---|---|
+| `pf_steps` | KSampler `steps` | 20 |
+| `pf_cfg` | KSampler `cfg` | 3.5 |
+| `pf_denoise` | KSampler `denoise` | 1.0 |
+
+- Face close-up (ECU/CU) on a sub-1MP latent → face-melt warning
+- steps/cfg outside 8–150 / 1.0–12.0 → instability warning
+- denoise above 0.9 → drift-from-source warning
+- Numbers only (clearing + OK shows NaN — retype 0)
+
+Model ceilings and seed luck are out of scope. People topics also get
+eye·teeth·ear·feet·joint anatomy defenses auto-added to both negatives.
+Full-body people shots also get person-object scale coherence
+(furniture/background ratio, perspective) on positive·negative.
+Country names (Korea·Japan·USA…) add an origin-of-person phrase plus
+varied individual features; without traditional intent, modern everyday wear
+and anti-westernization / anti-costume / anti-homogenization defenses join
+negative. No race-essential wording ("East Asian facial features") and no
+gender words are used. It is skipped when a reference already fixes identity
+or the topic already describes appearance. Region grouping only references the
+FairFace 7-group taxonomy (CC BY 4.0, bias-measurement use); no dataset
+labels or images are shipped.
+
+The node does **not** infer nationality or ethnicity from the reference image —
+a person's group is not guessed from their face. With a reference connected,
+region wording is skipped and the identity-from-reference guard applies instead;
+a region is only applied when the topic text names it.
+
+Animal subjects (dog·cat·bird…) are detected separately: species/body
+proportions (leg count, muzzle, ears, tail) and coat texture join positive,
+while humanization (human hands, human face), mutated anatomy, breed caricature
+and mascot costumes join negative. When people and animals share a scene, the
+people guards take priority.
 
 ### LLM status light
 
@@ -116,7 +160,7 @@ Running `AI 판단 (llm)` makes the `model` field **blink green while the LLM wo
 
 ### llm_hint — short instructions to the LLM
 
-The `llm_hint` field at the bottom takes short composition·lighting·mood·scene instructions, applied top-priority to LLM judgment (e.g. `어두운 무드, 클로즈업 위주, 비 오는 장면`). Applies only to the **AI 판단 (llm)** tier; ignored on rule/manual tiers (console note). Empty = same as before.
+The `llm_hint` field near the bottom takes short composition·lighting·mood·scene instructions, applied top-priority to LLM judgment (e.g. `어두운 무드, 클로즈업 위주, 비 오는 장면`). Applies only to the **AI 판단 (llm)** tier; ignored on rule/manual tiers (console note). Empty = same as before.
 
 Runs using `llm_hint` get a censorship-artifact defense auto-added to negative (`censored, mosaic, bar censor, pixelated, modest`) — suppresses the image model's tendency to sanitize or mosaic expressions on its own. No hint = no defense.
 

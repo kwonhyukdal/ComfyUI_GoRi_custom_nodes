@@ -1,6 +1,8 @@
 # 🎥 (GoRi) Camera Director Skills
 
 > 🌐 [English version](README.en.md)
+>
+> ☕ 도움이 됐다면 커피 한 잔: [PayPal로 후원하기](https://paypal.me/GoRi57788)
 
 > **Qwen-Image 2.1 완전 지원** — Text Encode Qwen Image 2.1 노드와 동일한 reference-latents 방식으로 동작합니다. 레퍼런스 이미지 10장 입력, RGBA(투명도) 입력 네이티브 통과, 2K 네이티브 워크플로 그대로 사용.
 
@@ -13,7 +15,7 @@
 
 주제 한 줄(한글 OK), 선택 이미지, 선택적 positive/negative conditioning을 입력하면 **카메라 구도·렌즈·앵글·조명·그레이드·(영상)무빙**이 자동으로 조합됩니다. 최종적으로 `positive_out`, `negative_out` conditioning과 확인용 `prompt_out`, 주 reference 통과용 `image_out`을 출력합니다.
 
-- 패키지 폴더: `comfyui-GoRi-camera-director`
+- 패키지 폴더: `ComfyUI-GoRi-camera-director`
 - 노드 표시 이름: `(GoRi) Camera Director Skills`
 - 출력: `positive_out` (`CONDITIONING`), `negative_out` (`CONDITIONING`), `prompt_out` (`STRING`), `image_out` (`IMAGE`)
 - `clip`은 최종 Qwen Image 모델의 text encoder입니다.
@@ -39,11 +41,11 @@
 ```
 ComfyUI/
 └── custom_nodes/
-    └── comfyui-GoRi-camera-director/   ← 이 폴더 전체를 복사
+    └── ComfyUI-GoRi-camera-director/   ← 이 폴더 전체를 복사
 ```
 
 > 📍 **이 PC의 실제 설치 위치 (2026-09-25 확인):**
-> `C:\ComfyUI\ComfyUI video\ComfyUI-Easy-Install\ComfyUI\custom_nodes\comfyui-GoRi-camera-director`
+> `C:\ComfyUI\ComfyUI video\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-GoRi-camera-director`
 > 배포 Python: `python_embeded\python.exe` (3.12.10) — 자동 테스트 통과 확인
 
 1. 이 폴더를 `ComfyUI/custom_nodes/` 에 복사
@@ -75,12 +77,13 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 - `negative_out`은 기존 negative conditioning이 연결되어 있으면 이를 유지한 뒤, 카메라/영상 실패 모드만 합친 결과입니다. 단일 reference 경로에서는 `multiple people`, `duplicate person`, `cloned person`, `mirrored twin`, `background person`만 중복 억제용으로 추가합니다. `extra arms`, `face mismatch`, 피부색 오염 방지 문구는 추가하지 않습니다. negative는 vision 없이 텍스트만 인코딩하므로 Qwen Vision 인코딩은 positive 1회만 실행되고, `reference_latents`도 positive에만 첨부됩니다. `llm` 티어에서 LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합됩니다.
 - `prompt_in` 표준 경로에서도 의상 교체 의도가 명확하고 이미지가 2장 이상이면 의상 전용 가드가 추가되고, 다중 이미지일 때는 보조 reference 역할 제한 1문장이 추가됩니다. 단일 이미지에는 역할 가드를 넣지 않습니다.
 - 이미지 2장에 두 인물을 지정하면(예: `Image 1의 여성과 Image 2의 남성이 서로 마주보기`) 2인 duo 가드로 전환됩니다. 3~8번 슬롯도 동일하게 인식합니다 (`Image 3의 남성`, `Image 8의 여성` 등). `Exactly one main person` 억제와 중복 인물 negative, 보조 역할 제한이 모두 빠지고 해당 슬롯의 정체성 보존 문구가 들어갑니다. 두 신체가 하나로 합쳐지거나 팔다리가 뒤섞이는 양방향 융합을 막는 신체 분리 문구도 함께 들어갑니다. 의상 교체 문구는 duo로 오인하지 않습니다.
-- standalone 경로(`prompt_in` 미연결)의 positive에는 얼굴/신체/의상 legacy guard가 붙지만, negative는 카메라 실패 모드만 담는 것이 현행 정책입니다. positive 양면 방어가 필요하면 `prompt_out`을 별도 CLIPTextEncode에 연결해 negative를 직접 보완하십시오.
+- standalone 경로(`prompt_in` 미연결)의 positive에는 얼굴/신체/의상 legacy guard가 붙지만, negative는 카메라 실패 모드 + 인물 해부 디테일(눈·치아·귀·발·관절, 인물 주제만) 위주로 담는 것이 현행 정책입니다. positive 양면 방어가 필요하면 `prompt_out`을 별도 CLIPTextEncode에 연결해 negative를 직접 보완하십시오.
 - `규칙 (auto)` 티어는 shot/lens/angle/lighting/motion/speed 키워드를 봅니다. `네온`, `노을/석양`, `스튜디오`, `실루엣/역광`, `어두운/심야/야간`, `화사한` 같은 단어가 조명을 결정합니다. 일상적인 `밤` 한 글자로는 로우키로 바꾸지 않습니다 (오탐 방지, 키워드 사전 `keywords_ko_en.json`에서 확장 가능).
 - `latent_image`는 선택 입력입니다. 2MP/2.5MP/3MP 등 실제 sampling latent를 연결해도 reference conditioning은 1MP 상한으로 묶입니다. 연결하지 않으면 입력 이미지 크기 기준으로 1MP 상한이 적용됩니다.
 - 고해상도에서 동일한 reference 이미지의 vision tensor와 VAE latent는 내용 해시+목표 크기 키로 캐시되어 반복 실행 시 재계산하지 않습니다. 이를 통해 reference conditioning 속도를 개선했습니다.
 - 3MP 이상에서는 KSampler 스텝, preview, VAE decode 비용이 전체 시간에서 더 큰 비중을 차지할 수 있습니다. 속도가 필요하면 2~3MP를 기준으로 생성한 뒤 upscale하는 편이 안전합니다.
 - 영상(I2V): `motion`을 선택할 수 있습니다. `image_1`~`image_10` 입력은 프롬프트 판단용이므로, I2V 시작 프레임은 원래 `LoadImage` 출력을 I2V 노드에 직접 연결하십시오.
+- 복합 무빙: `motion2`에 두 번째 움직임을 고르면 두 카메라 이동이 합성됩니다(예: 푸시인+팬). 비워두면 단일 무빙. 영상 모델 conditioning·H3 프롬프트에 그대로 반영됩니다.
 
 ### 프롬프트 입력 2경로 (동시 겸용 가능)
 
@@ -102,6 +105,42 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 | `negative_out` | `CONDITIONING` | `KSampler.negative` | 기존 negative conditioning이 있으면 유지하고, 카메라/영상 실패 모드만 합친 결과 |
 | `prompt_out` | `STRING` | `Show Text` / 다른 프롬프트 재작성 노드 | 실제 positive 문자열과 동일한 디버그용 문자열 |
 | `image_out` | `IMAGE` | I2V 시작 프레임 / 업스케일 / Preview Image | 역할 계획이 선출한 주 reference(지정 근거가 없으면 첫 번째 연결) 이미지를 그대로 통과. 미연결이면 비어 있음 |
+| `reference_latent_out` | `LATENT` | 3번 교정 노드 / VAE Decode 직결 | 주 reference와 같은 슬롯의 VAE latent (재인코딩 없이 캐시 조회). `vae` 미연결이면 비어 있음 |
+
+### 출발 점검 (깨질 조합 사전 경고)
+
+노드 하단의 `pf_steps`·`pf_cfg`·`pf_denoise`에 **KSampler 값을 그대로 옮겨 적으면**
+(0이면 검사 안 함), 실행 전 콘솔에 경고를 띄웁니다:
+
+| 칸 | 적는 값 | 예 |
+|---|---|---|
+| `pf_steps` | KSampler `steps` 그대로 | 20 |
+| `pf_cfg` | KSampler `cfg` 그대로 | 3.5 |
+| `pf_denoise` | KSampler `denoise` 그대로 | 1.0 |
+
+- 얼굴 클로즈업(극접/근접)인데 latent가 1MP 미만 → 얼굴 뭉개짐 주의
+- steps 8~150, cfg 1.0~12.0 이탈 → 불안정·파손 주의
+- denoise 0.9 초과 → 원본 이탈·재생성 뭉개짐 주의
+- 숫자 칸은 숫자만 입력 (지우고 OK 하면 NaN 표시 — 0을 다시 입력)
+
+모델 천장·시드 운은 여기서 못 잡습니다. 인물 주제에는 눈·치아·귀·발·관절
+해부 디테일 방지 문구가 양쪽 negative에 자동 추가됩니다. 인물 전신 샷에는
+인물-사물 스케일 일관 문구(가구·배경 비율·원근)도 positive·negative에 붙습니다.
+주제에 국가명(한국·일본·미국 등)이 있으면 "a person from Korea" 류의 출신지
+문맥과 집단 안 개인차( varied individual features )가 붙고, 전통 지정이 없을 때만
+현대 일상복 문구와 서구화·전통의상·"한 나라 한 얼굴" 동질화 방어가 negative에 붙습니다.
+인종 본질 표현("East Asian facial features")은 넣지 않으며 성별어도 넣지 않습니다.
+참조 이미지가 신원을 잡아주거나 주제에 외양 서술이 이미 있으면 미적용됩니다(외양 우선).
+지역 묶음은 FairFace 7분류 구획(CC BY 4.0, 편향 측정용)의 국가 대응에만 참고했고
+데이터셋 라벨·이미지는 포함하지 않습니다. 참고로 노드는 **원본 이미지에서 국가·인종을
+자동 판별하지 않습니다**(얼굴로 그 속성을 추정하지 않음). 참조 이미지 장면에서는
+국가 표현형 대신 "모델 기본값이 아니라 원본 인물의 특징을 유지" 가드가 작동하고,
+지역 지정은 topic 텍스트로만 받습니다.
+
+동물 주제(강아지·고양이·새 등)는 별도로 판별되어 종·체형(다리 수·주둥이·귀· 꼬리)
+·피부 질감 문구가 positive에 붙고, 사람화(사람 손·사람 얼굴)·변이 해부·품종 초상화·
+마스코트 costume은 negative로 막힙니다. 사람과 동물이 함께 있는 장면은 인물 가드가
+우선합니다.
 
 `prompt_in`을 연결하면 Qwen 프롬프트와 카메라 문구를 하나의 문자열로 합친 뒤 최종 모델용 CLIP으로 한 번 인코딩합니다. `prompt_in`을 연결하지 않으면 topic 기반 standalone 프롬프트를 한 번 인코딩합니다. `positive` conditioning은 새 경로에서 무시됩니다. `negative` conditioning을 연결하면 기존 negative를 유지한 뒤 카메라/영상 실패 모드만 추가합니다.
 
@@ -111,7 +150,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 - `규칙 (auto)`에서는 첫 번째 연결 이미지 기준으로 밝기·대비·채도 등을 카메라 구성 힌트에 사용합니다.
 - `AI 판단 (llm)`에서는 연결된 모든 이미지를 base64 목록으로 만들어 지원 provider에 다중 비전으로 전달합니다.
 - 다중 이미지일 때 역할 계획이 선출한 주 피사체(지정 근거가 없으면 `Image 1`)가 기준으로 고정되고, 추가 이미지는 배경/옷/소품/제품/스타일/조명/구도/분위기 중 요청된 역할로만 사용됩니다. 주 인물, 얼굴, 신체, 옷, 제품, 배경 주체가 복제되지 않게 방지합니다.
-- **믹스 가드**: 이미지를 2장 이상 연결하면 융합/신원 혼합 방어어가 positive·negative에 자동 추가됩니다 — 의상 참조는 몸 위의 별도 의류 레이어로 취급되고, 원본 신체 비율·피부·얼굴·헤어·포즈 보존 지시와 "clothing fusion with skin, mixed facial features, identity blending" 등 negative 방어어가 붙습니다. (콘솔에 `믹스 가드 활성` 로그)
+- **믹스 가드**: 이미지를 2장 이상 연결하면 융합/신원 혼합 방어어가 positive·negative에 자동 추가됩니다 — 의상 참조는 몸 위의 별도 의류 레이어로 취급되고, 원본 신체 비율·피부·얼굴·헤어·포즈 보존 지시와 "clothing fusion with skin, mixed facial features, identity blending" 등 negative 방어어가 붙습니다. (콘솔에 `믹스 가드 활성` 로그). 참조 간 조명 흐름이 충돌하면(한 장은 좌광, 한 장은 우광) 콘솔에 경고가 뜹니다 — 설정 불필요, 픽셀 근거 자동 점검.
 - 프롬프트 판단에 쓰이는 동시에, 선출된 주 reference 이미지는 `image_out`으로 그대로 통과합니다 — I2V 시작 프레임이나 업스케일 노드에 바로 연결할 수 있습니다.
 
 ### LLM 작동 표시등
@@ -120,7 +159,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 
 ### llm_hint — LLM에게 짧은 지시
 
-노드 맨 아래의 `llm_hint` 칸에 구도·조명·무드·장면 지시를 짧게 적으면 LLM 판단에 최우선으로 반영됩니다 (예: `어두운 무드, 클로즈업 위주, 비 오는 장면`). **AI 판단 (llm)** 티어에서만 적용되며, 규칙/수동 티어에서는 무시됩니다(콘솔 안내). 비워두면 기존과 동일하게 작동합니다.
+노드 하단의 `llm_hint` 칸에 구도·조명·무드·장면 지시를 짧게 적으면 LLM 판단에 최우선으로 반영됩니다 (예: `어두운 무드, 클로즈업 위주, 비 오는 장면`). **AI 판단 (llm)** 티어에서만 적용되며, 규칙/수동 티어에서는 무시됩니다(콘솔 안내). 비워두면 기존과 동일하게 작동합니다.
 
 `llm_hint`를 사용한 실행에는 negative 프롬프트에 검열 아티팩트 방어어(`censored, mosaic, bar censor, pixelated, modest`)가 자동 추가됩니다 — 이미지 모델이 프롬프트 지시와 무관하게 스스로 표현을 순화하거나 모자이크를 그리는 경향을 억제합니다. `llm_hint`를 비우면 방어어도 붙지 않습니다.
 
@@ -201,6 +240,16 @@ GEMINI_API_KEY=...
 > 설정됩니다. 클라우드 provider(OpenAI/Anthropic/Gemini/OpenRouter/Groq/DeepSeek/Mistral)와
 > 원격 Custom 엔드포인트는 기본 45초이며, Base URL이 `localhost`/`127.0.0.1`인
 > Custom은 로컬 타임아웃(300초)이 적용됩니다.
+>
+> 💡 **로컬 LLM 속도 가이드:** 느린 주범은 서버 추론이라 노드가 빠르게 할 수 없고,
+> 줄일 수 있는 건 전송 짐뿐입니다.
+> - `vision_detail` 위젯: `선명 (768)`(기본, 기존 동작) / `균형 (512)` / `절약 (384)`.
+>   낮출수록 전송이 가벼워지지만 판단 디테일이 떨어질 수 있음
+> - 같은 입력 반복은 LLM 호출 생략 (응답 캐시 — 네트워크 0회)
+> - Ollama/LM Studio: 비전 지원 모델 사용(`qwen2.5-vl` 등), 모델을 미리 로드해 두면
+>   첫 호출 대기가 줄고, GPU 오프로드·컨텍스트는 서버 앱에서 조정
+> - 실행 후 GPU 조각은 노드가 자동 반납합니다. reference 캐시는 유지되므로
+>   같은 이미지 재실행 속도는 그대로입니다
 
 > 💡 **직접 설정 + 자동 (auto):** `preset=직접 설정`에서 드롭다운을
 > `자동 (auto)`으로 둔 항목은 tier(llm/auto/manual) 판정을 따릅니다.
