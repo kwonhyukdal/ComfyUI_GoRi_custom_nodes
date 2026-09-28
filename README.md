@@ -1,5 +1,7 @@
 # ComfyUI_GoRi_custom_nodes
 
+> ☕ 도움이 됐다면 커피 한 잔: [PayPal로 후원하기](https://paypal.me/GoRi57788)
+
 GoRi 제작 ComfyUI 커스텀 노드 통합 배포 저장소입니다.
 
 ## 포함된 노드
