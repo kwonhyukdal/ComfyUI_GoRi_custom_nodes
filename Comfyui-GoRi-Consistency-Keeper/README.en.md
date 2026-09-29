@@ -108,14 +108,29 @@ picks the **single view** that best matches the sampled result. Console:
 
 ## Operating systems (Windows / macOS / Linux)
 
-All three are supported and verified in CI. No external pip packages, and all
-paths are built with os.path, so Windows, macOS and Linux behave identically.
+All three are supported and verified in CI (ubuntu/windows/macos × Python
+3.10/3.12). `torch` and `numpy` are already in the ComfyUI environment.
+`mediapipe` is an optional dependency — without it those features simply
+switch off.
+
+This node **never touches the filesystem** — it only works on latent tensors,
+so there is no path handling to differ between operating systems.
 
 - **macOS Apple Silicon (M1/M2/M3)**: there is no mediapipe wheel, so the
   person mask switches off automatically. Per-part edge comparison, lighting
   flow and character sheet panel detection use only torch/numpy and keep
   working.
 - CUDA, MPS (Mac) and CPU all run without exceptions.
+
+## Batch input
+
+With a batch of two or more images in `sampled_latent`, **only the global
+pull** is applied. The person mask, per-part restoration and character sheet
+analysis are single-image features and switch off automatically; the console
+says so. Strength values still apply as given.
+
+To process a batch, split the images and run one at a time, or lower the
+strengths and rely on the global pull alone.
 
 ## Ghosting (double exposure) fix
 

@@ -1155,15 +1155,6 @@ def build_identity_anchor(image_count: int, topic: str, image_labels=None) -> st
             "Render natural realistic skin texture with visible pores and fine detail, "
             "soft directional light, subtle film grain, no airbrushed smoothing.")
 
-def build_body_proportion_anchor(image_count: int, topic: str, image_labels=None) -> str:
-    """Keep the public Qwen text path body-agnostic.
-
-    Reference images are already encoded as Qwen reference latents. Adding
-    explicit pelvis/hip/body measurements here caused Qwen to reshape or
-    fragment the body, so the public path intentionally adds no body text.
-    """
-    return ""
-
 MULTI_PERSON_KEYWORDS = (
     "two people", "two persons", "two men", "two women",
     "woman and man", "man and woman", "pair of people",
@@ -3686,7 +3677,6 @@ class CameraDirector:
         converted_labels = []
         failed_labels = []
         metrics = {}
-        hints_note = ""
         # 포즈 지정 슬롯은 topic 텍스트로 판정한다 (이미지가 없어도 참조 슬롯
         # 번호가 텍스트에 있으면 유효하므로).
         _pose_slots = _pose_role_slots(topic or "")
@@ -4098,7 +4088,10 @@ class CameraDirector:
         self._last_mix_guard = mix_guard
         self._last_appearance_ref = appearance_ref
         self._last_body_balance = body_balance
-        self._last_character_sheet_text = char_sheet
+        # 시트 문구 캐시를 별도 속성으로 들던 코드가 있었다(읽는 곳 0건).
+        # 시트 문구는 위에서 이미 positive 에 붙었고, Skills 쪽 negative
+        # 재생성은 boolean 플래그(`character_sheet=`)로 받으므로 문자열을
+        # 넘길 필요가 없다.
         # Skills run_prompt 가 negative 를 다시 만들 때 **같은 소스**를
         # 쓰게 한다. 왜(Why): 예전엔 run_prompt 가 (prompt_in + topic) 만
         # 봤다. LLM 이 장면을 확장하면 그 내용은 **어디에도 없는데**
@@ -4590,8 +4583,6 @@ class CameraDirectorEncode(CameraDirector):
         if external_prompt:
             identity_anchor = build_identity_anchor(
                 last_count, external_prompt, image_labels=last_labels)
-            body_anchor = build_body_proportion_anchor(
-                last_count, external_prompt, image_labels=last_labels)
             single_person_anchor = build_single_person_anchor(
                 last_count, external_prompt, image_labels=last_labels)
             # Qwen 표준 경로에도 의상 교체 의도가 명확하면 의상 전용 가드를 둔다.
@@ -4604,8 +4595,7 @@ class CameraDirectorEncode(CameraDirector):
             # 왜(Why): role 제한은 image_2의 인물 역할을 금지해 남성이 사라지기 때문이다.
             role_anchor = "" if duo_anchor else build_secondary_role_anchor(
                 last_count, external_prompt, image_labels=last_labels)
-            base_text = self._combine_prompt_text(identity_anchor, body_anchor)
-            base_text = self._combine_prompt_text(base_text, single_person_anchor)
+            base_text = self._combine_prompt_text(identity_anchor, single_person_anchor)
             base_text = self._combine_prompt_text(base_text, outfit_anchor)
             base_text = self._combine_prompt_text(base_text, duo_anchor)
             base_text = self._combine_prompt_text(base_text, role_anchor)
@@ -4657,10 +4647,10 @@ class CameraDirectorEncode(CameraDirector):
             if _furn_pos_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _furn_pos_pi)
-            # (캐릭터 시트 문구는 위에서 _cs_text_pi 로 이미 병합했다. 여기서
-            # getattr(self, "_last_character_sheet_text") 로 같은 문구를 또
-            # 붙이면 110단어어 positive 가 두 번 들어가 token 을 중복 소비한다.
-            # 2026-09-28 제거)
+            # (캐릭터 시트 문구는 위에서 _cs_text_pi 로 이미 병합했다.
+            # 실행 간 캐시로 같은 문구를 또 붙이면 110단어어 positive 가 두 번
+            # 들어가 token 을 중복 소비한다. 2026-09-28 실행 간 캐시 제거,
+            # 2026-09-29 죽은 속성까지 정리)
             # 스케일 일관 가드도 prompt_in 경로에 병합한다.
             # (standalone는 assemble에 이미 포함. 외부 프롬프트 기준 판정)
             if _needs_scale_guard(external_prompt or topic, camera):

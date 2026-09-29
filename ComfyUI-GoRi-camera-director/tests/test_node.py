@@ -18,16 +18,44 @@ import camera_director as cd  # noqa: E402
 import llm_client  # noqa: E402
 
 PASS = FAIL = 0
+_print = print          # stdlib print 를 그대로 보관 (_say 가 재귀하지 않게)
+
+
+def _say(line):
+    """인코딩 안전 출력.
+
+    한국어 Windows 콘솔 기본 인코딩(cp949)은 em dash(—) 등을 인코딩하지
+    못한다. 원래 `print` 를 그대로 쓰다가 cp949 환경에서 UnicodeEncodeError 로
+    테스트가 중간에 죽었다(실측: 875행). 한 번 죽으면 뒤의 검사가 아예
+    돌아가지 않아 통과/실패를 알 수 없다.
+    노드 쪽 `_log()` 과 동일한 폴백을 쓴다.
+    """
+    try:
+        _print(line)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            _print(line.encode(enc, "replace").decode(enc, errors="replace"))
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def check(name, cond, detail=""):
     global PASS, FAIL
     if cond:
         PASS += 1
-        print(f"  PASS  {name}")
+        _say(f"  PASS  {name}")
     else:
         FAIL += 1
-        print(f"  FAIL  {name}  {detail}")
+        _say(f"  FAIL  {name}  {detail}")
+
+
+# 이 파일의 나머지 출력(섹션 헤더·요약)은 전부 `_say` 를 탄다.
+# cp949 에서 섹션 제목만 먼저 죽어 결과를 아예 볼 수 없는 일이 있었다.
+# 테스트 출력 전용이라 부작용은 없다.
+print = _say  # noqa: A001  (섹션 헤더 출력용)
 
 
 node = cd.CameraDirector()
@@ -2972,6 +3000,23 @@ check("R47: dead 속성 미잔존",
 check("R47: width_ratio 미계산",
       "width_ratio" not in open("camera_director.py", encoding="utf-8").read())
 
+# R62: 죽은 코드 3종 제거 (2026-09-29 감사).
+# 왜(Why) 이걸 테스트로 박나: 죽은 코드는 조용히 남아 있다가 나중에
+# "쓸모 있어 보이니까" 되살아나면 그때는 이유를 모른다. 또 호출부가
+# `""` 를 받아 아무 효과가 없는 줄은 "기능이 있다"고 오해하게 만든다.
+_src62 = open("camera_director.py", encoding="utf-8").read()
+check("R62: build_body_proportion_anchor 제거 (항상 '' 를 반환하던 no-op)",
+      "build_body_proportion_anchor" not in _src62)
+check("R62: body_anchor 변수 제거 (빈 문자열을 _combine_prompt_text 에 실었음)",
+      "body_anchor" not in _src62)
+check("R62: _last_character_sheet_text 제거 (읽는 곳 0건인 대입)",
+      "_last_character_sheet_text" not in _src62)
+# 시트 문구가 positive 에는 실제로 붙어야 한다 — no-op 정리로 잃으면 안 된다.
+_sheet_t = "a woman in front of a white background"
+_cs = cd.character_sheet_guard(2, _sheet_t)
+check("R62: character_sheet_guard 는 여전히 문구를 만든다",
+      isinstance(_cs, str), repr(_cs))
+
 print("-- R48: LLM 실패 진단 로그 --")
 _src_r48 = open("camera_director.py", encoding="utf-8").read()
 _block48 = _src_r48.split("except llm_client.LLMError as e:")[1][:2600]
@@ -3955,6 +4000,40 @@ check("R60: '의상 교체' 단독(슬롯 없음)은 사람 아님",
       cd._is_human_subject("의상 교체") is False)
 check("R60: 동물 주제는 사람으로 오탐되지 않음",
       cd._is_human_subject("1 의상, 2 교체 강아지") is False)
+
+# R63: cp949 콘솔에서 테스트가 죽지 않는다.
+# 왜(Why) 이게 필요했나: check() 가 raw print 를 써서 cp949 환경에서
+# UnicodeEncodeError 가 났고(실측 875행), 그 즉시 **뒤의 검사가 아예
+# 안 돌아간다** — 961건 중 몇 개가 통과했는지 알 수 없다. Keeper 쪽에는
+# 이미 같은 폴백이 있는데 이 파일에는 없었다.
+#
+# 검증 방법: 실제 서브프로세스를 cp949 로 띄워 **파일 전체를 끝까지 돌린다.**
+# 이 파일 안에서 스트림을 흉내내면(원래 시도) print 가 이미 캡처된
+# stdout 을 그대로 써서 실제 인코딩 실패를 재현하지 못한다.
+import subprocess as _sp  # noqa: E402
+
+# 재귀 방지: 이 하위 프로세스도 같은 검사에 들어오면 자기 자신을 또 띄운다.
+if os.environ.get("GORI_R63_CHILD"):
+    _r63_env = None
+    _r63 = None
+else:
+    _r63_env = dict(os.environ, PYTHONIOENCODING="cp949",
+                    GORI_R63_CHILD="1")
+    _r63 = _sp.run([sys.executable, "tests/test_node.py"],
+                   capture_output=True, env=_r63_env)
+    _r63_txt = (_r63.stdout or b"").decode("cp949", errors="replace")
+    check("R63: cp949 인코딩으로 전체가 끝까지 실행됨 (UnicodeEncodeError 없음)",
+          _r63.returncode == 0 and "UnicodeEncodeError" not in _r63_txt,
+          f"exit={_r63.returncode} "
+          f"{'UnicodeEncodeError 발생' if 'UnicodeEncodeError' in _r63_txt else ''}")
+    check("R63: cp949 에서도 전 검사가 통과 (결론이 안 잘리지 않음)",
+          "FAIL=0" in _r63_txt,
+          f"{[l for l in _r63_txt.splitlines() if 'PASS=' in l][:1]}")
+# 하위 프로세스에서는 이 블록을 건너뛴다(그쪽에서는 원래 stdout 을 쓴다).
+check("R63: 테스트의 print 가 인코딩 안전 래퍼",
+      print is _say, "print = _say 로 고정해야 한다")
+# 원본 stdlib print 를 덮어쓰지 않았는지 — _say 가 재귀하면 스택 초과다.
+check("R63: stdlib print 보존 (재귀 방지)", _print is not _say)
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 

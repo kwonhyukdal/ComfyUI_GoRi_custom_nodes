@@ -184,11 +184,11 @@ def _person_mask_for_latent(vae, sampled, cache=None):
                            align_corners=False)
         m = _f.avg_pool2d(m, kernel_size=3, stride=1, padding=1)
         m = m.clamp(0.0, 1.0)
-        # 디코드 잔재 정리 (VRAM) 후 반환.
-        try:
-            del img, arr, seg, mask
-        except Exception:
-            pass
+        # 여기 있던 `del img, arr, seg, mask` 도 **한 번도 실행되지 않았다**.
+        # img는 이 함수의 로컬이 아니라 `_decode_latent_rgb` 안의 로컬이라
+        # NameError 가 났고 except 가 삼켰다. 명시적 del 은 필요 없다 —
+        # 함수가 반환되면 로컬은 회수된다. 남은 것은 VRAM 정리뿐이다.
+        del u8, seg, mask
         _release_vram()
         return m
     except Exception:
@@ -329,10 +329,14 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
                 cy = min(15, max(0, int(p.y * 16)))
                 edge[i] = float(em[cy, cx])
             out[name] = {"edge": edge, "xy": xy}
-            try:
-                del img, arr
-            except Exception:
-                pass
+            # 여기 있던 `del img, arr` 은 **한 번도 실행된 적이 없다**.
+            # img는 이 함수의 로컬이 아니라 `_decode_latent_rgb` 안의 로컬이라
+            # del 이 NameError를 던지고, 바로 아래 except 가 삼켰다. 주석이
+            # 주장하던 "디코드 잔재 정리"는 실제로 한 번도 일어나지 않았다.
+            # Python은 함수 반환 시 로컬을 회수하므로 명시적 del 이 필요 없다.
+            # 여기서는 다음 반복을 위해 참조만 끊어준다(루프 안이라 arr/em 이
+            # 살아 있는 동안 GPU 텐서를 붙들지 않게).
+            del em, u8
         except Exception:
             continue
     return out or None
@@ -381,13 +385,19 @@ def _apply_region_strength(base_strength, matched, sampled,
         return None                           # 보강할 부위 없음
     try:
         lh, lw = int(sampled.shape[-2]), int(sampled.shape[-1])
-        heat = _t.zeros(1, 1, lh, lw, device=sampled.device,
-                        dtype=sampled.dtype)
+        heat = None
         radius = max(2, lh // 16)  # 랜드마크가 덮는 반경
-        ys = _t.arange(lh, device=sampled.device,
-                       dtype=sampled.dtype)[:, None]
-        xs = _t.arange(lw, device=sampled.device,
-                       dtype=sampled.dtype)[None, :]
+        # 거리 계산은 **항상 float32** 로 한다.
+        # 왜(Why)(2026-09-29 실측): d2 를 sampled.dtype(fp16)으로 계산하면
+        # 최대값이 2*512^2 = 524288 으로 fp16 상한(65504)을 넘어 `inf` 가 된다.
+        # 실측: 256x256 fp16 에서 13835 픽셀이 inf. 비교는 `d2 <= r^2` 이라
+        # inf 는 탈락해 **결과는 우연히 맞았지만**, 그 경로는 inf 의 개수에만
+        # 의존한다. 출력을 캐스팅하기 전에 inf 가 생기면 dtype 에 따라
+        # true 로 판정될 수도 있다(비교는 fp32 에서 하므로 현재는 그렇지 않음).
+        # 조용히 운에 기대지 않고 계산 단계에서 확실히 한다.
+        ys = _t.arange(lh, dtype=_t.float32, device=sampled.device)[:, None]
+        xs = _t.arange(lw, dtype=_t.float32, device=sampled.device)[None, :]
+        r2 = float(radius * radius)
         thresh = abs(float(base_strength)) + 1e-9
         for i, (px, py) in enumerate(xy):
             if i >= len(strength_vec):
@@ -398,11 +408,17 @@ def _apply_region_strength(base_strength, matched, sampled,
                 continue
             cy, cx = int(py * lh), int(px * lw)
             d2 = (ys - cy) ** 2 + (xs - cx) ** 2
-            blob = ((d2 <= radius * radius).to(sampled.dtype) * w)
+            # heat 는 sampled.dtype 을 유지한다(반환 텐서가 입력과 같은
+            # dtype 이어야 호출부의 out + _inc 가 안전하다). 거리 계산만
+            # float32 이므로 heat 를 만들 때 한 번만 캐스팅한다.
+            blob = ((d2 <= r2).to(sampled.dtype) * w)
             # 합이 아니라 **최댓값**(합집합). 더하면 겹친 개수만큼 강도가
             # 누적돼 clamp 1.0에 닿아 사용자가 0.33을 줬는데 1.0이 적용된다.
-            heat = _t.maximum(heat, blob[None, None])
-        if float(heat.max()) <= 1e-8:
+            if heat is None:
+                heat = blob[None, None]
+            else:
+                heat = _t.maximum(heat, blob[None, None])
+        if heat is None or float(heat.max()) <= 1e-8:
             return None                       # 보강된 부위 없음
         heat = heat.clamp(0.0, 1.0)          # 정규화 금지, 상한만
         region = heat * (mask if mask is not None else 1.0)
@@ -596,24 +612,69 @@ def detect_panels(arr) -> list:
 
 
 def panel_signature(arr, x0: int, x1: int) -> "object | None":
-    """패널 구간의 에지 시그니처(정규화 8-bin 히스토그램). 비교용."""
+    """패널 구간의 에지 시그니처(정규화 8-bin 히스토그램). 비교용.
+
+    왜(Why) 실루엣 경계를 잘라내고 내부만 보는가(2026-09-29 실측):
+    원래 16x16 축소 에지맵(`_edge_map_from_rgb`)에 정규화 히스토그램을 얹었는데
+    두 가지가 겹쳐 **모든 패널의 시그니처가 정확히 같아졌다**.
+
+    ① 16x16 축소가 패널 내부 구조를 평균으로 지웠다. 줄무늬 간격을 5/40/16/9로
+       갈라 만든 4개 패널이 전부 [0.984, 0.008, 0.008, 0...] 로 같았다.
+    ② `mag / mx` 정규화가 문제였다. mx는 실루엣 경계의 최대 기울기인데 패널마다
+       거의 동률이라, 정규화 후 **가장 강한 에지 하나가 항상 1.0** 이 되고
+       나머지는 0으로 뭉개진다 → 히스토그램이 [1, 0, 0, ...] 로 붕괴.
+
+    그래서 (a) 원본 해상도에서 Sobel을 직접 내고 (b) 실루엣 외곽 한 칸을
+    잘라내 **내부 텍스처**만 본다. 패널 검출은 별도 함수(`column_profile`,
+    전 해상도 열 프로파일)가 이미 담당하므로 축소를 다시 할 이유가 없다.
+    """
     try:
         import numpy as _np
+        import torch as _t
+        import torch.nn.functional as _f
         a = _np.asarray(arr, dtype=_np.float32)
         if a.ndim != 3:
             return None
         w = a.shape[1]
         x0 = max(0, int(x0))
         x1 = min(w, int(x1))
-        if x1 - x0 < 2:
+        if x1 - x0 < 6:
             return None
-        em = _edge_map_from_rgb(a[:, x0:x1])
-        if em is None:
+        # 실루엣 외곽 1픽셀(패널 경계 = 가장 큰 기울기)을 제외한다.
+        seg = _np.clip(a[:, x0 + 1:x1 - 1], 0.0, 1.0)
+        if seg.shape[1] < 4 or seg.shape[0] < 4:
             return None
+        lum = seg[..., 0] * .299 + seg[..., 1] * .587 + seg[..., 2] * .114
+        t = _t.from_numpy(lum[None, None])
+        kx = _t.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]])
+        ky = kx.t().contiguous()
+        gx = _f.conv2d(t, kx[None, None])
+        gy = _f.conv2d(t, ky[None, None])
+        mag = (gx * gx + gy * gy).sqrt()[0, 0].numpy()
+        if mag.size == 0:
+            return None
+        # mx 정규화는 버린다 — 내부 텍스처의 **분포**가 시그니처이므로
+        # 자체 정규화(총합 1)만 하면 크기 차이와 무관해진다.
+        mean = float(mag.mean())
+        if mean <= max(1e-8, 1e-5 * (float(lum.mean()) + 1e-3)):
+            return None                              # 평탄 패널 → 근거 없음
+        # 로그 압축: 강한 에지 하나가 전체를 지배하지 않게 한다.
+        em = _np.log1p(mag / mean).astype(_np.float32)
+        # 시그니처는 **텍스처 밀도**를 본다. 히스토그램 총합 1 정규화는
+        # "평탄한 픽셀이 몇 개인가"를 지워버려, 배경이 넓은 샘플과 배경이 좁은
+        # 패널을 비교하면 밀도가 **반대로** 읽힌다(실측: 조밀한 줄무늬 샘플이
+        # 성긴 패널에 더 높게 매칭됨). 그러므로 상위 절반만 잘라 **에지가 있는
+        # 픽셀의 분포**만 남긴다. 그 분포 자체는 총합 1 정규화로 크기 무관하다.
+        cut = _np.percentile(em, 60.0)
+        em = _np.where(em > cut, em, 0.0)
+        peak = float(em.max())
+        if peak <= 1e-6:
+            return None
+        em = em / peak
         hist, _ = _np.histogram(em, bins=8, range=(0.0, 1.0), density=False)
         tot = float(hist.sum())
         if tot <= 1e-6:
-            return None                              # 평탄 패널 → 근거 없음
+            return None
         return hist / tot
     except Exception:
         return None
@@ -792,13 +853,20 @@ def analyze_reference_sheet(vae, ref_latent, sampled) -> dict:
         out["sheet"] = True
         panels = raw
         h, w = ref_arr.shape[0], ref_arr.shape[1]
-        sig_ref = panel_signature(ref_arr, 0, w)
-        # 1) 결과와 가장 잘 맞는 패널 = 시그니처 상관 최대
+        # 1) 결과와 가장 잘 맞는 패널 = **결과 이미지**와의 시그니처 상관 최대.
+        # 왜(Why) 여기서 결과를 봐야 하나: 이전에는 시그니처를 `sig_ref`(시트 전체
+        # 시그니처)와 비교했다. 시트 안의 모든 패널은 구성상 시트 전체와 비슷해서
+        # 점수가 "이 패널이 얼마나 다른 뷰인가"를 재는 것으로 수렴하고, 생성 결과가
+        # 어떤 뷰인지는 전혀 반영되지 않았다. README가 말하는 "결과와 가장 잘 맞는
+        # 뷰"가 되려면 비교 대상이 결과여야 한다.
         samp_arr = _decode_small(vae, sampled, 0.25)
+        # 샘플은 세로 한 장짜리 이미지라 패널 시그니처와 같은 넓이를 갖지 않는다.
+        # 그래도 히스토그램은 총합 1로 정규화되므로 크기 차이는 상쇄된다.
+        sig_samp = panel_signature(samp_arr, 0, samp_arr.shape[1]) if samp_arr is not None else None
         best, best_score = None, 0.0
         for idx, (x0, x1) in enumerate(panels):
             sig = panel_signature(ref_arr, x0, x1)
-            score = signature_similarity(sig, sig_ref)
+            score = signature_similarity(sig, sig_samp)
             if score > best_score:
                 best, best_score = idx, score
         out["best"] = best

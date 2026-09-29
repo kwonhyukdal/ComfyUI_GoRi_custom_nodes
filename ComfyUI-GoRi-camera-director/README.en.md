@@ -69,7 +69,7 @@ Type a one-line topic (Korean OK), attach optional images and optional positive/
 ```
 ComfyUI/
 └── custom_nodes/
-     └── ComfyUI-GoRi-camera-director/   ← copy this whole folder
+    └── ComfyUI-GoRi-camera-director/   ← copy this whole folder
 ```
 
 1. Copy this folder into `ComfyUI/custom_nodes/`

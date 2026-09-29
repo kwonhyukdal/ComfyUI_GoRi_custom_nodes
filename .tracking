@@ -2,6 +2,7 @@
 .github/workflows/publish_action.yml
 .gitignore
 __init__.py
+ComfyUI-GoRi-camera-director/.gitignore
 ComfyUI-GoRi-camera-director/__init__.py
 ComfyUI-GoRi-camera-director/camera_director.py
 ComfyUI-GoRi-camera-director/keywords_ko_en.json

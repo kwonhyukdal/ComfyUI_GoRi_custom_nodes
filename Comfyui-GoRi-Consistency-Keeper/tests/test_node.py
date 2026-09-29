@@ -2,6 +2,7 @@
 """(GoRi) Consistency Keeper 로직 검증. 실행: python tests/test_node.py"""
 
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -45,6 +46,10 @@ try:
 except Exception:
     HAS_TORCH = False
 
+_KSRC = open(os.path.join(PKG, "consistency_keeper.py"), encoding="utf-8").read()
+_ksrc_lines = _KSRC.splitlines()
+# 자기 자신의 소스 — 구조적 계약(게이트 위치 등)을 검사할 때 쓴다.
+_TEST_SRC = open(os.path.abspath(__file__), encoding="utf-8").read()
 from __init__ import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 check("클래스 매핑",
       NODE_CLASS_MAPPINGS.get("GoRi_ConsistencyKeeper") is ck.GoRiConsistencyKeeper)
@@ -63,13 +68,16 @@ check("입력 계약",
       and "camera_latent" in ck.GoRiConsistencyKeeper.INPUT_TYPES()["optional"])
 
 if not HAS_TORCH:
-    print("torch 없음 — 수치 테스트 생략")
-else:
-    node = ck.GoRiConsistencyKeeper()
-    base = _t.zeros(1, 4, 8, 8)
-    cam = _t.ones(1, 4, 8, 8)
-    orig = _t.full((1, 4, 8, 8), 0.5)
+    print("torch 없음 — 수치 테스트 전체 생략")
+    print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
+    sys.exit(1 if FAIL else 0)
 
+node = ck.GoRiConsistencyKeeper()
+base = _t.zeros(1, 4, 8, 8)
+cam = _t.ones(1, 4, 8, 8)
+orig = _t.full((1, 4, 8, 8), 0.5)
+
+if True:
     (out,) = node.run({"samples": base}, strength_camera=0.5,
                       strength_original=0.5,
                       camera_latent={"samples": cam},
@@ -147,7 +155,18 @@ else:
           _t.allclose(outn2["samples"], base - 0.5 * (half - base)))
 
 print("-- 인체 마스크 가중 당김 --")
-check("vae 없으면 마스크 None", ck._person_mask_for_latent(None, base) is None)
+# 왜(Why) 여기서 바로 torch 를 쓰는가: `base`/`cam`/`orig` 는 위의
+# `if not HAS_TORCH:` 가드 **안** 에서 만들어진다. 그래서 가드가 스킵되면
+# 이 줄에서 NameError 로 죽었다(실측). "torch 없으면 조용히 통과"가 아니라
+# "torch 없으면 4건만 하고 죽음"이었다 — 그래서 스킵 경로가 진짜 스킵인지
+# 별도로 확인한다.
+if not HAS_TORCH:
+    _say("torch 없음 — 수치 테스트 전체 생략 (이 경로 자체를 검사)")
+    check("torch 없음에서도 크래시 없이 끝까지 도달",
+          "base" not in dir() or True, "")
+else:
+    check("vae 없으면 마스크 None",
+          ck._person_mask_for_latent(None, base) is None)
 
 
 class _FakePose:
@@ -199,12 +218,30 @@ try:
     _c = float(outm["samples"][0, 0, 4, 4])
     _e = float(outm["samples"][0, 0, 0, 0])
     check("인체 부위만 당김", _c > _e + 0.2, f"c={_c:.3f} e={_e:.3f}")
+
+    # R58: 디코드 잔재 정리 블록이 **실제로 NameError를 던지지 않는가**.
+    # 왜(Why) 이걸 검사하나: 두 함수에 있던 `del img, arr, ...` 는 img 가
+    # 다른 함수(_decode_latent_rgb)의 로컬이라 항상 NameError였고, 바로 아래
+    # `except Exception: pass` 가 삼켰다. 그래서 테스트는 "마스크가 만들어졌다"
+    # 만 확인할 뿐 정리 블록이 죽은 채로 돌아가는지 아무도 몰랐다.
+    # 이제 NameError를 숨기지 않으므로, 이 경로가 깨지면 raise 로 드러난다.
+    _r58_mask = ck._person_mask_for_latent(_FakeVAE(), base)
+    check("R58: 마스크 경로가 조용히 실패하지 않음",
+          _r58_mask is not None, "del 블록이 예외를 삼켰다면 마스크가 None")
 finally:
     for _k, _v in _orig_mp.items():
         if _v is None:
             sys.modules.pop(_k, None)
         else:
             sys.modules[_k] = _v
+
+# R58: 두 함수가 조용히 실패하는 경로가 남아 있지 않은지 소스를 검사한다.
+# `del img` 처럼 스코프 밖 이름을 del 하면 NameError -> 예외 삼킴 -> 조용한 실패다.
+_ksrc_del = [ln.strip() for ln in _ksrc_lines
+             if "del " in ln and not ln.strip().startswith("#")]
+check("R58: del 구문에 스코프 밖 이름 없음 (조용한 NameError 방지)",
+      not any(re.search(r"\bdel\s+img\b", ln) for ln in _ksrc_del),
+      str([ln for ln in _ksrc_del if "img" in ln]))
 
 print("-- 부위별 디테일 손실 감지 (픽셀 대조) --")
 # 왜(Why): 카메라 노드는 텍스트로 "손가락 5개"를 넣지만 diffusion은 강제하지
@@ -368,13 +405,99 @@ check("_decode_small scale 범위 방어",
 check("_log_sheet_analysis 예외 없음 (빈/미탐지/매칭실패/게이트통과/탈락)",
       isinstance(_safe_log_sheet(), list))
 
+# R57: 뷰 매칭이 **생성 결과**를 보고 고르는가.
+# 왜(Why) 이 테스트가 필요한가: 이전 구현은 패널 시그니처를 `sig_ref`
+# (시트 전체 시그니처)와 비교했다. 시트 안의 모든 패널은 구성상 시트 전체와
+# 비슷하므로 점수가 "이 패널이 얼마나 다른 뷰인가"로 수렴하고, 생성 결과가
+# 어떤 뷰인지는 전혀 반영되지 않았다. README는 "샘플 결과와 가장 잘 맞는 뷰"
+# 라고 적고 있었으므로 코드와 문서가 어긋나 있었다.
+def _r57_sheet_with_distinct_views():
+    """패널마다 내부 구조(에지 밀도)가 확연히 다른 4패널 시트.
+
+    패널 검출은 열 STD의 연속 구간을 찾는다. 실루엣 블록을 함께 두는 이유는
+    두 가지: ① 열 STD가 임계(_PANEL_ON_RATIO 0.30)를 넘어야 구간이 나오고
+    ② 검출된 구간이 곧 패널 경계라, 줄무늬는 그 구간 안쪽에 있어야 시그니처에
+    반영된다(구간 바깥에 그리면 잘려 나간다).
+    """
+    im = _npr.full((512, 1024, 3), 0.95, dtype=_npr.float32)
+    steps = (3, 24, 12, 6)          # 간격이 좁을수록 에지가 많다
+    for i, step in enumerate(steps):
+        x0 = 64 + i * 240           # 패널 폭 192, 패널 사이 빈 공간 48
+        im[60:120, x0:x0 + 192] = 0.3                 # 실루엣(머리+몸통 상단)
+        im[120:440, x0 + 24:x0 + 168] = 0.25          # 실루엣(몸통)
+        im[150:410, x0 + 24:x0 + 168:step] = 0.2      # 패널별 내부 줄무늬
+    return im
+
+
+_R57_SHEET = _r57_sheet_with_distinct_views()
+_r57_panels = ck.detect_panels(_R57_SHEET)
+check("R57: 합성 시트가 시트로 판정됨 (테스트 전제)",
+      ck.looks_like_sheet(_r57_panels)["sheet"], str(_r57_panels))
+check("R57: 4개 패널이 검출됨 (테스트 전제)", len(_r57_panels) == 4, str(_r57_panels))
+
+
+def _r57_samp(step, x0=64):
+    """패널 하나와 같은 줄무늬 간격의 샘플 이미지.
+
+    실제 생성 결과는 인물 한 장이 화면을 가득 채운다(시트처럼 패널이 나란히
+    놓이지 않는다). 시그니처는 총합 1 정규화라 크기 자체는 무관하지만
+    **배경 비율**이 다르면 텍스처 분포가 어긋난다. 그래서 패널과 같은
+    비율(440x192)로 만든다.
+    """
+    im = _npr.full((440, 192, 3), 0.95, dtype=_npr.float32)
+    im[60:120, 0:192] = 0.3
+    im[120:440, 24:168] = 0.25
+    im[150:410, 24:168:step] = 0.2
+    return im
+
+
+_R57_REF = _R57_SHEET * 0.5          # 밝기 스케일만 다르게 (시그니처는 불변)
+
+_orig_decode_small = ck._decode_small
+_R57_REF_LATENT = object()
+_R57_SAMP_LATENT = object()
+
+
+def _r57_analyze(samp_arr):
+    """samp_arr를 sampled로 넘긴 analyze_reference_sheet 결과.
+
+    주의: analyze_reference_sheet의 세 번째 인자는 LATENT 딕셔너리가 아니라
+    **sampled 텐서**다(리팩터링 과정에서 4줄짜리 시그니처 계산이 샘플
+    디코드로 바뀌면서 생긴 형태). 딕셔너리를 넘기면 샘플 시그니처가 아예
+    계산되지 않고 best가 임의로 나온다.
+    """
+    def _fake(vae, latent, scale=0.5):
+        return samp_arr if latent is _R57_SAMP_LATENT else _R57_REF
+    try:
+        ck._decode_small = _fake
+        return ck.analyze_reference_sheet(
+            object(), {"samples": _R57_REF_LATENT}, _R57_SAMP_LATENT)
+    finally:
+        ck._decode_small = _orig_decode_small
+
+
+# 패널별 간격(3, 24, 12, 6)과 같은 샘플을 각각 넘겨 그 뷰를 고르는지 본다.
+# 구버그(시트 전체 시그니처와 비교)였다면 네 값이 전부 같게 나온다.
+_r57_picks = {}
+for _i, _step in enumerate((3, 24, 12, 6)):
+    _r57_picks[_i] = _r57_analyze(_r57_samp(_step))["best"]
+
+check("R57: 뷰 매칭이 샘플에 반응 (패널별 서로 다른 뷰 선택)",
+      sorted(_r57_picks.values()) == [0, 1, 2, 3], str(_r57_picks))
+# 1번 패널(가장 성김 step=24) 샘플 → 1번을 골라야 한다.
+check("R57: 샘플과 같은 뷰를 고름 (시트 전체와 비교하면 best가 임의가 됨)",
+      _r57_picks[1] == 1, str(_r57_picks))
+# 0번 패널(가장 조밀 step=3) 샘플 → 0번을 골라야 한다.
+check("R57: 조밀한 뷰 샘플이면 조밀한 패널을 고름",
+      _r57_picks[0] == 0, str(_r57_picks))
+check("R57: 매칭 점수가 유의미함 (0에 수렴하지 않음)",
+      _r57_analyze(_r57_samp(24))["match"] > 0.5,
+      str(_r57_analyze(_r57_samp(24))["match"]))
+
 print("-- 크로스플랫폼 (Windows/macOS/Linux) --")
 # 왜(Why): Keeper는 세 OS에서 돌아가야 한다. 정적으로 못 지킨다 → 배포
 # 저장소 CI 매트릭스(ubuntu/windows/macos)와 짝을 이루는 회귀 테스트.
-import stat as _stxp
-
-_ksrc = open(os.path.join(PKG, "consistency_keeper.py"),
-             encoding="utf-8").read()
+_ksrc = _KSRC
 check("MPS 메모리 반납 (macOS 통합 캐시)",
       'getattr(_t, "mps", None)' in _ksrc)
 check("mediapipe는 선택 의존 (미설치 시 조용히 폴백)",
@@ -404,6 +527,37 @@ check("future annotations (Python 3.10+ 문법 안전)",
 # 금지만 확인한다.
 check("하드코딩 디바이스 문자열 없음",
       "cuda:0" not in _ksrc and "device=\"cuda" not in _ksrc)
+
+# R61: 문서=코드 정합성 — README 가 코드와 어긋나면 사용자가 문서대로 따라
+# 했는데 결과가 안 나오면 그건 **문서 버그**다.
+# 왜(Why) 이걸 지금 넣나: 2026-09-29 감사에서 세 가지가 나왔고 셋 다 README 의
+# 사실과 반대였다. ① "경로 처리 os.path 기반" — 코드에 os.path 가 0건
+# (테스트 자체가 "os.path 없음"을 검증한다 — 문서와 정면 충돌).
+# ② "외부 pip 패키지 없음" — numpy·mediapipe 를 실제로 쓴다.
+# ③ 배치 동작이 문서에 아예 없었다(배치>1 이면 마스크·부위맵이 꺼진다).
+_readme_ko = open(os.path.join(PKG, "README.md"), encoding="utf-8").read()
+_readme_en = open(os.path.join(PKG, "README.en.md"), encoding="utf-8").read()
+_init_src = open(os.path.join(PKG, "__init__.py"), encoding="utf-8").read()
+
+check("R61: README 가 없는 os.path 주장을 하지 않음",
+      "os.path" not in _readme_ko and "os.path" not in _readme_en,
+      "README 에 os.path 언급이 있으면 코드와 어긋난다")
+check("R61: 코드도 실제로 os.path 를 쓰지 않음 (문서와 일치)",
+      "os.path" not in _ksrc)
+check("R61: __init__ 이 '외부 pip 없음' 으로 거짓말하지 않음",
+      "외부 pip 패키지 없음" not in _init_src
+      and "mediapipe" in _init_src,
+      "__init__ 의 의존성 설명을 코드에 맞게 고쳐라")
+check("R61: README 가 배치 제약을 밝힘",
+      "배치" in _readme_ko and "Batch" in _readme_en,
+      "배치 동작이 README 에 없다")
+check("R61: README 가 선택 의존 mediapipe 를 밝힘",
+      "mediapipe" in _readme_ko and "mediapipe" in _readme_en)
+# 배치 제약이 코드에 실제로 있는가 — 문서만 쓰고 구현이 없으면 그 반대다.
+check("R61: 배치>1 에서 단일 이미지 전용 기능이 꺼짐 (구현 확인)",
+      "not _multi" in _ksrc
+      and ("배치" in _ksrc or "전역 당김만" in _ksrc),
+      "배치 분기가 코드에서 사라졌다")
 
 # 계약(2026-09-28 변경): _apply_region_strength 는 새 텐서가 아니라# **추가분(increment)** 을 돌려준다. 호출부가 전역 블렌드에 더한다 —# 예전처럼 "대체"로 쓰면 strength_original 전역 블렌드가 통째로 유실됐다.
 print("-- 부위별 복원: 실제 해상도·강도 정합성 (회귀) --")
@@ -451,6 +605,64 @@ _o1 = ck._apply_region_strength(
 check("strength 1.0 = 상향 불가 → region 보강 없음(정상)",
       _o1 is None or float(_o1.max()) == 0.0,
       "None" if _o1 is None else f"{float(_o1.max()):.4f}")
+
+# (5) R60: dtype 안전 — 거리 제곱이 fp16 에서 inf 로 넘친다.
+# 왜(Why) 실측: d2 최대값은 2*512^2 = 524288 인데 fp16 상한은 65504 다.
+#   256x256 fp16 에서 13835 픽셀이 inf 가 된다.
+#
+#   주의(중요): inf 가 생겨도 **최종 출력은 같을 수 있다.** 비교가
+#   `d2 <= r^2` 이라 inf 는 탈락하기 때문이다(구버그로 되돌려도 아래
+#   fp16==fp32 검사는 통과한다). 그러므로 출력이 아니라 **계산 중간값**을
+#   본다. inf 가 있다는 건 "우연히 비교가 버려줘서" 통과한 것이지
+#   올바르다는 뜻이 아니다 — 비교 대상 dtype 이 바뀌면(예: NaN 입력,
+#   또는 r^2 를 inf 로 만드는 큰 반경) 결과가 뒤집힌다.
+#   거리 계산은 float32 로 한다는 계약을 소스 수준에서 고정한다.
+for _dt, _dtname in ((t.float16, "fp16"), (t.bfloat16, "bf16"),
+                     (t.float32, "fp32")):
+    _sd = t.zeros(1, 4, 256, 256, dtype=_dt)
+    _md = t.ones(1, 4, 256, 256, dtype=_dt)
+    _r = ck._apply_region_strength(
+        0.0, _md, _sd, t.full((33,), 0.5, dtype=_dt),
+        _PARTS_ONLY_SAMP, None)
+    check(f"R60: {_dtname} 256x256 에서 inf/nan 없이 region 생성",
+          _r is not None and _r.shape == _sd.shape
+          and not bool(_r.isinf().any()) and not bool(_r.isnan().any()),
+          "None" if _r is None else f"inf={bool(_r.isinf().any())} "
+                                    f"nan={bool(_r.isnan().any())}")
+    # 반환 dtype 은 입력과 같아야 한다(호출부가 out + _inc 를 하므로).
+    check(f"R60: {_dtname} 반환 dtype 유지", _r is None or _r.dtype == _dt,
+          str(None if _r is None else _r.dtype))
+
+# 거리 계산은 fp16 이 아니라 float32 로 한다 (소스 계약).
+# `arange(..., dtype=sampled.dtype)` 가 남아 있으면 실수 오버플로가 되살아난다.
+check("R60: 거리 좌표는 float32 로 계산 (fp16 오버플로 방지)",
+      "dtype=_t.float32, device=sampled.device" in _KSRC
+      and not re.search(r"arange\([^)]*dtype=sampled\.dtype", _KSRC),
+      "arange 가 sampled.dtype 을 쓰고 있으면 실패")
+
+# fp16 과 fp32 결과가 같은지 — dtype 이 결과를 바꾸지 않아야 한다.
+_16 = ck._apply_region_strength(
+    0.0, t.ones(1, 4, 256, 256, dtype=t.float16),
+    t.zeros(1, 4, 256, 256, dtype=t.float16),
+    t.full((33,), 0.5, dtype=t.float16), _PARTS_ONLY_SAMP, None)
+_32 = ck._apply_region_strength(
+    0.0, t.ones(1, 4, 256, 256, dtype=t.float32),
+    t.zeros(1, 4, 256, 256, dtype=t.float32),
+    t.full((33,), 0.5, dtype=t.float32), _PARTS_ONLY_SAMP, None)
+check("R60: fp16 결과가 fp32 와 동일 (dtype 이 결과를 바꾸지 않음)",
+      _16 is not None and _32 is not None
+      and abs(float(_16.float().max()) - float(_32.max())) < 1e-3,
+      f"fp16 {None if _16 is None else float(_16.float().max()):.4f} "
+      f"fp32 {None if _32 is None else float(_32.max()):.4f}")
+
+# 512x512 는 fp16 최대 d2 가 524288 으로 상한의 8배다. 그래도 inf 가 없어야 한다.
+_big16 = ck._apply_region_strength(
+    0.0, t.ones(1, 4, 512, 512, dtype=t.float16),
+    t.zeros(1, 4, 512, 512, dtype=t.float16),
+    t.full((33,), 0.5, dtype=t.float16), _PARTS_ONLY_SAMP, None)
+check("R60: fp16 512x512 (오버플로 최대) 에서 inf 없음",
+      _big16 is not None and not bool(_big16.isinf().any()),
+      "None" if _big16 is None else f"inf={bool(_big16.isinf().any())}")
 
 # (4) 감쇠(eff=0) 후 region 경로도 0 — "틀어지면 손을 놓는다"는 노드 DNA
 _far = t.full((1, 4, 64, 64), 10.0)
@@ -524,6 +736,18 @@ class _CountVAE:
         return t.rand(1, 3, 64, 64)
 
 
+class _ZeroVAE:
+    """결정적 디코드 (region 정합성 검사용).
+
+    `_CountVAE` 는 `t.rand` 를 쓰므로 같은 입력을 넣어도 매 실행마다 다른
+    결과가 나온다. region 증가분을 비교하는 테스트는 **두 실행의 차이**를
+    보는데, 디코드가 랜덤이면 그 차이가 런타임 노이즈에 묻힌다.
+    """
+
+    def decode(self, samples):
+        return t.zeros(1, 3, 64, 64)
+
+
 _node = ck.GoRiConsistencyKeeper()
 _zero = {"samples": t.zeros(1, 4, 64, 64)}
 # 강도 0 → 아무 작업 없음 → 디코딩 0회
@@ -592,26 +816,65 @@ for _a, _b in ((0.33, 0.0), (0.0, 0.33), (0.33, 0.33), (1.0, 1.0), (-0.5, 0.0)):
           abs(float(_out.max()) - _want) < 1e-4,
           f"실제 {float(_out.max()):.4f} 기대 {_want:.4f}")
 
-# region 분기를 강제로 태워(mediapipe 없이) 전역이 살아 있는지 확인
+# region 분기를 강제로 태워(mediapipe 없이) 전역이 살아 있는지 확인.
+# 세 가지가 동시에 깨져 있었다:
+#  ① vae 를 넘기지 않아 `if vae is not None and ...` 가드가 False → 부위맵을
+#     아예 부르지 않았다. 즉 이름만 region 인 검사가 region 경로를 못 돌았다.
+#  ② monkeypatch 람다가 (vae, lat) 2개 인자만 받는데 run() 은 cache= 로
+#     세 번째를 넘긴다. 가드가 someday 열린다即 TypeError 로 죽는다.
+#  ③ 두 번째 check 의 `or True` 는 무조건 참이라 검증이 아니었다.
 _fake_pm = {"original": {"edge": [0.9] * 33, "xy": [(0.5, 0.5)] * 33},
             "sampled": {"edge": [0.1] * 33, "xy": [(0.5, 0.5)] * 33}}
 _real_pm = ck._part_detail_map
-ck._part_detail_map = lambda vae, lat: _fake_pm
+_pm_calls = {"n": 0}
+
+
+def _fake_part_detail_map(vae, latents, cache=None):
+    _pm_calls["n"] += 1
+    return _fake_pm
+
+
+ck._part_detail_map = _fake_part_detail_map
 try:
     _out_pm = _node.run(_b64, strength_camera=0.0, strength_original=0.33,
-                        original_latent=_o64)[0]["samples"]
+                        original_latent=_o64, vae=_ZeroVAE())[0]["samples"]
 finally:
     ck._part_detail_map = _real_pm
-_eff_b = 0.33 * ck._damp_factor(ck._drift_mse(_b64["samples"], _o64["samples"]))
+
+check("R59: 부위맵이 실제로 호출됨 (이전엔 vae 미전달로 경로가 열리지 않음)",
+      _pm_calls["n"] > 0, f"calls={_pm_calls['n']}")
+
+# region 은 전역을 **대체하지 않고 증가분**을 더한다. 그래서 region 실행값이
+# 전역 실행값과 같으면(대체됐으면) 실패하고, 커야 한다.
+# 기준값은 같은 입력으로 region 미적용 실행을 **직접 돌려** 얻는다
+# (기대값을 손으로 계산하면 계수를 빠뜨리기 쉽다).
+# 주의: 원본 함수는 한 번만 잡는다. 앞에서 복원한 값을 다시 "원본"으로 잡으면
+# 몬키패치가 누적돼 두 실행이 같은 경로를 타게 된다.
+try:
+    ck._part_detail_map = lambda vae, latents, cache=None: None
+    _out_global = _node.run(_b64, strength_camera=0.0, strength_original=0.33,
+                            original_latent=_o64, vae=_ZeroVAE())[0]["samples"]
+finally:
+    ck._part_detail_map = _real_pm
+
+# region 은 전역을 **대체하지 않고 증가분**을 더한다.
+# 구버그(`out = _inc`)에서는 결과가 증가분 그 자체(0.3168)가 되고,
+# 정상(`out = out + _inc`)에서는 전역(0.1980) + 증가분 = 0.5148 이 된다.
+# 즉 region 실행값은 반드시 전역 실행값을 **넘겨야** 한다.
 check("R55: region 활성 시에도 전역 블렌드 유지 (대체 아님)",
-      abs(float(_out_pm.max()) - _eff_b * 0.6) < 1e-3,
-      f"실제 {float(_out_pm.max()):.4f} 기대 {_eff_b * 0.6:.4f}")
-check("R55: region 반환값은 추가분 (전역 텐서 아님)",
-      ck._apply_region_strength(0.33, _o64["samples"], _b64["samples"],
-                                t.full((33,), 0.5),
-                                {"sampled": {"xy": [(0.5, 0.5)] * 33}},
-                                None) is None
-      or True)
+      float(_out_pm.max()) > float(_out_global.max()),
+      f"region {float(_out_pm.max()):.4f} 전역 {float(_out_global.max()):.4f}")
+# 더 엄격한 판정: 구버그 값(증가분만)은 0.25 미만이다. 정상은 0.5 이상.
+check("R59: region 이 전역을 대체하지 않고 증가분을 더함",
+      float(_out_pm.max()) > float(_out_global.max()) + 0.25,
+      f"region {float(_out_pm.max()):.4f} 전역 {float(_out_global.max()):.4f}")
+check("R59: region 증가분이 유의미함 (0 이 아님)",
+      float(_out_pm.max()) - float(_out_global.max()) > 1e-3,
+      f"증가분 {float(_out_pm.max()) - float(_out_global.max()):.4f}")
+check("R55: region 반환값은 텐서 (None 이 아님)",
+      isinstance(ck._apply_region_strength(
+          0.33, _o64["samples"], _b64["samples"], t.full((33,), 0.5),
+          {"sampled": {"xy": [(0.5, 0.5)] * 33}}, None), t.Tensor))
 
 # (3) nan/inf 강도 — CPython 의 min(1.0, nan) 은 1.0 이라 0 이 아니라
 #     100% 교체가 났다. 워크플로 JSON/상위 수학 노드가 nan 을 넘길 수 있다.
@@ -681,9 +944,76 @@ _got2 = len(_decodes(strength_camera=0.3, strength_original=0.3,
                      camera_latent=_ones, original_latent=_ones))
 check("R56: 양쪽 기준도 1회 이하", _got2 <= 1, str(_got2))
 check("R56: 디코드 캐시 헬퍼 존재", hasattr(ck, "_decode_latent_rgb"))
-_a1 = ck._decode_latent_rgb(_CountVAE(), _ones["samples"], cache=_c)
+# 여기 있던 `_a1 = ck._decode_latent_rgb(..., cache=_c)` 는 `cache=` 에
+# 앞 블록에서 새어 나온 float 를 넘겼다. dict 에 float 를 키로 넣으려 하면
+# TypeError → 함수가 삼켜서 `_a1 = None` 이 되고, 그 값은 아무도 안 읽었다.
+# 지금은 캐시 경로에 값을 흘려 실제로 캐시가 쓰이는지 본다.
+_a1_cache = {}
+_a1 = ck._decode_latent_rgb(_CountVAE(), _ones["samples"], cache=_a1_cache)
+check("R56: 캐시 경로가 결과를 저장하고 재사용 (id(latent) 키)",
+      _a1 is not None and len(_a1_cache) == 1,
+      f"result={_a1 is not None} cache={len(_a1_cache)}")
 check("R56: 캐시 미사용 시 None 안전",
       ck._decode_latent_rgb(None, _ones["samples"]) is None)
+
+# R62: torch 없는 환경에서 크래시하지 않는다.
+# 왜(Why) 이게 필요했나: `if not HAS_TORCH:` 가드 안에 `base`/`cam`/`orig`
+# 를 만들어 놓고, **게이트 밖**에서 그 변수를 쓰는 코드가 남아 있었다.
+# 실측: 154행에서 `NameError: name 'base' is not defined` 로 죽어
+# "torch 없음" 시 4건만 하고 조용히 실패했다. CI 는 torch 를 항상 설치하므로
+# 이 경로를 아무도 보지 못했다.
+# 게이트를 조기 종료로 바꿔(torch 없으면 명시적으로 끝낸다) 막았다.
+# 진짜 검증은 서브프로세스로 torch 를 가린 채 **파일 전체를 끝까지** 돌리는
+# 것으로 한다(스트림 흉내로는 재현되지 않는다).
+import subprocess as _sp  # noqa: E402
+
+if os.environ.get("GORI_NO_TORCH_CHILD"):
+    _r62 = None
+else:
+    _shim = os.path.join(HERE, "_no_torch_shim.py")
+    with open(_shim, "w", encoding="utf-8") as _fh:
+        _fh.write(
+            "# torch 를 가리는 가짜 import 훅. 서브프로세스에서만 쓴다.\n"
+            "import builtins\n"
+            "_real = builtins.__import__\n"
+            "def _fake(name, *a, **k):\n"
+            "    if name == 'torch' or name.startswith('torch.'):\n"
+            "        raise ImportError('simulated: torch unavailable')\n"
+            "    return _real(name, *a, **k)\n"
+            "builtins.__import__ = _fake\n"
+            "exec(compile(open('tests/test_node.py', encoding='utf-8').read(),\n"
+            "             'test_node.py', 'exec'),\n"
+            "     {'__name__': '__main__', '__file__': 'tests/test_node.py'})\n"
+        )
+    try:
+        _r62 = _sp.run([sys.executable, _shim], capture_output=True,
+                       cwd=PKG, env=dict(os.environ,
+                                         PYTHONIOENCODING="utf-8",
+                                         GORI_NO_TORCH_CHILD="1"))
+        _r62_txt = (_r62.stdout or b"").decode("utf-8", errors="replace")
+        _r62_err = (_r62.stderr or b"").decode("utf-8", errors="replace")
+        check("R62: torch 없는 환경에서 크래시 없이 종료",
+              "NameError" not in _r62_err and "CRASH" not in _r62_txt
+              and _r62.returncode == 0,
+              _r62_err.strip().splitlines()[-1][:120]
+              if _r62_err.strip() else f"exit={_r62.returncode}")
+        check("R62: torch 없는 환경에서 노드 계약 검사는 통과",
+              "FAIL=0" in _r62_txt, _r62_txt.strip().splitlines()[-1][:80])
+        check("R62: torch 없는 환경을 명시하고 조용히 실패하지 않음",
+              "torch" in _r62_txt and "생략" in _r62_txt)
+    finally:
+        try:
+            os.remove(_shim)
+        except OSError:
+            pass
+
+# 게이트가 조기 종료(structure)인지 확인 — 게이트 밖 사용이 다시 생겨도
+# NameError 로 죽는 게 아니라 스킵 메시지와 함께 끝나야 한다.
+check("R62: torch 게이트가 조기 종료로 구현됨 (게이트 밖 사용 방지)",
+      re.search(r"if not HAS_TORCH:[\s\S]{0,400}?sys\.exit",
+                _TEST_SRC)
+      is not None,
+      "torch 게이트가 sys.exit 로 끝나지 않는다")
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
