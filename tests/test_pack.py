@@ -70,7 +70,7 @@ def _load_like_comfyui(module_path):
     return mod, sys_module_name
 
 
-print("-- 통합 팩 로더 (ComfyUI 실제 로딩 방식 재현) --")
+_say("-- 통합 팩 로더 (ComfyUI 실제 로딩 방식 재현) --")
 # 왜(Why) sys.path 를 비우나(2026-09-29 실측):
 # ComfyUI 는 실행 중 `custom_nodes` 를 sys.path 에 넣는다. 그래서 옛 코드의
 # `importlib.import_module("." + name, __name__)` 가 **우연히 통한다.**
@@ -92,7 +92,7 @@ for _g in list(sys.modules):
     if _g.startswith("GoRi-"):
         del sys.modules[_g]
 _pack, _sysname = _load_like_comfyui(PKG)
-print(f"  (sys.modules 이름: {_sysname})")
+_say(f"  (sys.modules 이름: {_sysname})")
 _nodes = sorted(getattr(_pack, "NODE_CLASS_MAPPINGS", {}))
 _display = sorted(getattr(_pack, "NODE_DISPLAY_NAME_MAPPINGS", {}))
 
@@ -159,5 +159,5 @@ for _n in _subpkgs:
     check(f"{_n} 는 단독 설치 가능 (__init__.py 보유)",
           os.path.isfile(os.path.join(PKG, _n, "__init__.py")))
 
-print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
+_say(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
