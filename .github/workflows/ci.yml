@@ -7,10 +7,17 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 왜(Why) 3개 OS인가: 이 노드들은 Windows에서 개발하지만 사용자는
+    # macOS·Linux에서도 돌린다. 한 OS에서만 시험하면 "맥에서 깨진다"를
+    # CI가 통과시켜 배포한다. 실제로 이 매트릭스가 심볼릭 링크 경로 버그를
+    # 잡아냈다(2026-09-28).
+    # macos-latest는 arm64라 Apple Silicon 경로(= mediapipe 미설치)까지
+    # 검증된다. 그 상태에서도 테스트가 통과해야 한다(그레이드 폴백 확인).
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +34,7 @@ jobs:
           fail=0
           for node_dir in GoRi-*/; do
             if [ -f "${node_dir}tests/test_node.py" ]; then
-              echo "== ${node_dir} =="
+              echo "== ${node_dir} ($(uname -s) py$(python -V 2>&1 | cut -d' ' -f2)) =="
               (cd "${node_dir}" && python tests/test_node.py) || fail=1
             fi
           done
