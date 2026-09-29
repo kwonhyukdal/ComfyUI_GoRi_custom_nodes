@@ -49,4 +49,9 @@ jobs:
             echo "::error::노드 테스트를 하나도 찾지 못했다. 폴더 구조를 확인하라."
             fail=1
           fi
+          # (왜) 통합 팩 루트 로더는 위 `*/` 루프에 안 잡힌다(루트에 있는 파일).
+          # 여기서 회귀하면 "노드 테스트 전부 통과 + NODE_CLASS_MAPPINGS 비어 있음" 으로
+          # 조용히 깨진다 — 실제로 2026-09-29 에 그 상태로 게시됐다.
+          echo "== pack ($(uname -s) py$(python -V 2>&1 | cut -d' ' -f2)) =="
+          (python tests/test_pack.py) || fail=1
           exit $fail

@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-gori-custom-nodes"
 description = "GoRi ComfyUI custom nodes — Camera Director (camera-aware prompts and conditioning for Qwen-Image 2.1) and Consistency Keeper (latent-space identity/geometry restoration pass)."
-version = "1.9.0"
+version = "1.9.1"
 license = {text = "MIT"}
 dependencies = []
 # 세 OS 모두에서 CI로 검증된다(ubuntu/windows/macos × Python 3.10/3.12).
