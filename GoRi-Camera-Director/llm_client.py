@@ -50,17 +50,45 @@ _ENV_FILE_OVERRIDE = None  # 테스트 주입용 (None이면 자동 탐색)
 
 
 def _env_file_path():
-    """ComfyUI 루트의 .env 경로. 못 찾으면 None (조용히 미사용)."""
+    """ComfyUI 루트의 .env 경로. 못 찾으면 None (조용히 미사용).
+
+    왜(Why) realpath인가: macOS/Linux 개발에서는 `custom_nodes/노드폴더`를
+    개발 폴더로 **심볼릭 링크**하는 것이 흔하다. abspath는 링크 경로를 그대로
+    쓰기 때문에 ComfyUI 루트를 2단계 위로 잘못 올라가 .env를 못 찾는다 →
+    사용자는 "키가 저장 안 된다"는 메시지만 보고 원인을 알 수 없다.
+    realpath는 링크를 따라가 실제 위치를 준다.
+    """
     if _ENV_FILE_OVERRIDE is not None:
         return _ENV_FILE_OVERRIDE
     try:
-        here = os.path.dirname(os.path.abspath(__file__))
+        here = os.path.dirname(os.path.realpath(__file__))
         root = os.path.dirname(os.path.dirname(here))
         if os.path.isfile(os.path.join(root, "main.py")):
             return os.path.join(root, ".env")
+        # 압축(portable) 설치는 ComfyUI 루트에 main.py가 없을 수 있다.
+        # 조용히 실패하면 "설정이 안 먹힌 것처럼" 보이므로 이유를 남긴다.
+        _warn_env_root_once(root)
     except Exception:
         pass
     return None
+
+
+_ENV_ROOT_WARNED = set()
+
+
+def _warn_env_root_once(root):
+    """ComfyUI 루트를 못 찾았다는 사실을 1회만 로그한다(경고)."""
+    if not root or root in _ENV_ROOT_WARNED:
+        return
+    _ENV_ROOT_WARNED.add(root)
+    msg = (f"[GoRi Camera Director] ComfyUI 루트를 찾지 못해 .env에 API 키를 "
+           f"저장할 수 없습니다 (확인한 경로: {root}). 키는 노드 칸에 직접 "
+           f"입력하거나 환경변수로 지정하세요. 원인이면 ComfyUI 루트에 main.py가 "
+           f"있는지 확인하세요.")
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
 
 
 def _read_env_file_key(env_name: str) -> str:
@@ -77,6 +105,9 @@ def _read_env_file_key(env_name: str) -> str:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, _, v = line.partition("=")
+                # `export KEY=...` 형태도 읽는다 (쓰기 쪽과 대칭).
+                if k.strip().lower().startswith("export "):
+                    k = k.strip()[7:]
                 if k.strip() == env_name:
                     v = v.strip()
                     if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
@@ -145,20 +176,59 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
         raise LLMError(f"JSON 응답 디코딩 실패: {e}") from e
 
 
+def _flatten_content(value) -> str:
+    """content 가 문자열이 아닐 때 텍스트만 뽑는다 (게이트웨이 방어).
+
+    왜(Why) 필요한가: 일부 OpenAI 호환 게이트웨이(vLLM/Together/NewAPI 계열)는
+    `content` 를 `[{"type":"text","text":"..."}]` **배열**로 돌려준다. 예전 코드는
+    `or ""` 만 걸었는데 리스트는 truthy 라 그대로 반환됐고, 그 결과
+    `extract_json` 의 `text.strip()` 에서 AttributeError 가 났다. AttributeError 는
+    run() 의 `except LLMError` 를 **통과**하므로 LLM 폴백도, 빨간불 표시도 없이
+    **노드 실행 자체가 실패**했다 (2026-09-28 실측).
+    """
+    try:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            value = [value]
+        if isinstance(value, (list, tuple)):
+            out = []
+            for part in value:
+                if isinstance(part, str):
+                    out.append(part)
+                elif isinstance(part, dict):
+                    txt = part.get("text")
+                    if isinstance(txt, str):
+                        out.append(txt)
+                    elif isinstance(txt, dict):
+                        val = txt.get("value")
+                        if isinstance(val, str):
+                            out.append(val)
+            return "".join(out)
+    except Exception:
+        pass
+    return ""
+
+
 def _content_from(provider: str, raw: dict) -> str:
     provider = provider or ""
     try:
         if provider in _OPENAI_COMPATIBLE_PROVIDERS or provider.startswith("Custom"):
-            return raw["choices"][0]["message"]["content"] or ""
+            return _flatten_content(
+                raw["choices"][0]["message"].get("content"))
         if provider == "Anthropic":
             blocks = raw.get("content") or []
-            return "".join(b.get("text", "") for b in blocks)
+            if isinstance(blocks, dict):
+                blocks = [blocks]
+            return _flatten_content(blocks)
         if provider == "Ollama":
-            return raw["message"]["content"] or ""
+            return _flatten_content(raw["message"].get("content"))
         if provider == "Gemini":
             parts = raw.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-            return "".join(p.get("text", "") for p in parts)
-    except (KeyError, IndexError, TypeError) as e:
+            return _flatten_content(parts)
+    except (KeyError, IndexError, TypeError, AttributeError) as e:
         raise LLMError(f"응답 형식 해석 실패: {e}") from e
     raise LLMError(f"알 수 없는 provider: {provider}")
 
@@ -317,9 +387,10 @@ def chat(provider: str, model: str, api_key: str,
     # 로컬 provider는 호출자가 짧은 타임아웃을 넘겨도 LOCAL_TIMEOUT 이하로
     # 날려가지 않게 상향한다. (Why: 로컬 비전 추론이 기본 45초를 초과해
     # 항상 timed out → 빨간불 폰백이 되는 사례 방지)
-    if provider in _LOCAL_PROVIDERS or (
-            is_custom and any(h in (base_url or "").lower()
-                              for h in ("localhost", "127.0.0.1"))):
+    # 로컬 판정은 is_local_provider() 하나만 쓴다 (리뷰로 확인된 중복).
+    # 여기서 따로 판정하면 규칙이 바뀌었을 때 타임아웃과 camera_director의
+    # GPU 경합 해소가 어긋난다 — 두 곳이 같은 규칙을 공유해야 한다.
+    if is_local_provider(provider, base_url):
         timeout = max(timeout, LOCAL_TIMEOUT)
     # Custom은 엔드포인트별로 캐시를 분리해야 한다(같은 model·텍스트라도
     # 다른 게이트웨이의 응답은 다를 수 있다).

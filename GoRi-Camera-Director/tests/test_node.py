@@ -79,9 +79,16 @@ check("카메라 조항 영문 포함",
       all(s in pos for s in ["close-up shot", "85mm", "low angle",
                              "golden hour", "push-in"]))
 check("무빙에 camera movement", "camera movement" in pos)
-check("범용 품질 가드: 피부/해부/손/얼굴 일관성",
-      all(s in pos for s in ["natural human proportions", "believable hands with five fingers",
-                              "natural skin texture", "clear facial features"]), pos)
+check("범용 품질 가드: 동물 전용 (사람 수치 지표 없음)",
+      all(s not in pos for s in ["natural human proportions",
+          "believable hands with five fingers", "natural skin texture"]), pos)
+check("동물 주제에는 종 보존 가드",
+      all(s in pos for s in ["one clearly identifiable animal species",
+          "correct animal anatomy", "natural coat pattern"])
+      and "humanized animal" in neg, f"pos={pos[-160:]} neg={neg[-160:]}")
+check("인물 주제에는 사람 가드 (사라지지 않음)",
+      "natural human proportions" in cd.add_quality_guard(
+          "a woman", image_count=1, topic="1번 여성 인물"), pos)
 check("특정 모델 전용 unfiltered 표현 제거", "unfiltered realistic rendering" not in pos, pos)
 check("네거티브 기본 세트", "warped geometry" in neg and "flat lighting" in neg)
 
@@ -311,11 +318,11 @@ check("positive conditioning 입력은 새 경로에서 무시",
 check("negative는 카메라/영상 실패 모드 중심",
       "warped geometry" in fake_clip.texts[-1]
       and "distorted perspective" in fake_clip.texts[-1], str(fake_clip.texts[-1]))
-check("negative에 anatomy/identity/skin guard 미추가",
-      all(s not in fake_clip.texts[-1] for s in
+check("Skills negative에 인체/색오염/플라스틱 가드 있음 (공통 블록)",
+      all(s in fake_clip.texts[-1] for s in
           ["extra arms", "face mismatch", "background color spill on skin",
-           "painted skin", "blue skin tint"]),
-      str(fake_clip.texts[-1]))
+           "painted skin", "blue skin tint", "plastic waxy skin"]),
+      str(fake_clip.texts[-1][-200:]))
 
 reflection_pos, reflection_neg, reflection_prompt, _img_out, _ref_lat = enc.run_prompt(
     clip=fake_clip, topic="창가 앞에 서서 유리창에 비친 Same Woman and Cat",
@@ -450,10 +457,19 @@ multi_prompt = run_skills(
     image_1=VISION_IMG, image_2=VISION_IMG)
 check("다중 이미지 역할 기반 정체성 가드 포함",
       all(s in multi_prompt for s in ["use reference image 1 as the only main human identity",
-                                      "background, outfit, prop, product, style, lighting, composition, or mood",
+                                      "only for their explicitly requested roles",
                                       "do not duplicate the main subject, face, body, outfit, product, or background subject",
                                       "no cloned faces", "no duplicated characters",
                                       "no crowd unless requested", "no background people unless requested"]), multi_prompt[:900])
+# 2026-09-28: 기본 보조 역할 목록에서 outfit 을 뺐다. topic 이 비면
+# "explicitly requested role" 이 없어서 모델이 이 목록에서 자유롭게 고르고,
+# 포즈 참조 이미지의 옷이 그대로 복제됐다(실측). 옷은 명시 요청 시에만
+# 옮기며 그 경로는 OUTFIT_GUARD 가 전담한다.
+check("보조 역할 기본 목록에 outfit 없음 (명시 요청 없이 옷 복사 금지)",
+      "background, outfit" not in multi_prompt
+      and "outfit, prop" not in multi_prompt
+      and "never their face, hair, skin tone, body identity, "
+          "clothing or outfit" in multi_prompt, multi_prompt[:900])
 check("위험한 다중 주체 문구 제거",
       all(s not in multi_prompt for s in ["one subject per reference subject",
                                           "use the reference images as separate subjects",
@@ -1617,10 +1633,25 @@ try:
         **_kw_r21)
     check("R21: 시트 참조 positive에 신원 일관성 + 레이아웃 방지 문구",
           "character sheet reference" in _p21c
-          and "one identical person" in _p21c
-          and "no multi-panel arrangement" in _p21c, _p21c[-260:])
+          and "same one person" in _p21c
+          # 2026-09-29 실측 교정: "no multi-panel arrangement" 같은 **시트 용어**
+          # 로는 레이아웃이 막히지 않았다(실제 생성에서 시트가 그대로 렌더링).
+          # 무엇을 그릴지를 positive 로 직접 말하는 새 문구로 교체했다.
+          and "must NOT appear in the output" in _p21c, _p21c[-320:])
+    check("R21: 시트 뷰가 별개 사람으로 세어지는 것 방어 (positive)",
+          "never a crowd" in _p21c
+          and "never a second person" in _p21c
+          and "duplicated or mirrored faces" in _p21c
+          and "NOT separate people" in _p21c, _p21c[-460:])
+    check("R21: 실사용 표준 뷰 구성 명시",
+          "front full-body view" in _p21c and "back full-body view" in _p21c
+          and "close-up head front" in _p21c
+          and "left profile close-up" in _p21c, _p21c[-460:])
     check("R21: 시트 참조 negative에 시트 레이아웃 방어어",
           "contact sheet" in _n21c and "sprite sheet" in _n21c, _n21c[-200:])
+    check("R21: negative에도 '복수 인물' 방어 반영",
+          "counted as separate people" in _n21c
+          and "cloned faces" in _n21c, _n21c[-300:])
     llm_client.clear_cache()
     _p21d, _n21d, _ = _director_r21.run(
         topic="여성 인물", image_list=[VISION_IMG], **_kw_r21)
@@ -2642,6 +2673,470 @@ check("R41: 로컬 provider에서만 GPU 해제 호출",
       "is_local_provider(provider, custom_base_url)" in _src_llm2)
 check("R41: free_memory 호출 포함", "free_memory" in _src_llm2)
 
+print("-- R42: 명시적 포즈 참조 --")
+check("R42: '2번 이미지의 포즈' 검출", cd._pose_role_slots("2번 이미지의 포즈를 따라") == {2},
+      cd._pose_role_slots("2번 이미지의 포즈를 따라"))
+check("R42: 영어 pose 검출", cd._pose_role_slots("use pose from image 3") == {3},
+      cd._pose_role_slots("use pose from image 3"))
+check("R42: 이미지3의 자세", cd._pose_role_slots("이미지 3의 자세를 참고") == {3})
+check("R42: 포즈 미지정 시 빈 집합", cd._pose_role_slots("한국 여성 인물") == set())
+check("R42: 10번까지 지원", cd._pose_role_slots("10번 이미지 포즈") == {10})
+# 전 슬롯 전수 검증 — 특정 슬롯에 하드코딩돼 있지 않은지
+for _n in range(1, 11):
+    check(f"R42: {_n}번 슬롯 3종 구문",
+          cd._pose_role_slots(f"{_n}번 이미지의 포즈를 따라") == {_n}
+          and cd._pose_role_slots(f"이미지 {_n}의 자세 참고") == {_n}
+          and cd._pose_role_slots(f"use pose from image {_n}") == {_n})
+check("R42: 접�� 나열형 전 슬롯 수집",
+      cd._pose_role_slots("3번과 7번 이미지의 포즈를 따라") == {3, 7},
+      cd._pose_role_slots("3번과 7번 이미지의 포즈를 따라"))
+check("R42: 다중 지정 가드 문구",
+      "2, 5" in cd._pose_reference_guard({2, 5}))
+# 포즈 슬롯은 신원 소스에서 제외
+check("R42: 1번 포즈 지정 시 main 이동",
+      cd._person_object_plan("1번 이미지의 포즈를 따라", [1, 2])["main"] == 2)
+check("R42: 포즈 슬롯은 persons에서 제외",
+      1 not in cd._person_object_plan("1번 이미지 포즈, 두 번째 사람", [1, 2])["persons"])
+check("R42: 포즈 슬롯은 objects에서 제외",
+      1 not in cd._person_object_plan("1번 이미지 포즈, 이미지 1의 핸드백", [1])["objects"])
+check("R42: 전부 포즈면 graceful",
+      cd._person_object_plan("1번 이미지 포즈", [1])["main"] == 1)
+# 가드 문구
+_pg = cd._pose_reference_guard({2})
+check("R42: positive 자세만 지시",
+      "body pose and limb angles" in _pg and "reference image(s) 2" in _pg, _pg)
+check("R42: positive 얼굴 비전달 명시", "never their face" in _pg)
+_pn = cd._pose_reference_negative({2})
+check("R42: negative 얼굴·의상 방어",
+      "face of the pose reference" in _pn and "clothing of the pose reference" in _pn)
+check("R42: 슬롯 없으면 빈 문자열",
+      cd._pose_reference_guard(set()) == "" and cd._pose_reference_negative(None) == "")
+check("R42: 복수 슬롯 표기", "2, 5" in cd._pose_reference_guard({2, 5}))
+# 경로 일치: base positive/negative (포즈 가드는 run()이 assemble() 뒤에 붙인다)
+# 따라서 assemble() 단독이 아니라 실제 실행 경로로 검증한다.
+_items42 = [(1, VISION_IMG), (2, VISION_IMG)]
+_pos_pose, _neg_pose_base, _ = run(
+    topic="2번 이미지의 포즈를 따라가는 한국 여성", image_items=_items42,
+    preset=cd.AUTO, automation="규칙 (auto)")
+check("R42: base positive 포즈 가드 포함", "body pose and limb angles" in _pos_pose)
+check("R42: base positive 중복 없음", _pos_pose.count("body pose and limb angles") == 1)
+check("R42: base negative 포즈 가드 포함", "face of the pose reference" in _neg_pose_base)
+check("R42: negative 미지정 시 미첨부",
+      "pose reference" not in cd.build_negative(
+          dict(cd.DEFAULTS), topic="2번 이미지 의상 참고", image_count=2,
+          image_labels=[1, 2]))
+check("R42: Skills negative 포즈 가드",
+      "face of the pose reference" in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="2번 이미지의 포즈", image_count=2,
+          image_labels=[1, 2], pose_ref=True))
+# 실행 경로: 참조 이미지가 있는데도 LLM 비전에서 제외되는지
+_seen = {"imgs": []}
+_real_b64 = llm_client.image_to_b64
+llm_client.image_to_b64 = lambda img, max_side=0: (
+    _seen["imgs"].append(max_side) or "b64")
+_real_chat_r42 = llm_client.chat
+llm_client.chat = _fake_chat
+try:
+    run_skills(topic="2번 이미지의 포즈를 따라", image_1=VISION_IMG,
+               image_2=VISION_IMG, automation="AI 판단 (llm)")
+finally:
+    llm_client.image_to_b64 = _real_b64
+    llm_client.chat = _real_chat_r42
+check("R42: base run LLM 비전에서 포즈 슬롯 제외", len(_seen["imgs"]) == 1,
+      f"vision calls={len(_seen['imgs'])} (2장 중 1장만)")
+_seen2 = {"imgs": []}
+llm_client.image_to_b64 = lambda img, max_side=0: (
+    _seen2["imgs"].append(max_side) or "b64")
+llm_client.chat = _fake_chat
+try:
+    run_skills(topic="한국 여성 인물", image_1=VISION_IMG, image_2=VISION_IMG,
+               automation="AI 판단 (llm)")
+finally:
+    llm_client.image_to_b64 = _real_b64
+    llm_client.chat = _real_chat_r42
+check("R42: 포즈 미지정 시 회귀 없이 전량 전달", len(_seen2["imgs"]) == 2,
+      f"vision calls={len(_seen2['imgs'])}")
+_out_pose = run_skills(topic="2번 이미지의 포즈를 따라", image_1=VISION_IMG,
+                       image_2=VISION_IMG)
+check("R42: Skills standalone 포즈 가드 포함",
+      "body pose and limb angles" in _out_pose, _out_pose[-200:])
+
+print("-- R43: 포옹 시나리오 (2인 신원 + 2인 포즈) --")
+_TOPIC_HUG = ("1번 이미지의 여성이 2번 이미지의 남성과 포옹한다. "
+              "3번 이미지의 포즈를 여성이, 4번 이미지의 포즈를 남성이 따라한다.")
+_LAB_HUG = [1, 2, 3, 4]
+_plan_hug = cd._person_object_plan(_TOPIC_HUG, _LAB_HUG)
+check("R43: 2번이 추가 인물로 인식 (번호 선행형 구문)", _plan_hug["persons"] == [2],
+      _plan_hug)
+check("R43: 3·4번이 포즈 슬롯", _plan_hug["poses"] == [3, 4])
+check("R43: 주 피사체는 1번", _plan_hug["main"] == 1)
+check("R43: duo 앵커 2인 인식", "person two from reference image 2" in
+      cd.build_duo_person_anchor(4, _TOPIC_HUG, image_labels=_LAB_HUG))
+check("R43: 번호 선행형 보조 인물 검출",
+      cd._second_person_slots("2번 이미지의 남성이 옆에 있다") == [2],
+      cd._second_person_slots("2번 이미지의 남성이 옆에 있다"))
+check("R43: 기존 이미지 선행형도 유지",
+      cd._second_person_slots("이미지 2의 남성이 옆에 있다") == [2])
+# 포즈 슬롯이 보조 역할(배경/의상/소품) 목록에 섞이면 안 된다
+check("R43: 보조 역할에서 포즈 슬롯 제외",
+      cd._secondary_role_labels(_LAB_HUG, main=1, persons=[2], poses=[3, 4]) == [],
+      cd._secondary_role_labels(_LAB_HUG, main=1, persons=[2], poses=[3, 4]))
+_ref_hug = cd.reference_guard(4, image_labels=_LAB_HUG, topic=_TOPIC_HUG)
+check("R43: reference_guard가 duo 앵커를 우선 사용",
+      "Two main people" in _ref_hug and "only for their explicitly requested roles" not in _ref_hug,
+      _ref_hug[:120])
+# LLM 비전은 신원 2장만
+_vh = {"n": 0}
+_b64_h = llm_client.image_to_b64
+_chat_h = llm_client.chat
+llm_client.image_to_b64 = lambda img, max_side=0: (_vh.__setitem__("n", _vh["n"] + 1), "b64")[1]
+llm_client.chat = _fake_chat
+try:
+    run_skills(topic=_TOPIC_HUG, image_1=VISION_IMG, image_2=VISION_IMG,
+               image_3=VISION_IMG, image_4=VISION_IMG, automation="AI 판단 (llm)")
+finally:
+    llm_client.image_to_b64 = _b64_h
+    llm_client.chat = _chat_h
+check("R43: LLM 비전은 신원 2장만 (포즈 2장 제외)", _vh["n"] == 2, f"calls={_vh['n']}")
+_pos_hug, _neg_hug, _ = run(topic=_TOPIC_HUG,
+                            image_items=[(i, VISION_IMG) for i in _LAB_HUG],
+                            preset=cd.AUTO, automation="규칙 (auto)",
+                            shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+                            composition=cd.AUTO, lighting=cd.AUTO,
+                            grade=cd.AUTO, motion=cd.AUTO, speed=cd.AUTO,
+                            amplitude=cd.AUTO)
+check("R43: positive에 2인 신원 + 포즈 가드 동시 존재",
+      "Two main people" in _pos_hug and "reference image(s) 3, 4" in _pos_hug)
+check("R43: 포즈 가드 중복 없음", _pos_hug.count("body pose and limb angles") == 1)
+check("R43: negative에 포즈 참조 방어", "face of the pose reference image 3" in _neg_hug)
+
+print("-- R44: 물리·공간 가드 (접촉/속도/접지) --")
+# 활용 형태까지 반드시 잡아야 한다. "던지"는 "던진다"에 문자열로 안 들어간다
+# (던지 + 다 → 던진 + 다) — 이걸 놓치면 무협 액션이 "나란히 서 있기"로 남는다.
+for _t in ("1번 남자가 2번 여성을 벽에 밀어붙였다", "1번이 2번을 던진다",
+           "1번이 2번을 던져 올린다", "두 사람이 서로 안고 있다",
+           "1번이 2번의 어깨를 붙잡고 끌어당긴다", "1번이 2번의 옷을 잡아당긴다",
+           "1번이 2번과 부딪치며 넘어진다", "1번이 달리고 있다",
+           "1번이 쓰러져 넘어졌다", "1번이 2번을 검으로 공격한다",
+           "무협 액션, 두 사람이 검을 맞부딪친다", "1번이 2번을 투척한다"):
+    _p, _n = cd.physics_contact_guard(_t)
+    check(f"R44: 검출 — {_t[:22]}", bool(_p) and bool(_n))
+for _t in ("한국 여성 인물 초상", "창가에서 잠든 고양이",
+           "여름 정원에서 잔잔한 소목도", "1번 이미지의 의상을 2번에게 입히기"):
+    _p, _ = cd.physics_contact_guard(_t)
+    check(f"R44: 미검출 — {_t[:22]}", _p == "")
+check("R44: 빠른 동작은 속도 표현 추가",
+      "frozen mid-action" in cd.physics_contact_guard("1번이 달리고 있다")[0])
+check("R44: 정적 장면에는 속도 표현 미첨부",
+      "frozen mid-action" not in cd.physics_contact_guard("정지된 포즈")[0])
+check("R44: 정적 인물엔 최소 접지만 붙음",
+      bool(cd.physics_grounding_guard("한국 여성 인물 초상")))
+check("R44: 비인물엔 접지 가드 미적용",
+      cd.physics_grounding_guard("창가에서 잠든 고양이") == "")
+check("R44: 실행 경로에 물리 문구 반영",
+      "standing apart" in cd.build_negative(
+          dict(cd.DEFAULTS), topic="벽에 밀어붙였다", image_count=2,
+          image_labels=[1, 2],
+          physics_neg=cd.physics_contact_guard("벽에 밀어붙였다")[1]))
+_pos_ph, _neg_ph, _ = run(topic="1번 남자가 2번 여성을 벽에 밀어붙였다",
+                          image_items=[(1, VISION_IMG), (2, VISION_IMG)],
+                          preset=cd.AUTO, automation="규칙 (auto)",
+                          shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+                          composition=cd.AUTO, lighting=cd.AUTO,
+                          grade=cd.AUTO, motion=cd.AUTO, speed=cd.AUTO,
+                          amplitude=cd.AUTO)
+check("R44: base positive에 접촉 물리 문구", "physical contact between the people" in _pos_ph)
+check("R44: base negative에 정지 배치 방어", "standing apart" in _neg_ph)
+check("R44: 물리 가드 중복 없음", _pos_ph.count("physical contact between the people") == 1)
+
+print("-- R45: 픽셀 공간 측정 (topic 없이 거리 유지) --")
+import numpy as _np45
+
+
+def _img45(segments, h=256, w=256, bg=0.15, bottom=True, heads=0, head_w=22):
+    im = _np45.full((1, h, w, 3), bg, dtype=_np45.float32)
+    y1 = h - 20 if bottom else h - 90
+    for x0, x1, val in segments:
+        im[0, 40:y1, x0:x1] = val
+    for k in range(heads):
+        cx = segments[min(k, len(segments) - 1)]
+        mid = (cx[0] + cx[1]) // 2
+        im[0, 40 - head_w:41, mid - head_w // 2:mid + head_w // 2] = cx[2]
+    return im
+
+
+_touch45 = _img45([(60, 118, 0.05), (118, 176, 0.05)], heads=2)
+_apart45 = _img45([(20, 80, 0.05), (168, 228, 0.05)], heads=2)
+_one45 = _img45([(100, 156, 0.05)], heads=1)
+_wide45 = _img45([(58, 200, 0.05)], heads=1)
+_m_touch = cd.subject_spacing(_touch45)
+_m_apart = cd.subject_spacing(_apart45)
+_m_one = cd.subject_spacing(_one45)
+_m_wide = cd.subject_spacing(_wide45)
+check("R45: 붙은 2인 검출 (머리 2개 신호)", _m_touch.get("close") is True, _m_touch)
+check("R45: 떨어진 2인 검출", _m_apart.get("apart") is True
+      or _m_apart.get("far") is True, _m_apart)
+check("R45: 화면 양끝은 크게 떨어짐으로 분류", _m_apart.get("far") is True, _m_apart)
+check("R45: 1인은 근접 아님", not _m_one.get("close") and not _m_one.get("apart"), _m_one)
+# 실측에서 근경 1인(폭 0.50)이 붙은 2인(0.44)보다 넓게 나와 폐기한 오탐 회귀
+check("R45: 근경 1인(넓은 덩어리) 오탐 없음", not _m_wide.get("close"), _m_wide)
+check("R45: 하단 여백 측정", _m_one.get("bottom_margin") is not None, _m_one)
+check("R45: 프레임 최하단 인물은 여백 0에 가까움",
+      (cd.subject_spacing(_img45([(100, 156, 0.05)], bottom=False, heads=1))
+       .get("bottom_margin") or 0) > 0.1)
+check("R45: 바닥 여백 유지 문구", "floor and ground" in
+      cd.spacing_guard(_m_one, "1번 인물 초상")[0])
+check("R45: 접착 문구", "no gap between them" in
+      cd.spacing_guard(_m_touch, "1번 남자가 2번 여성을 포옹한다")[0])
+# 중간 간격(보통 떨어짐) 케이스를 별도로 만든다 — 기존 _m_apart 는 34%로
+# "크게 떨어짐" 구간이라 분리 문구가 아니라 화면 양끝 문구가 붙는다.
+_m_mid = cd.subject_spacing(_img45([(56, 108, 0.05), (128, 180, 0.05)], heads=2))
+check("R45: 중간 간격은 떨어짐 구간", _m_mid.get("apart") is True
+      and not _m_mid.get("far"), cd.spacing_log_text(_m_mid))
+check("R45: 분리 문구", "same separation" in
+      cd.spacing_guard(_m_mid, "두 사람이 서 있다")[0],
+      cd.spacing_log_text(_m_mid))
+check("R45: 1인 장면엔 거리 문구 없음",
+      "no gap between them" not in cd.spacing_guard(_m_one, "1번 인물 초상")[0]
+      and "same separation" not in cd.spacing_guard(_m_one, "1번 인물 초상")[0])
+check("R45: 비인물 topic엔 미적용",
+      cd.spacing_guard(_m_apart, "여름 정원 소목도") == ("", ""))
+check("R45: 로그 문자열 생성", "간격" in cd.spacing_log_text(_m_touch),
+      cd.spacing_log_text(_m_touch))
+for _lbl, _v in (("None", None), ("빈 dict", {}),
+                 ("tiny", _np45.zeros((1, 2, 2, 3), dtype=_np45.float32)),
+                 ("균일", _np45.full((1, 64, 64, 3), 0.5, dtype=_np45.float32))):
+    check(f"R45: 실패 안전 — {_lbl}", cd.subject_spacing(_v) is not None)
+_pos_sp, _neg_sp, _ = run(topic="두 사람이 창가에 서 있다",
+                          image_items=[(1, _touch45), (2, _touch45)],
+                          preset=cd.AUTO, automation="규칙 (auto)",
+                          shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+                          composition=cd.AUTO, lighting=cd.AUTO,
+                          grade=cd.AUTO, motion=cd.AUTO, speed=cd.AUTO,
+                          amplitude=cd.AUTO)
+check("R45: 실행 경로에 픽셀 거리 지시 반영", "spatial fidelity" in _pos_sp,
+      _pos_sp[-200:])
+
+print("-- R46: 공간 측정 업그레이드 (선별) --")
+check("R46: 격자 해상도 상향", cd.SPACING_GRID == 48, cd.SPACING_GRID)
+check("R46: 세분 임계 상수 존재", cd.SPACING_FAR_RATIO > cd.SPACING_APART_RATIO)
+_skin_map = cd._skin_score(_np45.array(
+    [[[0.62, 0.42, 0.33], [0.15, 0.15, 0.15]],
+     [[0.30, 0.60, 0.30], [0.80, 0.80, 0.80]]], dtype=_np45.float32))
+check("R46: 피부색만 1로 판정", _skin_map is not None
+      and _skin_map[0][0] == 1.0 and _skin_map[0][1] == 0.0
+      and _skin_map[1][0] == 0.0 and _skin_map[1][1] == 0.0, _skin_map)
+check("R46: 1채널 입력 안전", cd._skin_score(
+    _np45.zeros((4, 4, 1), dtype=_np45.float32)) is None)
+_m_far = cd.subject_spacing(_img45([(8, 34, 0.05), (222, 248, 0.05)], heads=2))
+check("R46: 화면 양끝은 far", _m_far.get("far") is True
+      and not _m_far.get("close"), cd.spacing_log_text(_m_far))
+check("R46: far 문구가 apart 문구와 다름",
+      "opposite sides of the frame" in cd.spacing_guard(_m_far, "두 사람이 선다")[0])
+for _w in (100, 160, 200, 256, 333):
+    _im = _img45([(6, 30, 0.05), (_w - 30, _w - 6, 0.05)], w=_w, heads=2)
+    _m = cd.subject_spacing(_im)
+    check(f"R46: 폭 {_w}px에서도 측정 성공",
+          isinstance(_m, dict) and "subject_ratio" in _m, _m)
+    check(f"R46: 폭 {_w}px에서 두 영역 유지", _m.get("peaks") == 2, _m)
+
+print("-- R47: 리뷰 회귀 (positive/negative 대칭) --")
+# 리뷰로 발견: Skills negative가 prompt_in만 보고, positive는 prompt_in+topic을
+# 봤다. 국가명(한글 topic)과 동물 주제가 positive에 붙은 문구의 짝인 negative가
+# 조용히 사라졌다. 양쪽이 같은 소스를 봐야 한다.
+_out_braz = _enc_r33.run_prompt(
+    clip=fake_clip, topic="브라질 여성", preset=cd.AUTO,
+    automation="수동 (manual)", shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+    composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO, motion=cd.AUTO,
+    speed=cd.AUTO, amplitude=cd.AUTO, prompt_in="a woman on a beach")
+check("R47: positive에 국가 표현형", "a person from Brazil" in _out_braz[2])
+check("R47: negative에도 국가 고정관념 방어",
+      "westernized" in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="a woman on a beach 브라질 여성"),
+      "참조가 없으므로 신원 억제 대상이 아니다")
+check("R47: 참조 연결 시에는 국가 방어 억제(신원 우선) 유지",
+      "westernized" not in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="a woman on a beach 브라질 여성",
+          image_count=1, image_labels=[1]))
+_dog_pi = cd.build_camera_negative(dict(cd.DEFAULTS), topic="a dog in a park")
+check("R47: 동물 negative가 positive 소스와 같은 텍스트로 붙음",
+      "humanized animal" in _dog_pi, _dog_pi[:120])
+# 빈 조각이 ", " 꼬리를 남기지 않는다
+check("R47: 포즈 negative 빈 조각 미삽입",
+      not cd.build_negative(dict(cd.DEFAULTS), topic="a woman",
+                            pose_ref=True, image_labels=[1]).rstrip()
+      .endswith(","))
+# 죽은 속성 제거 확인
+check("R47: dead 속성 미잔존",
+      "_last_physics_pos" not in open("camera_director.py", encoding="utf-8").read())
+check("R47: width_ratio 미계산",
+      "width_ratio" not in open("camera_director.py", encoding="utf-8").read())
+
+print("-- R48: LLM 실패 진단 로그 --")
+_src_r48 = open("camera_director.py", encoding="utf-8").read()
+_block48 = _src_r48.split("except llm_client.LLMError as e:")[1][:2600]
+check("R48: provider/model/timeout 항상 출력",
+      "provider={provider" in _block48 and "model={resolved_model" in _block48)
+check("R48: 인증 오류 전용 분기", '"401" in _err' in _block48)
+check("R48: 키 유무에 따라 원인 분기", "_has_key" in _block48)
+check("R48: 404(모델 없음) 분기", '"404" in _err' in _block48)
+check("R48: 기본 분기도 진단 포함", "else:\n                    _hint = _head" in _block48)
+# 진단은 예외를 삼키지 않아야 한다 (사용자에게 보여야 하므로)
+check("R48: 진단 경로에서 LLMError 재발생 없음",
+      "raise" not in _block48)
+
+print("-- R49: 사물 DNA · 제거 잔여물 · 디테일 경계 (실측 3건) --")
+_TOPIC49 = "1번 캐릭터를 2번 침대 위에 앉힌다, 실내라서 신발을 벗는다"
+_LAB49 = [1, 2]
+_pos49, _neg49, _ = run(
+    topic=_TOPIC49, image_items=[(1, VISION_IMG), (2, VISION_IMG)],
+    preset=cd.AUTO, automation="규칙 (auto)", shot=cd.AUTO, lens=cd.AUTO,
+    angle=cd.AUTO, composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
+    motion=cd.AUTO, speed=cd.AUTO, amplitude=cd.AUTO)
+
+# 2) 침대 DNA — 슬롯이 없으면 안 붙는다 (붙으면 "모든 참조"가 사물 취급됨)
+check("R49: 사물 슬롯 0개면 DNA 가드 미적용",
+      cd._furniture_dna_guard("1번 캐릭터를 앉힌다", set()) == "")
+check("R49: DNA negative 존재", "substituted prop" in cd.FURNITURE_DNA_NEGATIVE)
+
+# 3) 제거 잔여물(찌꺼기) — **인물 주제면 항상** (topic 명시 불필요)
+check("R49: 벗는 표현 없이도 항상 켜짐",
+      "detached shoe" in cd._remove_item_guard("1번 인물이 침대에 앉아 있다"))
+check("R49: '벗는다' 표현에서도 동일하게 켜짐",
+      bool(cd._remove_item_guard("1번 인물이 신발을 벗는다")))
+check("R49: take off 영어도 켜짐",
+      "detached shoe" in cd._remove_item_guard("1번 woman take off shoes"))
+check("R49: 인물이 없는 장면엔 미적용",
+      cd._remove_item_guard("3D model of a car") == ""
+      and cd._remove_item_guard("침대 원본") == "", "제품/사물 단독 제외")
+check("R49: 의류 조각 잔여물도 방어",
+      "orphaned garment piece" in cd._remove_item_guard("1번 인물"))
+check("R49: 실행 경로에 잔여물 방어 반영",
+      "detached shoe" in _neg49, _neg49[:150])
+# 사용자 지적: 사물 DNA는 topic에 "2번 침대 원본"을 안 써도 켜져야 한다
+check("R49: topic 미작성이어도 사물 DNA 적용",
+      "prop identity guard" in cd._furniture_dna_guard(
+          "1번 인물이 앉아 있다", {2}),
+      "topic에 사물 지시 없이 슬롯 2만으로 발동해야 한다")
+check("R49: 주 피사체 슬롯은 DNA 대상 아님",
+      cd._object_dna_slots("1번 인물이 앉아 있다", [1, 2], 2) == {2},
+      cd._object_dna_slots("1번 인물이 앉아 있다", [1, 2], 2))
+check("R49: 추가 인물 슬롯은 DNA 대상 아님",
+      2 not in cd._object_dna_slots("1번 여성과 두 번째 사람이 있다", [1, 2], 2))
+check("R49: 포즈 슬롯은 DNA 대상 아님 (2번)",
+      2 not in cd._object_dna_slots("2번 이미지의 포즈를 따라", [1, 2, 3], 3),
+      cd._object_dna_slots("2번 이미지의 포즈를 따라", [1, 2, 3], 3))
+check("R49: 미지정 슬롯은 DNA 대상(기본 ON)",
+      cd._object_dna_slots("2번 이미지의 포즈를 따라", [1, 2, 3], 3) == {3})
+check("R49: 참조 없으면 DNA 대상 없음",
+      cd._object_dna_slots("1번 인물", [1], 0) == set())
+check("R49: 사물 2개면 둘 다 적용",
+      cd._object_dna_slots("인물이 앉아 있다", [1, 2, 3], 3) == {2, 3})
+check("R49: 분위기 전용 지정은 DNA 완화",
+      "Take only the mood and lighting from it" in cd._furniture_dna_guard(
+          "2번은 분위기만 참고", {2}))
+check("R49: 정상 DNA는 대체 금지 유지",
+      "Do not substitute a different object" in cd._furniture_dna_guard(
+          "2번 침대", {2}))
+check("R49: 사물 미세 드리프트 방어",
+      "near-miss furniture" in cd.FURNITURE_DNA_NEGATIVE
+      or "near-miss furniture" in cd.OBJECT_DRIFT_NEGATIVE)
+
+# 4) 부위별 디테일 경계
+check("R49: 디테일 경계 positive 반영", "anatomical edge definition" in _pos49)
+check("R49: 디테일 경계 negative 반영", "melted body boundaries" in _neg49)
+check("R49: 신발-발 뭉개짐 방어 포함", "boots melting into the foot" in _neg49)
+check("R49: 참조 없으면 디테일 가드 미적용",
+      "anatomical edge definition" not in cd.assemble(
+          "a woman", dict(cd.DEFAULTS, shot="중경 (MS)"), topic="1번 인물"))
+# denoise 1.0 경고에 구체적 권장값이 들어갔는가
+_w49 = cd.preflight_warnings("x", dict(cd.DEFAULTS), latent_mp=1.0,
+                            denoise=1.0)
+check("R49: denoise=1.0 에 권장값 안내", any(
+    "0.6~0.8" in w for w in _w49), _w49)
+# '캐릭터'가 인물 어휘에 없었다 — 실측에서 인물 가드 전부 미작동이었다
+check("R49: '캐릭터'가 인물로 판정", cd._is_human_subject("1번 캐릭터를 앉힌다"))
+check("R49: '캐릭터 시트'도 인물", cd._is_human_subject("캐릭터 시트"))
+for _w in ("소년이", "주인공", "a boy", "actress", "여아"):
+    check(f"R49: 인물 어휘 추가 — {_w}", cd._is_human_subject(_w))
+for _w in ("침대 원본", "카메라도", "product photo"):
+    check(f"R49: 오탐 없음 — {_w}", not cd._is_human_subject(_w))
+check("R49: '3D model' 사물 모형은 여전히 비인물",
+      not cd._is_human_subject("3D model of a car"))
+
+print("-- R50: 인체 부위 개수 (손가락 5·발가락 5·양팔·양다리) --")
+for _w in ("exactly five fingers on each hand", "five toes on each foot",
+           "two arms ending in two hands", "two legs ending in two feet"):
+    check(f"R50: positive에 개수 명시 — {_w[:24]}",
+          _w in cd.ANATOMY_COUNT_POSITIVE)
+for _w in ("fused fingers", "fingers split down the middle", "fused toes",
+           "three arms", "three legs"):
+    check(f"R50: negative에 개수 방어 — {_w[:24]}",
+          _w in cd.ANATOMY_COUNT_NEGATIVE)
+_ac_pos, _ac_neg, _ = run(
+    topic="1번 인물이 침대 위에 앉아 있다", image_items=[(1, VISION_IMG)],
+    preset=cd.AUTO, automation="규칙 (auto)", shot=cd.AUTO, lens=cd.AUTO,
+    angle=cd.AUTO, composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
+    motion=cd.AUTO, speed=cd.AUTO, amplitude=cd.AUTO)
+check("R50: 인물 실행에 positive 반영",
+      "exactly five fingers" in _ac_pos, _ac_pos[-200:])
+check("R50: 인물 실행에 negative 반영", "fused fingers" in _ac_neg)
+check("R50: 비인물 실행엔 미적용",
+      "exactly five fingers" not in cd.assemble(
+          "a cat on a sofa", dict(cd.DEFAULTS, shot="중경 (MS)"),
+          topic="창가에서 잠든 고양이"))
+check("R50: Skills negative에도 반영",
+      "fused fingers" in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="1번 인물", anatomy_count=True))
+check("R50: count 미지정 시 negative 미첨부 (고유 문자로 검증)",
+      "mitten hands" not in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="1번 인물")
+      and "mitten hands" not in cd.build_negative(
+          dict(cd.DEFAULTS), topic="1번 인물"))
+
+print("-- R51: 캐릭터 시트 — 동일인 다중 뷰 vs 다인물 시트 --")
+# 왜(Why): 사용자가 시트를 쓰는 목적은 신원 일관성이다. 실사용 표준 구조는
+# 정면·후면 전신 + 상부얼굴 정면·후면 + 좌우 측면(한 사람)인데, 이 뷰들을
+# "여러 사람"으로 세면 신원 의도와 정반대가 된다.
+_sheet = cd.character_sheet_guard(1, "1번 캐릭터 시트를 참고해 같은 인물로 촬영",
+                                  image_labels=[1])
+check("R51: 동일인 시트 — 한 사람 명시", "ONE SINGLE person" in _sheet)
+check("R51: 시트 뷰 = 참조 각도", "NOT separate people" in _sheet)
+check("R51: 실사용 표준 뷰 구성 명시",
+      "front full-body view" in _sheet and "back full-body view" in _sheet
+      and "close-up head front" in _sheet and "close-up head back" in _sheet
+      and "left profile close-up" in _sheet
+      and "right profile close-up" in _sheet, _sheet)
+check("R51: positive에도 복수 인물 방어",
+      "never a crowd" in _sheet and "never a second person" in _sheet
+      and "duplicated or mirrored faces" in _sheet)
+# 다인물 시트는 "전부 한 사람"이 틀린 지시가 된다 → 별도 문구로 분기
+_mps = cd.character_sheet_guard(1, "1번 인물 시트(라인업)를 참고", image_labels=[1])
+check("R51: 다인물 시트 — 별개 지시", "SEVERAL DIFFERENT characters" in _mps)
+check("R51: 다인물 시트에 '한 사람' 지시 없음", "ONE SINGLE person" not in _mps)
+for _k in ("캐릭터 시트", "character sheet", "턴어라운드", "삼면도",
+           "정면후면", "다각도", "모델 시트"):
+    check(f"R51: 시트 어휘 감지 — {_k}", cd._is_character_sheet_request(_k))
+for _k in ("인물 시트", "라인업", "lineup", "오디션 시트", "다캐릭터"):
+    check(f"R51: 다인물 시트 분류 — {_k}", cd._is_multi_person_sheet(_k))
+check("R51: 일반 씬은 시트로 오탐 없음",
+      not cd._is_character_sheet_request("침대 위에 앉아 있는 여성"))
+_neg_sheet = cd.build_camera_negative(
+    dict(cd.DEFAULTS), topic="캐릭터 시트 참고", character_sheet=True)
+check("R51: negative에 뷰 복수 인물 방어",
+      "counted as separate people" in _neg_sheet
+      and "cloned faces" in _neg_sheet, _neg_sheet[-260:])
+check("R51: 다인물 시트에는 '한 사람' negative 미첨부",
+      "counted as separate people" not in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="인물 시트 라인업", character_sheet=True))
+check("R51: 시트 미지정 시 미첨부",
+      "counted as separate people" not in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="1번 인물"))
+check("R51: 실행 경로에 반영",
+      "counted as separate people" in cd.build_negative(
+          dict(cd.DEFAULTS), topic="1번 캐릭터 시트 참고", character_sheet=True),
+      "base run negative에도 반영")
+
 print("-- R36b: 포즈 자유 (DNA≠포즈) --")
 check("R36b: 의상 가드 포즈 해제",
       "pose follows the topic" in cd.OUTFIT_GUARD
@@ -2712,5 +3207,755 @@ finally:
     cd._qwen_ref_cache_key = _orig_key31
     cd._qwen_ref_cache_get = _orig_get31
 
+print("-- R52: 크로스플랫폼 (Windows/macOS/Linux) --")
+# 왜(Why): 이 노드는 세 OS에서 돌아가야 한다. 코드가 지금 어떤 OS 전용
+# 길로 들어서는지 **정적**으로 못 지킨다 → CI 매트릭스(ubuntu/windows/macos)
+# 와 짝을 이루는 회귀 테스트를 둔다. 특히 심볼릭 링크(mac/linux 개발의
+# 흔한 설치 방식)와 .env 원자적 쓰기·권한은 실측에서 조용히 실패하는 항목.
+import tempfile as _tf52
+import stat as _st52
+
+_tmp52 = _tf52.mkdtemp()
+try:
+    _p52 = os.path.join(_tmp52, ".env")
+    check("R52: .env 원자적 쓰기 (기존 내용 보존 + 교체)",
+          cd._write_env_file(_p52, ["A=1", "B=2"]) is True
+          and open(_p52, encoding="utf-8").read() == "A=1\nB=2\n")
+    check("R52: .env 덮어쓰기",
+          cd._write_env_file(_p52, ["C=3"]) is True
+          and open(_p52, encoding="utf-8").read() == "C=3\n")
+    check("R52: 임시 파일 잔여 없음",
+          not os.path.exists(f"{_p52}.gori_tmp"), os.listdir(_tmp52))
+    # POSIX에서는 소유자만 읽어야 한다(0644면 같은 머신의 다른 사용자가
+    # API 키를 읽는다). Windows는 ACL 모델이라 chmod가 없으므로 건너뛴다.
+    if hasattr(os, "chmod") and os.name != "nt":
+        _m52 = _st52.S_IMODE(os.stat(_p52).st_mode)
+        check("R52: .env 권한 600 (POSIX)", _m52 == 0o600, oct(_m52))
+    else:
+        check("R52: .env 권한 (Windows — ACL 모델이라 스킵)", True)
+    check("R52: 쓰기 실패해도 예외 없음",
+          cd._write_env_file(os.path.join(_tmp52, "없음", "x", ".env"),
+                             ["A=1"]) is False)
+    check("R52: 빈 라인 목록도 안전",
+          cd._write_env_file(_p52, []) is True
+          and open(_p52, encoding="utf-8").read() == "")
+finally:
+    try:
+        import shutil as _sh52
+        _sh52.rmtree(_tmp52, ignore_errors=True)
+    except Exception:
+        pass
+
+_src52 = open("camera_director.py", encoding="utf-8").read()
+_src52b = open("llm_client.py", encoding="utf-8").read()
+# 심볼릭 링크(custom_nodes/노드 → 개발폴더)에서 파일 못 찾는 문제
+check("R52: HERE는 realpath (심볼릭 링크 대응)",
+      "os.path.realpath(__file__)" in _src52
+      and "os.path.abspath(__file__)" not in _src52)
+check("R52: .env 경로 탐색도 realpath",
+      "os.path.realpath(__file__)" in _src52b)
+check("R52: ComfyUI 루트 미발견 시 경고 (조용한 실패 금지)",
+      "_warn_env_root_once" in _src52b)
+check("R52: MPS 메모리 반납 (macOS)",
+      'getattr(_t, "mps", None)' in _src52)
+# OS 전용 API 금지 — 정적 가드
+for _bad52, _why52 in (("os.startfile", "Windows 전용"),
+                       ("os.symlink(", "권한/지원이 OS마다 다름"),
+                       ("signal.SIGALRM", "Windows 미지원"),
+                       ("os.fork", "Windows 미지원"),
+                       ("/tmp/", "POSIX 전용 경로"),
+                       ("C:\\\\", "드라이브 하드코딩")):
+    check(f"R52: {_why52} API 미사용 ({_bad52})",
+          _bad52 not in _src52 and _bad52 not in _src52b)
+# 경로 결합은 전부 os.path.* 이어야 한다 (문자열 '/' 결합 금지)
+check("R52: 경로는 os.path로만 결합",
+      'os.path.join(HERE, "presets.json")' in _src52
+      or "os.path.join(HERE, name)" in _src52)
+check("R52: 파일 인코딩 명시 (기본 시스템 인코딩 금지)",
+      _src52.count('encoding="utf-8"') >= 3
+      and _src52b.count('encoding="utf-8"') >= 1)
+check("R52: 콘솔 인코딩 폴백 (_log)",
+      "UnicodeEncodeError" in _src52)
+check("R52: mediapipe는 선택 의존 (미설치 시 조용히 폴백)",
+      "import mediapipe" in _src52 or "import mediapipe" in _src52b
+      or "mediapipe" not in _src52)   # 카메라 본체는 mediapipe 미사용 허용
+
+print("-- R53: ComfyUI 업데이트 대응 (hidden 주입 실패 = 조용한 실패 제거) --")
+# 왜(Why): API 키 scrub는 ComfyUI의 hidden 입력 주입에 의존한다. 코어가
+# 그 방식을 바꾸면 노드는 **에러 없이 실행**되고 사진 PNG에 키가 남는다.
+# 사용자가 알 수 있는 단서가 경고뿐이므로, 반드시 말해야 한다.
+_captured53 = []
+_orig_log53 = cd._log
+cd._log = lambda m: _captured53.append(str(m))
+try:
+    cd._SCRUB_WARNED.clear()
+    # 1) 키 없이 unique_id도 없으면 경고 없음 (노이즈 금지)
+    cd._warn_scrub_unavailable("", None, None)
+    check("R53: 키가 없으면 경고 안 함 (로그 오염 방지)",
+          not any("지우지 못했" in m for m in _captured53), _captured53[-1:])
+    # 2) 키가 있는데 unique_id 미주입 → 경고 (ComfyUI 버전 변화 신호)
+    cd._warn_scrub_unavailable("sk-test", None, None)
+    check("R53: unique_id 미주입 시 경고",
+          any("지우지 못했" in m and "hidden" in m for m in _captured53),
+          _captured53[-1:])
+    check("R53: 원인과 조치를 같이 알림",
+          any("ComfyUI 버전" in m and "api_key 지우기" in m
+              for m in _captured53), _captured53[-1:])
+    # 3) 1회만 (매 실행마다 찍으면 경고가 눈에 띄지 않는다)
+    _n53 = len([m for m in _captured53 if "지우지 못했" in m])
+    cd._warn_scrub_unavailable("sk-test", None, None)
+    cd._warn_scrub_unavailable("sk-test", None, None)
+    _n2_53 = len([m for m in _captured53 if "지우지 못했" in m])
+    check("R53: 경고는 1회만 (반복 로그 방지)", _n53 == 1 and _n2_53 == 1,
+          f"{_n53} → {_n2_53}")
+    # 4) 정상 경로(dict + uid)는 경고 없음 — 스크럽이 이미 성공한 경우
+    _before53 = len(_captured53)
+    cd._warn_scrub_unavailable("sk-test", {"1": {"inputs": {}}}, "1")
+    check("R53: 정상 주입 경로에서는 경고 없음",
+          len(_captured53) == _before53)
+    # 5) prompt 형식이 다르면 그 사유로 경고
+    _c2 = []
+    cd._log = lambda m: _c2.append(str(m))
+    cd._SCRUB_WARNED.clear()
+    cd._warn_scrub_unavailable("sk-test", "문자열", "1")
+    check("R53: prompt 형식 이상 시 사유를 구분해 경고",
+          any("형식이 예상과 다름" in m for m in _c2), _c2[-1:])
+    # 6) 예외 안전
+    cd._warn_scrub_unavailable(None, None, None)
+    check("R53: 실패 안전", True)
+finally:
+    cd._log = _orig_log53
+    cd._SCRUB_WARNED.clear()
+
+# hidden 선언이 실제로 있는지 (이게 사라지면 조용히 죽는다)
+check("R53: hidden unique_id/prompt 선언 유지",
+      '"hidden"' in _src52 and "UNIQUE_ID" in _src52
+      and "PROMPT" in _src52)
+check("R53: run()이 scrub 실패 시 경고 경로를 탄다",
+      "_warn_scrub_unavailable(api_key, prompt, unique_id)" in _src52)
+
+print("-- R54: 정밀검토 회귀 (2026-09-28, 재발 방지) --")
+# 왜(Why) 이 블록이 필요한가: 아래 항목들은 전부 **조용히** 실패했다.
+# 에러 없이 실행되면서 사용자에게 반대 결과를 주는 종류라 테스트가 없으면
+# 되돌아온다. 각 항목에 "무엇이 조용히 실패했나"를 주석으로 남긴다.
+
+# (1) Skills negative 가드 유실 — watermark/logo/flat lighting/washed out 이
+#     Skills 경로에 없으면 base(비등록 내부 클래스)의 방어만 의미가 없다.
+_bn54 = cd.build_negative(dict(cd.DEFAULTS), topic="1번 여성 초상")
+_bc54 = cd.build_camera_negative(dict(cd.DEFAULTS), topic="1번 여성 초상")
+_missing54 = [b[:34] for b in cd._NEGATIVE_BASE_COMMON
+              if not (b in _bn54 and b in _bc54)]
+check("R54: negative 기본 블록이 두 경로에 모두 존재", not _missing54,
+      str(_missing54))
+check("R54: 사람이면 인체/색오염 가드가 양쪽에 모두",
+      all(s in _bn54 and s in _bc54
+          for s in ["plastic waxy skin", "different person",
+                    "background color spill on skin"]),
+      "build_camera_negative 누락")
+
+# (2) "두 명" 표현에서 두 번째 참조가 소품으로 강등 — 가장 흔한 표현에서
+#     가장 큰 오작동. 슬롯 번호 없이 말해도 duo 앵커가 발화해야 한다.
+for _t54 in ("두 명이 마주 보고 있다", "a couple standing together",
+             "두 사람이 함께 서 있다"):
+    check(f"R54: 다인물 표현 duo 앵커 — {_t54}",
+          bool(cd.build_duo_person_anchor(2, _t54, image_labels=[1, 2])),
+          _t54)
+check("R54: 단일 인물 표현은 duo 앵커 없음 (과잉 개입 방지)",
+      not cd.build_duo_person_anchor(2, "1번 인물 단독", image_labels=[1, 2]))
+check("R54: 번호 나열형 duo 인식",
+      bool(cd.build_duo_person_anchor(2, "1번과 2번 인물이 함께",
+                                      image_labels=[1, 2])))
+check("R54: 나열형에서 두 번째 슬롯만 캡처 (주체 중복 방지)",
+      list(cd._second_person_slots("1번과 2번 인물이 함께")) == [2],
+      str(cd._second_person_slots("1번과 2번 인물이 함께")))
+check("R54: 2인 참조에 소품 강등 문구가 붙지 않음",
+      "only for their explicitly requested roles"
+      not in cd.reference_guard(2, image_labels=[1, 2],
+                                topic="두 명이 마주 보고 있다"),
+      cd.reference_guard(2, image_labels=[1, 2], topic="두 명이 마주 보고 있다")[:90])
+
+# (3) 동물 주제에 사람 가드 — "five fingers" 와 "never humanize" 동시 존재
+_q54 = cd.add_quality_guard("a golden retriever puppy", image_count=1,
+                            topic="강아지 한 마리", image_labels=[1])
+check("R54: 동물 주제에 손가락 5개 금지 (사람 전용)",
+      "five fingers" not in _q54 and "natural human proportions" not in _q54,
+      _q54[-120:])
+check("R54: 동물 주제에는 종 보존 문구", "correct animal anatomy" in _q54)
+_g54 = cd.reference_guard(1, image_labels=[1], topic="강아지 한 마리")
+check("R54: 동물 reference_guard에 hairstyle 없음", "hairstyle" not in _g54, _g54)
+check("R54: 사람 주제에는 사람 가드 유지 (반대 방향도 확인)",
+      "natural human proportions" in cd.add_quality_guard(
+          "a woman", image_count=1, topic="1번 여성", image_labels=[1]))
+check("R54: 사람/동물 혼재는 사람 가드 유지",
+      "natural human proportions" in cd.add_quality_guard(
+          "a woman with a cat", image_count=1, topic="1번 여성과 고양이",
+          image_labels=[1]))
+
+# (4) character sheet 문구 중복 — 110단어어 positive 가 두 번 들어가면
+#     token/attention 을 중복 소비한다.
+_src54 = open("camera_director.py", encoding="utf-8").read()
+check("R54: character sheet positive 재병합 제거",
+      '_cs_text = getattr(self, "_last_character_sheet_text"' not in _src54)
+check("R54: character sheet negative 수동 병합 제거",
+      _src54.count('+ ", " + CHARACTER_SHEET_NEGATIVE') == 0)
+
+# (5) anatomy_count 짝 — positive 만 있고 negative 가 없으면 방향 없는 지시
+check("R54: anatomy_count negative 짝 존재 (양 경로)",
+      "mitten hands" in cd.build_negative(dict(cd.DEFAULTS), topic="1번 인물",
+                                          anatomy_count=True)
+      and "mitten hands" in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="1번 인물", anatomy_count=True))
+check("R54: 미지정 시 anatomy_count negative 미첨부",
+      "mitten hands" not in cd.build_negative(dict(cd.DEFAULTS),
+                                              topic="1번 인물"))
+
+# (6) LLM content 배열 — AttributeError 는 `except LLMError` 를 통과해
+#     폴백도 표시등도 없이 **노드 실행이 죽는다**.
+check("R54: content 배열 응답에서 텍스트 추출",
+      llm_client._content_from(
+          "OpenAI",
+          {"choices": [{"message": {"content": [
+              {"type": "text", "text": '{"a":1}'}]}}]}) == '{"a":1}')
+check("R54: 배열 content로 JSON 파싱 성공 (크래시 없음)",
+      llm_client.extract_json(llm_client._content_from(
+          "OpenAI", {"choices": [{"message": {"content": [
+              {"type": "text", "text": '{"ok":true}'}]}}]})) == {"ok": True})
+check("R54: 문자열 content 회귀 없음",
+      llm_client._content_from(
+          "OpenAI", {"choices": [{"message": {"content": "plain"}}]}) == "plain")
+check("R54: None content 빈 문자열",
+      llm_client._content_from(
+          "OpenAI", {"choices": [{"message": {"content": None}}]}) == "")
+check("R54: Anthropic dict 블록 방어",
+      llm_client._content_from("Anthropic", {"content": {"text": "x"}}) == "x")
+check("R54: 이미지 블록은 무시하고 텍스트만",
+      llm_client._content_from(
+          "OpenAI", {"choices": [{"message": {"content": [
+              {"type": "image_url"}, {"type": "text", "text": "ab"}]}}]}) == "ab")
+
+# (7) .env `export KEY=` — 접두사가 붙으면 1) 읽기 실패 2) 쓰기가 **중복
+#     라인 추가** → 옛 키가 디스크에 잔존한다(비밀 잔존).
+import os as _os54
+import tempfile as _tf54
+_d54 = _tf54.mkdtemp()
+_p54 = _os54.path.join(_d54, ".env")
+try:
+    with open(_p54, "w", encoding="utf-8") as _f:
+        _f.write("export OPENAI_API_KEY=old\nOTHER=1\n")
+    _orig_ovr = llm_client._ENV_FILE_OVERRIDE
+    llm_client._ENV_FILE_OVERRIDE = _p54
+    try:
+        cd._write_env_file_key("OPENAI_API_KEY", "new")
+        _body54 = open(_p54, encoding="utf-8").read()
+    finally:
+        llm_client._ENV_FILE_OVERRIDE = _orig_ovr
+    check("R54: export 접두사 라인 교체 (중복 라인 없음)",
+          _body54.count("OPENAI_API_KEY") == 1 and "old" not in _body54,
+          repr(_body54))
+    check("R54: export 접두사 읽기", "new" in _body54, repr(_body54))
+finally:
+    try:
+        import shutil as _sh54
+        _sh54.rmtree(_d54, ignore_errors=True)
+    except Exception:
+        pass
+
+# (8) 죽은 상수 제거 — 정의만 있고 참조 0 이었다.
+check("R54: 죽은 상수 제거됨",
+      all(s not in _src54 for s in
+          ("REMOVE_ITEM_KEYWORDS = (", "REMOVE_ITEM_NEGATIVE = (",
+           "PHYSICS_MOTION_NEGATIVE = (")))
+
+print("-- 하네스 감사 회귀 (2026-09-28 R55) --")
+# 왜(Why): 아래는 740건 테스트를 전부 통과한 상태에서 하네스 감사 에이전트가
+# **실측**으로 찾아낸 것들. 전부 조용히 실패했다(예외 없이 반대 결과).
+#
+# (1) 어휘 오탐 — 부분 문자열 매칭. 한국어 1글자 동물어("소","양","말","새","개",
+#     "고")가 명사·어미와 결합해 의��와 다른 단어가 된다. 결과: **사람이 있는
+#     장면이 동물로 분류**되어 인체 가드 전체가 사라지고 "mascot costume"
+#     같은 동물 negative 가 붙는다 — 사용자에게 정반대.
+for _t, _why in (("\ubc29 \uc548\uc5d0\uc11c \uc18c\ud30c\uc5d0 \uc545\uc788\uc544 "
+                 "\uc788\ub294 \uc5f0\uc778 \ud55c \uc7b5\uc774 \ub300\ud654\ud558\ub294 "
+                 "\uc7a5\uba74", "sofa(small-cow)"),
+                ("\ud0dc\uc591\uc774 \uc9c0\ub294 \uc0ac\ub9dd \ud3d9\ub2e8 "
+                 "\ub85c\ub4dc\ud2b8\ub9bd", "sun(sheep)"),
+                ("\uc659\uc6d0 \ub098\ubb34 \uae38\uc744 \uc704\ud1b5 \ud48d\uacbd",
+                 "trees(sheep)")):
+    check(f"R55: 한국어 동물어 오탐 제거 — {_why}",
+          not cd._is_animal_subject(_t), _t)
+# 주의: 한글 이스케이프는 **NFC** 로 쓴다. 려는 U+B824(NFC) 이고
+# U+B8E0 은 NFD 분해형이라 실제 어휘와 매칭이 안 된다(2026-09-28 실측).
+# 정상 animal 은 여전히 판정돼야 한다 (과잉 수정은 반대 실패)
+for _t in ("\uac15\uc544\uc9c0 \ud55c \ub9c8\ub9ac", "\uace0\uc591\uc774 "
+           "\uc788\ub2e4", "\ubc18\ub824\ub3d9\ubb3c \uc788\ub2e4"):
+    check(f"R55: 한국어 동물 정상 판정 유지 — {_t[:8]}",
+          cd._is_animal_subject(_t), _t)
+# (2) 영문 부분 문자열 — man(romantic/german), cat(catalogue), bear(bearable)
+for _t, _why in (("a romantic sunset", "man in romantic"),
+                 ("a german forest", "man in german"),
+                 ("a catalogue of items", "cat in catalogue"),
+                 ("a bearable jacket", "bear in bearable")):
+    check(f"R55: 영문 오탐 제거 — {_why}",
+          not cd._is_human_subject(_t) and not cd._is_animal_subject(_t), _t)
+check("R55: 영문 정상 판정 유지 (cat/puppy)",
+      cd._is_animal_subject("a cat sitting on a sofa")
+      and cd._is_animal_subject("a golden retriever puppy"))
+check("R55: 한국어 조사 경계 규칙 — 소파/고양이 동시 판정",
+      cd._ko_word_present("소파에 앉았다", "소") is False
+      and cd._ko_word_present("강아지 한 마리", "강아지") is True)
+check("R55: 앞쪽 접합 차단 (태양/양옆)",
+      cd._ko_word_present("\ud0dc\uc591", "양") is False)
+
+print("-- R56: 픽셀 기반 캐릭터 시트 판별 (topic 없이) --")
+# 실측 회귀(2026-09-28): topic 이 비어 있으면 text 가드가 거짓이 되어
+# character_sheet_guard 가 아예 발동하지 않았다 -> 1인 6뷰 시트가 결과에서
+# 2명으로 복제. "정보는 이미 픽셀에 있다"는 원칙으로 픽셀 판별을 넣는다.
+#
+# 교정 내역 (중요): 처음엔 "패널 폭이 고르면 시트" 였는데 **실제 사용자 시트
+# (10896x6800, 전신 2 + 얼굴 4)의 폭비가 2.50** 이라 그것도 탈락했다. 전신과
+# 클로즈업은 구조적으로 폭이 다르니 폭 균일성은 시트의 조건이 아니다. 지금
+# 기준은 구조(간격 균일성) + 내용(셀 유사도) 두 가지다.
+import numpy as _np
+
+
+def _np_as_rgb_stub(a):
+    """실제 파이프라인처럼 512 이하로 축소한 배열 (PIL 없이 슬라이싱 근사)."""
+    step = max(1, max(a.shape[0], a.shape[1]) // 512)
+    return a[::step, ::step, :]
+
+
+def _sil(a, cx, top, bot, hw, tone=.28):
+    """좁은 인물 실루엣. 흰 배경 위에서 각 행을 조금만 차지해야 행 프로파일에
+    패널 사이 간격이 생긴다(실제 사진과 같은 성질)."""
+    a[top:bot, cx - hw:cx + hw] = tone
+    head = (bot - top) // 9
+    a[top:top + head, cx - head // 2:cx + head // 2] = .20
+
+
+def _cu(a, cx, top, hw, hh):
+    a[top:top + 2 * hh, cx - hw:cx + hw] = .86
+    head = (2 * hh) // 4
+    a[top + hh // 2:top + hh // 2 + head, cx - head // 2:cx + head // 2] = .74
+
+
+def _sheet_layout():
+    """실제 사용자 시트와 같은 레이아웃: 전신 2(좌, 세로 전체) + 얼굴 4(우 2x2)."""
+    a = _np.ones((1024, 1536, 3), dtype=_np.float32)
+    for cx in (250, 620):
+        _sil(a, cx, 70, 980, 46)
+    for gy in (170, 610):
+        for gx in (1090, 1370):
+            _cu(a, gx, gy, 118, 165)
+    return a
+
+
+def _even_sheet(n=6):
+    a = _np.full((512, 256 * n, 3), 0.95, dtype=_np.float32)
+    for i in range(n):
+        _sil(a, i * 256 + 128, 50, 480, 44)
+    return a
+
+
+def _row_sheet(n=6):
+    a = _np.ones((256 * n, 1024, 3), dtype=_np.float32)
+    for i in range(n):
+        _sil(a, 420, i * 256 + 40, i * 256 + 240, 60)
+    return a
+
+
+# (1) 실제 사용자 구조(전신 2 + 얼굴 4, 2x2) — 실측 sim 0.414
+_a = _sheet_layout()
+check("R56: 실제 시트 구조(전신2+얼굴4) 픽셀 인식",
+      cd._looks_like_sheet(_a)["sheet"], str(cd._looks_like_sheet(_a)))
+
+# (1b) 6등분 / 세로 배열
+check("R56: 6뷰 정렬 시트 픽셀 인식", cd._looks_like_sheet(_even_sheet())["sheet"])
+check("R56: 세로 배열 시트 픽셀 인식", cd._looks_like_sheet(_row_sheet())["sheet"])
+
+# (1c) 좌표 공간 정규화 — 2026-09-28 실측 버그.
+# 프로파일은 512 기준 좌표를 내는데 원본 배열로 자르면 엉뚱한 곳을 읽는다.
+# 1536 폭에서 밴드(67,100)는 실제 실루엣(204,296)이 아니었다. 이게 없어서
+# 셀 유사도가 0 이 되어 판별이 조용히 죽었다. 큰 배열을 그대로 넘겨도
+# 같은 판정이 나와야 한다.
+check("R56: 원본 해상도 배열에서도 동일한 판정 (좌표 정규화)",
+      cd._looks_like_sheet(_a)["sheet"]
+      and cd._looks_like_sheet(_np_as_rgb_stub(_a))["sheet"],
+      str(cd._looks_like_sheet(_a)))
+
+# (2) 오탐 방어: 1인/2인/평탄은 시트가 아니다.
+#     (시트로 오인하면 뷰를 여러 신원으로 평균내며 조용히 망가지기 때문)
+_p1 = _np.full((768, 1024, 3), 0.92, dtype=_np.float32)
+_sil(_p1, 500, 70, 730, 60)
+check("R56: 단일 인물 사진은 시트로 오인하지 않음",
+      not cd._looks_like_sheet(_p1)["sheet"], str(cd._looks_like_sheet(_p1)))
+_p2 = _np.full((512, 1024, 3), 0.9, dtype=_np.float32)
+for _cx in (300, 700):
+    _sil(_p2, _cx, 50, 480, 48)
+check("R56: 2인 사진은 시트로 오인하지 않음",
+      not cd._looks_like_sheet(_p2)["sheet"], str(cd._looks_like_sheet(_p2)))
+_flat = _np.full((512, 512, 3), 0.5, dtype=_np.float32)
+check("R56: 평탄 이미지는 시트로 오인하지 않음",
+      not cd._looks_like_sheet(_flat)["sheet"])
+
+# (3) 격자는 같아도 **내용이 다르면** 시트가 아니다. 합성 그림은 전부 같은
+#     색이라 유사도가 무조건 1 이 되는데, 그건 판별력을 검증해 주지 않는다.
+_mix = _np.ones((1024, 1536, 3), dtype=_np.float32)
+for cx in (250, 620):
+    _mix[70:980, cx - 46:cx + 46] = .12
+for gy in (170, 610):
+    for gx in (1090, 1370):
+        _mix[gy:gy + 330, gx - 118:gx + 118] = .88
+check("R56: 격자는 같아도 내용이 다르면 시트로 보지 않음",
+      not cd._looks_like_sheet(_mix)["sheet"], str(cd._looks_like_sheet(_mix)))
+
+# (5) 경로 일치 — ComfyUI 텐서(BHWC)와 PIL 은 **같은 판정**이어야 한다.
+# 2026-09-29 실측: 텐서 경로에서 stride 축소가 종횡비를 깨뜨려 가로로 긴
+# 배열이 171x171 로 뭉개졌고, 포즈 사진이 sim 0.209 → **시트로 오인**됐다.
+# 유닛 테스트는 PIL 경로만 보므로 이런 버그를 못 잡는다. 두 경로를 직접
+# 비교해 문에 고정한다.
+# ComfyUI 는 BHWC 텐서를 준다. **정규화 함수(_np_as_rgb)를 거치면** 두
+# 경로가 같은 판정을 내야 한다 — 좌표를 어긋뜨리지 않는 것이 목표이므로.
+check("R56: 경로 일치 — 합성 시트는 PIL 경로와 ComfyUI 텐서 경로 모두 시트",
+      cd._looks_like_sheet(cd._np_as_rgb(_even_sheet()))["sheet"]
+      and cd._looks_like_sheet(cd._np_as_rgb(
+          _np.ascontiguousarray(_even_sheet()[None, ...])))["sheet"],
+      "PIL=%s 텐서=%s" % (
+          cd._looks_like_sheet(cd._np_as_rgb(_even_sheet())),
+          cd._looks_like_sheet(cd._np_as_rgb(
+              _np.ascontiguousarray(_even_sheet()[None, ...])))))
+check("R56: 경로 일치 — 단일 인물은 두 경로 모두 시트 아님",
+      not cd._looks_like_sheet(cd._np_as_rgb(_p1))["sheet"]
+      and not cd._looks_like_sheet(cd._np_as_rgb(
+          _np.ascontiguousarray(_p1[None, ...])))["sheet"],
+      "PIL=%s 텐서=%s" % (
+          cd._looks_like_sheet(cd._np_as_rgb(_p1)),
+          cd._looks_like_sheet(cd._np_as_rgb(
+              _np.ascontiguousarray(_p1[None, ...])))))
+# 축소 후 크기는 종횡비를 유지해야 한다 (stride 로 정사각형에 만들면
+# 세로/가로로 긴 시트가 통째로 죽는다 — 512x1536 → 171x171 실측).
+_n_wide = cd._sheet_normalize(_even_sheet())
+check("R56: 축소가 종횡비를 보존한다 (가로로 긴 시트)",
+      _n_wide.shape[1] > _n_wide.shape[0] * 2,
+      str(_n_wide.shape))
+check("R56: 축소가 종횡비를 보존한다 (세로로 긴 시트)",
+      cd._sheet_normalize(_row_sheet()).shape[0]
+      > cd._sheet_normalize(_row_sheet()).shape[1] * 1.2,
+      str(cd._sheet_normalize(_row_sheet()).shape))
+
+# 슬롯 반환: 1번은 보통 이미지, 3번이 시트 -> "3" 만 나와야 한다
+_slots = cd.sheet_like_slots([(1, _p1), (2, None), (3, _even_sheet())])
+check("R56: sheet_like_slots 가 시트 슬롯만 반환",
+      _slots == ["3"], str(_slots))
+
+# (5) topic 이 비어도 시트 지시가 붙는다 (이번 버그의 핵심)
+_g_px = cd.character_sheet_guard(3, "", image_labels=[1, 2, 3], pixel_sheet_slots=["3"])
+# (6) topic 이 비어도 시트 지시가 붙는다 (이번 버그의 핵심)
+_g_px = cd.character_sheet_guard(3, "", image_labels=[1, 2, 3],
+                               pixel_sheet_slots=["3"])
+check("R56: 빈 topic + 픽셀 시트 -> 시트 지시 발동",
+      "Every view is the same one person" in _g_px, _g_px[:160])
+# 2026-09-29 ComfyUI 실측에서 또 하나가 걸렸다: 시트가 **3번**인데
+# 프롬프트가 "reference image 1 is a character sheet" 라고 했다. first 를
+# 무조건 썼기 때문이다. 1번은 신원 사진이라 **시트가 아닌데 시트라 지목**된
+# 정반대 지시 — 모델이 엉뚱하게 반응한다. 픽셀 판별이 찾은 슬롯을 지목해야 한다.
+check("R56: 시트 지목이 실제 시트 슬롯(3번)이다",
+      "reference image(s) 3 is a character sheet" in _g_px
+      and "reference image 1 is a character sheet" not in _g_px,
+      _g_px[:200])
+check("R56: 시트 슬롯이 여러 개면 전부 지목",
+      "reference image(s) 1, 3 is a character sheet"
+      in cd.character_sheet_guard(3, "", image_labels=[1, 2, 3],
+                                   pixel_sheet_slots=["1", "3"]))
+# 픽셀 판별이 없으면 기존처럼 first 로 물러선다 (topic 으로 명시한 경로).
+check("R56: 픽셀 판별 없으면 기존대로 첫 슬롯 지목 (회귀)",
+      "reference image 1 is a character sheet"
+      in cd.character_sheet_guard(3, "캐릭터 시트", image_labels=[1, 2, 3]))
+check("R56: 빈 topic + 시트 없음 -> 미작동 (과잉 개입 방지)",
+      cd.character_sheet_guard(3, "", image_labels=[1, 2, 3]) == "")
+# (6) negative 대칭: positive 만 붙고 negative 가 빠지면 "2명 복제"가 그대로
+#     돌아온다. 양쪽 배선을 문에 고정한다.
+check("R56: character_sheet 플래그로 별개 인물 복제 방어 첨부",
+      cd.CHARACTER_SHEET_PEOPLE_NEGATIVE in cd.build_negative(
+          dict(cd.DEFAULTS), topic="", image_labels=[1, 2, 3], image_count=3,
+          character_sheet=True))
+check("R56: 시트 미판정 시 negative 없음 (과잉 개입 방지)",
+      cd.CHARACTER_SHEET_PEOPLE_NEGATIVE not in cd.build_negative(
+          dict(cd.DEFAULTS), topic="", image_labels=[1, 2, 3], image_count=3))
+_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "camera_director.py"), encoding="utf-8").read()
+check("R56: base run / Skills 모두 character_sheet 를 negative 에 전달",
+      _src.count("character_sheet=bool(") >= 2,
+      str(_src.count("character_sheet=bool(")))
+
+# (7) 임계값 문고정 — 실측 근거와 함께
+check("R56: 간격 균일성 기준 0.45 (실사용 사진 0.38~0.71, 실제 시트 0.95)",
+      cd._SHEET_MIN_SPACING_RATIO == 0.45, str(cd._SHEET_MIN_SPACING_RATIO))
+check("R56: 셀 유사도 기준 0.20 (실사용 사진 <=0.109, 실제 시트 0.414)",
+      cd._SHEET_MIN_CELL_SIMILARITY == 0.20, str(cd._SHEET_MIN_CELL_SIMILARITY))
+# 실제 사용자 시트의 폭비는 2.50 이다. "패널 폭이 고르다"는 시트의 조건이
+# 아니라 우연이므로(전신과 클로즈업은 구조적으로 폭이 다르다) 이 기준을
+# 되살리면 진짜 시트를 놓친다 -> 상수가 없어야 한다.
+check("R56: 폭 균일성 기준은 제거됨 (실제 시트 폭비 2.50 놓치지 않기 위해)",
+      not hasattr(cd, "_SHEET_MAX_WIDTH_RATIO"))
+
+print("-- R57: 시트 슬롯은 vision 전용 (reference latent 에서 제외) --")
+# 2026-09-29 실측 회귀: 시트를 Qwen reference latent 로 넣으면 결과가
+# **6뷰 시트 그대로** 렌더링됐다. 분리 실험으로 확정 —
+#   시트 없음(2장) → 1인 정상
+#   시트 있음(3장) + 빈 topic → 4뷰
+#   시트 있음(3장) + topic 에 "a single continuous photograph of one
+#     young woman" 명시 → 그래도 4뷰
+# 프롬프트로는 이길 수 없다(pixel-level 레이아웃 힌트). 그래서 시트는
+# LLM(신원 파악)에만 보여주고 diffusion 에서는 뺀다.
+cd.clear_qwen_ref_cache()
+import torch as _t57
+
+
+class _VAE57:
+    """slot 라벨별로 encode 호출을 기록한다."""
+
+    def __init__(self):
+        self.encoded = []
+
+    def encode(self, s):
+        self.encoded.append(tuple(s.shape))
+        return ("latent", tuple(s.shape))
+
+
+import types as _ty57
+_fake_comfy57 = _ty57.ModuleType("comfy")
+_fu57 = _ty57.ModuleType("comfy.utils")
+_fu57.common_upscale = lambda s, w, h, *a, **k: s
+_fake_comfy57.utils = _fu57
+_fnh57 = _ty57.ModuleType("node_helpers")
+_fnh57.conditioning_set_values = lambda c, v, append=True: c
+_saved57 = {m: sys.modules.get(m)
+              for m in ("comfy", "comfy.utils", "node_helpers")}
+sys.modules["comfy"] = _fake_comfy57
+sys.modules["comfy.utils"] = _fu57
+sys.modules["node_helpers"] = _fnh57
+try:
+    # 슬롯마다 **다른 픽셀**을 써야 한다 — 동일 픽셀이면 VAE 캐시가 세 슬롯을
+    # 같은 이미지로 보고 재사용해 encode 호출이 1회로 줄어든다(테스트는
+    # vae.encode 호출 수로 판정하므로).
+    _img57 = _t57.ones(1, 64, 64, 3) * 0.3
+    _img57b = _t57.ones(1, 64, 64, 3) * 0.5
+    _img57c = _t57.ones(1, 64, 64, 3) * 0.7
+    _vae57 = _VAE57()
+    _items57 = [(1, _img57), (2, _img57b), (3, _img57c)]
+    # 시트 슬롯 3번만 latent 에서 제외
+    _vl57, _rl57 = cd.CameraDirectorEncode._prepare_qwen_image_data(
+        _items57, vae=_vae57, latent_image=None,
+        latent_skip_labels={"3"})
+    check("R57: 시트 슬롯은 vision 에 포함", len(_vl57) == 3, str(len(_vl57)))
+    check("R57: 시트 슬롯은 latent 에서 제외 (2장만)",
+          len(_rl57) == 2, str(len(_rl57)))
+    check("R57: 제외된 슬롯은 VAE encode 도 호출되지 않음",
+          len(_vae57.encoded) == 2, str(len(_vae57.encoded)))
+    # 제외 지정이 없으면 예전대로 전부 latent 에 들어간다 (회귀)
+    cd.clear_qwen_ref_cache()
+    _vae57b = _VAE57()
+    _vl57b, _rl57b = cd.CameraDirectorEncode._prepare_qwen_image_data(
+        _items57, vae=_vae57b, latent_image=None)
+    check("R57: 제외 지정 없으면 전부 latent (회귀)",
+          len(_rl57b) == 3, str(len(_rl57b)))
+    check("R57: 제외 지정은 문자열로도 받음 ('3')",
+          cd.CameraDirectorEncode._prepare_qwen_image_data(
+              _items57, vae=_vae57b, latent_image=None,
+              latent_skip_labels=[3])[1].__len__() == 2)
+finally:
+    for _m, _v in _saved57.items():
+        if _v is not None:
+            sys.modules[_m] = _v
+        else:
+            sys.modules.pop(_m, None)
+    cd.clear_qwen_ref_cache()
+
+# negative 도 "결과 형태" 로 지목해야 한다 (프롬프트만으로는 안 막혔다)
+check("R57: negative 가 시트 결과 형태를 직접 지목",
+      "the same person repeated several times" in cd.CHARACTER_SHEET_NEGATIVE,
+      cd.CHARACTER_SHEET_NEGATIVE[:120])
+check("R57: positive 가 무엇을 그릴지 직접 명시",
+      "must NOT appear in the output" in
+      cd.character_sheet_guard(1, "character sheet",
+                              image_labels=[1]))
+
+print("-- R58: 포즈 역할 자연 표현 인식 (숫자 + 자세 묘사) --")
+# 2026-09-29 실측 회귀: 기존 포즈 패턴은 "이미지 2의 포즈" 처럼 **역할
+# 명사**만 인식했다. 사용자가 "2번은 포즈만", "2번 앉은 자세" 처럼
+# 슬롯 번호 + 실제 자세를 적으면 **전부 미인식**이었다. 전수 확인 결과:
+#   2번은 포즈만 / 2번 포즈만 / 2번 앉은 자세 / 2 앉은 자세 /
+#   3번 서 있는 모습 / 2번 손에 든 상태 / 2번 자세만 참고 /
+#   1번은 신원, 2번은 앉은 자세 / 2번 sitting / 2 sitting pose
+# 모두 미인식이었다.
+_POSE_OK = [
+    ("2번은 포즈만", {2}), ("2번 포즈만", {2}), ("2번은 포즈", {2}),
+    ("2번 이미지의 포즈", {2}), ("2번 이미지 포즈", {2}),
+    ("2번 앉은 자세", {2}), ("2 앉은 자세", {2}),
+    ("2번은 앉은 자세", {2}), ("2번 앉은 자세만", {2}),
+    ("3번 서 있는 모습", {3}), ("2번 손에 든 상태", {2}),
+    ("2번 자세만 참고", {2}), ("2번 서있는", {2}),
+    ("1번은 신원, 2번은 앉은 자세", {2}),
+    ("2번 sitting", {2}), ("2 sitting pose", {2}), ("2번 leaning", {2}),
+]
+for _t58, _want58 in _POSE_OK:
+    check("R58: 자연 표현 인식 — " + _t58,
+          cd._pose_role_slots(_t58) == _want58,
+          str(sorted(cd._pose_role_slots(_t58))))
+
+# 오탐 회귀: 포즈 슬롯으로 잘못 잡으면 그 슬롯이 **신원 소스에서 제외**돼
+# 사람이 사라진다. 사람/사물/의상 슬롯이 포즈로 잡히면 안 된다.
+_POSE_NOT = [
+    "2번 여성", "2번 남자", "2번 인물", "2번 핸드백", "2번 시계",
+    "2번 원피스", "2번 의상", "2번 침대", "2번 고양이", "2번 강아지",
+    "3번 인물", "1번은 여성, 2번은 남성", "2번 배경", "2번 조명",
+    "2번 소파", "2번 의자", "2번 컵", "2번 책", "2번 모델", "2번 제품",
+]
+for _t58b in _POSE_NOT:
+    check("R58: 사람/사물은 포즈로 잡지 않음 — " + _t58b,
+          not cd._pose_role_slots(_t58b),
+          str(sorted(cd._pose_role_slots(_t58b))))
+
+# 숫자와 무관한 표현에서도 오탐 없어야 한다(수량/시간/서수/연도 등).
+_POSE_NUM = [
+    "2가지 색", "3가지", "5분", "10초", "1층", "2등", "100원", "3인",
+    "4명", "2026년", "12시", "2개", "5번 버스", "3번 문제", "2번 타자",
+    "2주", "3개월", "50%", "2배", "4차", "2주차", "10배", "2번째 줄",
+    "3번째 장", "5번째 샷", "1부", "2막", "2인용",
+]
+for _t58c in _POSE_NUM:
+    check("R58: 숫자 무관 표현 오탐 없음 — " + _t58c,
+          not cd._pose_role_slots(_t58c),
+          str(sorted(cd._pose_role_slots(_t58c))))
+
+# 기존 표현이 깨지지 않아야 한다(회귀).
+check("R58: 기존 나열형 유지",
+      cd._pose_role_slots("3번과 7번 이미지의 포즈") == {3, 7})
+check("R58: 기존 영문 유지",
+      cd._pose_role_slots("use pose from image 4") == {4})
+check("R58: 기존 이미지 라벨형 유지",
+      cd._pose_role_slots("이미지 2의 자세") == {2})
+
+
+# ── R59: 의상 교체 슬롯 자연 표현(2026-09-29) ──────────────────────
+# 왜(Why): "2 의상, 1 교체" 처럼 **이미지 라벨 없이** 슬롯 번호만 쓰는 표현이
+# 전부 미인식이었다(전수 확인: 6개 표현 전부 실패). 라벨을 쓰면 되는데
+# 사용자가 매번 "이미지" 를 붙이는 게 번거로워서 놓쳤다 -> 의상 가드 미작동.
+# 그리고 "2 의상, 1 교체" 에서 1번(주인물)까지 의상 소스로 잡히면
+# **1번이 신원 소스에서 제외돼 사람이 사라진다** -> source/target 분리 필수.
+print("-- R59: 의상 교체 슬롯 자연 표현 --")
+
+# (topic, 의상 소스, 교체 대상, 의도)
+_OUTFIT_CASES = [
+    # 슬롯 번호만(핵심 케이스)
+    ("2 의상, 1 교체", {2}, {1}, True),
+    ("2번 의상, 1번 교체", {2}, {1}, True),
+    ("2 의장, 1 적용", {2}, {1}, True),
+    ("2번 옷, 1번 변경", {2}, {1}, True),
+    ("2번 의장을 1번에 입혀", {2}, {1}, True),
+    ("2번 의장만 1번에 적용", {2}, {1}, True),
+    ("1번에 2번 의장을 입혀", {2}, {1}, True),
+    ("2번 의장을 1번 인물에게 입히고", {2}, {1}, True),
+    # 라벨 형식(구버전 호환)
+    ("이미지 2 의상, 이미지 1 교체", {2}, {1}, True),
+    ("이미지 2 의상을 이미지 1에 적용", {2}, {1}, True),
+    # 의상 소스만 지정(교체 아님) -> 의도 False 가 맞다
+    ("2번 의상", {2}, set(), False),
+    ("2 의상", {2}, set(), False),
+    ("2번 원피스", {2}, set(), False),
+    ("2번 의상 참고", {2}, set(), False),
+    ("2번 옷 참고", {2}, set(), False),
+    # 대상만 있는 표현: 소스는 비어야 하지만 대상은 잡힌다
+    ("1번 교체", set(), {1}, False),
+    ("3번 입혀", set(), {3}, False),
+    ("1번 swap", set(), {1}, False),
+    ("1번 change", set(), {1}, False),
+    ("1번은 원래 유지", set(), set(), False),
+    # 오탐: 의상 어휘 뒤에 **착용 동사**가 붙으면 그 슬롯은 '인물' 이다.
+    # 의상 소스로 잡히면 사람이 신원 소스에서 제외된다(2026-09-29 실측 위험).
+    ("드레스를 입은 여성", set(), set(), False),
+    ("옷을 입은 남자", set(), set(), False),
+    ("2번 드레스를 입은 여성", set(), set(), False),
+    ("she wears a dress", set(), set(), False),
+    ("a man in a suit", set(), set(), False),
+    ("1번 여성이 원피스를 입고 있다", set(), set(), False),
+]
+for _t59, _wc, _wt, _wi in _OUTFIT_CASES:
+    _gc = cd._clothing_role_slots(_t59)
+    _gt = cd._outfit_target_slots(_t59)
+    _gi = cd._is_outfit_transfer(_t59)
+    check("R59: 의상 슬롯 — " + _t59, _gc == _wc,
+          "%s (기대 %s)" % (sorted(_gc), sorted(_wc)))
+    check("R59: 교체 대상 — " + _t59, _gt == _wt,
+          "%s (기대 %s)" % (sorted(_gt), sorted(_wt)))
+    check("R59: 교체 의도 — " + _t59, _gi == _wi, str(_gi))
+
+# 회귀: 의상 어휘 보강이 사물/인물 슬롯을 침범하지 않아야 한다.
+check("R59: 의장 추가 후 사물 슬롯 오염 없음",
+      cd._object_role_slots("2번 의장") == set(),
+      str(sorted(cd._object_role_slots("2번 의장"))))
+check("R59: 의장 추가 후 인물 슬롯 오염 없음",
+      "2" not in cd._pose_role_slots("2번 의장"),
+      str(sorted(cd._pose_role_slots("2번 의장"))))
+
+# 회귀: 교체 대상이 의상 슬롯에 섞여도 duo 인물 판정은 1번을 지킨다.
+check("R59: 교체 대상이 인물 duo 에서 빠지지 않음",
+      cd._is_outfit_transfer("2 의상, 1 교체") is True)
+
+# ── R60: 의상 교체 → 역할 계획 연동 (2026-09-29 실제 실행 결함) ──
+# 왜(Why): 슬롯 판정은 맞는데 **주 피사체가 의상 사진으로 남았다.**
+# 1번=옷, 2번=인물, topic="1 의상, 2 교체" 실사용 실행에서 프롬프트가
+# "use reference image 1 as the only main human identity" 라고 역전 지시했다.
+# 의상 소스는 사람이 아니다 -> 신원 소스 후보에서 제외하고,
+# 교체 대상(옷을 입는 사람)을 주 피사체로 올린다.
+print("-- R60: 의상 교체 역할 계획 연동 --")
+
+_PLAN_CASES = [
+    # (topic, labels, 기대 main, 기대 persons)
+    ("1 의상, 2 교체", ["1", "2"], 2, []),
+    ("2 의상, 1 교체", ["1", "2"], 1, []),
+    ("이미지 1 의상, 이미지 2 교체", ["1", "2"], 2, []),
+    ("이미지 2 의상을 이미지 1에 적용", ["1", "2"], 1, []),
+    ("1번 의장을 2번 인물에게 입히고", ["1", "2"], 2, []),
+    ("1번 의상, 2번에 적용", ["1", "2"], 2, []),
+    # 의상 소스만 지정(교체 아님) -> 첫 슬롯이 옷이어도 그 다음이 주 피사체
+    ("2번 의상 참고", ["1", "2"], 1, []),
+    # 회귀: 포즈 지정은 기존 그대로
+    ("1번 포즈, 2번 여성", ["1", "2"], 2, []),
+]
+for _t60, _l60, _wm, _wp in _PLAN_CASES:
+    _p60 = cd._person_object_plan(_t60, _l60)
+    check("R60: 주 피사체 — " + _t60, _p60["main"] == _wm,
+          "%s (기대 %s)" % (_p60["main"], _wm))
+    check("R60: 추가 인물 — " + _t60, _p60["persons"] == _wp,
+          "%s (기대 %s)" % (_p60["persons"], _wp))
+
+# 회귀: 사물 우선 규약이 유지된다(사물은 라벨 표현 "이미지 N" 만 지원).
+_p60_obj = cd._person_object_plan("이미지 1 핸드백, 이미지 2 여성", ["1", "2"])
+check("R60: 사물 1번 지정 시 인물이 주 피사체", _p60_obj["main"] == 2,
+      str(_p60_obj))
+check("R60: 사물 지정은 objects 로 남는다", _p60_obj["objects"] == [1],
+      str(_p60_obj))
+
+# 가장 중요한 회귀 1: 의상 사진이 1번이어도 identity 앵커가 2번을 지목한다.
+_anchor60 = cd.build_identity_anchor(2, "1 의상, 2 교체", ["1", "2"])
+check("R60: identity 앵커가 인물 슬롯(2)을 지목",
+      "image 2" in _anchor60 and "image 1 as" not in _anchor60,
+      _anchor60[:160])
+# 반대 순서: 2번=옷, 1번=인물 → 1번을 지목해야 한다.
+_anchor60b = cd.build_identity_anchor(2, "2 의상, 1 교체", ["1", "2"])
+check("R60: identity 앵커 순서 무관 (옷이 2번 → 인물 1번)",
+      "image 1 as" in _anchor60b, _anchor60b[:160])
+
+# 가장 중요한 회귀 2: 의상 교체 topic 에는 인물 키워드가 없는데도
+# 인물로 판정돼야 한다(없으면 인물 가드 전부가 조용히 미작동).
+check("R60: 의상 교체 topic 은 사람으로 판정",
+      cd._is_human_subject("1 의상, 2 교체") is True)
+check("R60: '의상 교체' 단독(슬롯 없음)은 사람 아님",
+      cd._is_human_subject("의상 교체") is False)
+check("R60: 동물 주제는 사람으로 오탐되지 않음",
+      cd._is_human_subject("1 의상, 2 교체 강아지") is False)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
+
 sys.exit(1 if FAIL else 0)

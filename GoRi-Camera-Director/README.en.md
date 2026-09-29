@@ -26,8 +26,35 @@ Type a one-line topic (Korean OK), attach optional images and optional positive/
 - `image_1`–`image_10` are camera-hint / vision-LLM inputs, and the elected main reference is passed through as `image_out`.
 - **Progressive input slots**: only the `image_1` slot shows by default; each connection reveals the next one (e.g. connect `image_7` → `image_8` appears). Slot hiding is display-only and never affects saved-workflow link compatibility.
 - Connected `image_N` numbers are preserved as-is in LLM notes and reference guards. Connecting only `image_3` never compresses it into `image_1`.
-- With 2+ reference images, the role planner elects the main subject (first connected image unless specified otherwise), and extra images are guarded to only serve requested roles among `background / outfit / prop / product / style / lighting / composition / mood`.
+- With 2+ reference images, the role planner elects the main subject (first connected image unless specified otherwise), and extra images are guarded to serve **only explicitly requested** roles among `background / prop / product / style / lighting / composition / mood`.
+  - `outfit` was removed from that default list. With an empty topic there is no "requested role" to pick, so the model was free to choose — and real testing showed it copying the **clothing off a pose reference**. Clothing is only transferred when the topic assigns an outfit role, and that path has its own dedicated guard. Unassigned secondary images never contribute face, hair, skin, identity, or clothing.
+- **Character sheet pixel detection (no topic needed)**: the node reads **repeatedly arranged views directly from the pixels** of a reference and treats it as a single-person character sheet (both horizontal and vertical layouts). It fires even when the topic never says "character sheet" — real testing with an empty topic duplicated a one-person 6-view sheet into **two people**, and that information was already in the pixels with nobody reading it. On a positive match it attaches the sheet instruction (every view is the same person) plus `second person / duplicated characters / contact sheet` negatives, and logs `참조 이미지 3번에서 캐릭터 시트 패턴 감지`.
+  - Thresholds are deliberately tight because a false positive is worse than a miss — misreading a photo as a sheet averages several views into several identities and fails quietly. Panels ≥3, spacing regularity ≥0.45 (panels are laid out as a grid), and **inter-panel content similarity ≥0.20** (the same subject repeated). The real reference sheet (10896×6800, 2 full-body + 4 head views) scores 0.95 / 0.414 and is detected; all 15 real photos are rejected (highest similarity 0.109). Single-person and two-person photos are never read as sheets.
+  - The first criterion was "panels are evenly wide" and it was **wrong**: the real sheet's width ratio is 2.50, so it missed it. A full-body view and a head close-up are structurally different widths, so even widths are a coincidence rather than a property of a sheet. The detector now measures the actual definition — the same person repeated.
+  - Detection is **independent of the image path**: the same file gives the same verdict whether it arrives as a ComfyUI tensor (BHWC) or a PIL image. Analysis downscaling targets 512, preserves aspect ratio, and matches the PIL path **pixel for pixel** — a single pixel of drift was enough to flip the verdict.
+  - **Character sheets are excluded from the diffusion model and shown to the language model only.** Qwen-Image follows the *layout* of a reference image. Feeding a one-person 6-view sheet produced a **4-view sheet rendered verbatim**. The topic cannot fix this: writing "a single continuous photograph of one young woman" still produced 4 views, because the layout hint is pixel-level. So the sheet is shown to the LLM (for identity) and removed from the VAE reference. Re-verified with the same seed: **4 views → 1 person**.
 - The outfit-only guard is added only when `Image 2` is explicitly used as an outfit reference (e.g. outfit swap jobs). Merely mentioning `dress` or clothes in a scene description never triggers the outfit guard on cat/background/product scenes.
+- **Pose reference**: a slot named as a pose source in the topic (`2번 이미지의 포즈를 따라`, `이미지 3의 자세`, `use pose from image 4`) is used for posture only. **Any slot 1~10**, and several at once (`3번과 7번 이미지의 포즈`). That slot is excluded from identity/outfit/object roles and is **dropped from the LLM vision input** — it reaches the image model through the pixel path only. Pose is a pixel signal, so the LLM does not need to see it, and seeing it costs time and leaks that person's face and clothing into the subject. Positive says "take only the posture, never their face/clothing/background"; negative names exactly those leaks.
+  - Two-person poses work: `1번 이미지 여성 신원, 2번 이미지 남성 신원, 3번 여성 포즈, 4번 남성 포즈` gives each person their own pose. The remaining 1·2 are held by the duo anchor as two identities, and the LLM sees only those two.
+  - **Just write the number plus what they are doing.** `2번은 포즈만`, `2번 앉은 자세`, `2번 손에 든 상태`, `3번 서 있는 모습`, `2번 leaning` are all recognised as pose slots — no role noun required. The noun form (`이미지 2의 포즈`) keeps working too.
+  - Connecting images alone does nothing for pose — the pose role must be stated in the topic. (Character sheets are the exception: they are detected from pixels.) No new widget.
+- **Outfit swap**: just write the numbers — `2 의상, 1 교체` (same style as pose). The `이미지` label is optional. Accepted: `2 의상, 1 교체` · `2번 의상, 1번 교체` · `2 의장, 1 적용` · `2번 옷, 1번 변경` · `2번 의장을 1번에 입혀` · `1번에 2번 의장을 입혀` · `2번 의장을 1번 인물에게 입히고` · `이미지 2 의상을 이미지 1에 적용`. Outfit words include `의상`·`옷`·`옷차림`·`의장`·`생활복`·`드레스`·`원피스` and similar.
+  - **The first number is the outfit source, the last number is the swap target.** `2 의상, 1 교체` means "put the outfit from slot 2 on the person in slot 1". The order does not matter (`1번에 2번 의장을 입혀` is the same thing).
+  - **The target is never treated as an outfit source.** If the target number were counted as an outfit source, that person would be excluded from the identity source and the **subject would disappear from the output** — so source and target are judged separately.
+  - When an outfit word is followed by a **wearing verb** (`2번 드레스를 입은 여성`), that slot is the **person wearing it**, not an outfit source (excluding them from the identity source would delete them).
+  - Connecting images alone does nothing for outfit — the role must be stated in the topic. No new widget.
+- **Physics & space guard**: contact/action wording in the topic (`벽에 밀어붙였다`, `던진다`, `안고 있다`, `붙잡고 끌어당긴다`, `부딪친다`, `달리고 있다`, `공격한다`) is translated into an image-side physical state on both sides. "Pressed against the wall" becomes "bodies touching with no gap, weight visibly transferred" on positive and "standing apart, no contact" on negative. Throw / run / fall / impact also get mid-action framing (airborne posture, contact shadow, center of gravity), while still scenes get `no motion blur` instead so the subject does not smear. Ordinary people scenes with no contact wording still get the minimum physics (contact shadow, center of gravity). Not applied to animal, product, or landscape scenes.
+  - This guard does **not** produce exact joint angles — that is ControlNet OpenPose territory. Its job is to move the model's convergence point away from "two figures standing side by side" toward actual contact, flight, or impact. No new widget.
+- **Three common failures with reference images, defended against**:
+  - **Part-level detail boundaries** — auto-attached when the topic is a person and 1+ reference is connected. Real testing showed legs, arms and shoulders turning mushy in reference runs, which is *not* blur (focus) but **eroded part boundaries**, so it gets its own wording (legs separate from each other and from the background, arms from the torso, finger joints, knee/elbow lines, fabric weave and seams). Not applied to text-only generation.
+  - **Furniture / prop DNA** — auto-attached to **every secondary slot** except the main subject, additional people, and pose references. You do not need to write "use the bed from image 2". Like people, furniture and props have a DNA: unless the user says otherwise, silhouette, material, colour, proportions, part count and in-frame position must match. Negative says "do not substitute a different object" plus **"near-miss furniture"** — because the more common failure is a *slightly* different colour, pattern or proportion. Slots explicitly marked mood/lighting-only (`분위기만`, `조명만`) are exempt.
+  - **Removed-item remnants (the debris problem)** — always attached on people topics, no topic wording needed. Whether to remove something is the model's call; what must be blocked is **leaving a fragment**. Negative states a removed item is either fully gone or fully kept — half an object, a scrap, debris, or a floating accessory is always wrong. Clothing and accessory fragments are covered too, not just shoes.
+- **Limb and digit counts** — always attached on people topics. Positive states `exactly five fingers on each hand (one thumb plus four) · five toes on each foot · two arms ending in two hands · two legs ending in two feet · both sides symmetrical · every limb separated from its neighbour`. Negative blocks the *actual* failure shapes rather than just "too many": fused fingers, fingers split down the middle, mitten hands, fingers merging into the palm, fused toes, feet merged into one blob, three arms, three legs — because a sixth finger is usually two fingers fused or one split, not an extra one.
+  - **Limit (honest)**: text cannot *enforce* counts. A diffusion prior is a soft probability, so compliance is never guaranteed. The reliable paths are ① **KSampler denoise 0.4–0.6** (preserves the source hand pixels) ② **ControlNet OpenPose** ③ a detailer pass, in that order. This guard helps by not fighting ① — it asks the model to keep what the reference already got right.
+- **denoise 1.0 caveat**: the preflight check warns. `denoise` is "how much to redraw", so 1.0 barely uses the source pixels and effectively regenerates from scratch. **0.6~0.8** is recommended to preserve reference shape, colour and detail. At 1.0 fine detail (legs, arms, shoulders, hands) degrades first and furniture drifts far from the reference.
+- **Pixel spacing measurement (no topic needed)**: with 2+ reference images and no action wording in the topic, the node measures the **distance between subjects and the bottom margin** straight from the reference pixels (numpy only, no new dependency). Close → "stay in contact", measurably apart → "keep that separation", bottom margin → "keep the same amount of floor visible". So the reference's spatial relationship survives even if you never type "pressed against the wall". The console prints the measurement, e.g. `픽셀 공간 측정 (간격 0% · 영역 1개 · 근접 · 하단 여백 8%)`.
+  - The gap is graded in three steps: touching / apart / **far apart at opposite frame edges** (two people at the left and right edges get a "wide empty space" instruction, not a "moderately separated" one). Vertically stacked arrangements (lying, stairs, top-down) are detected separately and get a "do not align them on the same level" instruction. Two touching people are detected by counting two heads; silhouette width is deliberately not used because a close-up single person measured wider (0.50) than a touching pair (0.44) in testing.
+  - Limit: without segmentation it only reads **how far apart** things are. How many people, and whether it is a fight or an embrace, is left to the topic text. External segmentation models (YOLO-World, SAM, GrabCut) are deliberately not used — install friction and GPL-3.0 licensing; this node stays dependency-free.
 - If the topic already names a camera shot (`full-body shot`, `close-up shot`, `wide shot`, …), your shot wins over the default camera shot.
 - On people-reference image scenes, a `face and body preservation guard` is added. It keeps the original face structure, pelvis/hip/shoulder/waist ratios, and skin tone, and stops background color from spilling onto skin. Not applied to product/cat/background-only scenes.
 - `prompt_out` carries a generic positive quality guard: natural skin, normal human proportions, five fingers, natural face, identity consistency.
@@ -70,7 +97,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 - If `text` is a widget: right-click → **Convert widget to input**, then connect the `prompt_out` line.
 - On recent ComfyUI, dragging `prompt_out` over `text` converts it into an input slot.
 - `positive_out`: with `prompt_in` connected, merges Qwen `positive_prompt`, a short reference identity anchor, and camera phrases into one string, encoded once with the final CLIP. The identity anchor is added only with people references; original reference latents travel via connected reference images + `vae`. Single-person anchors and duplicate negatives don't apply to explicit multi-person scenes, and duplicate suppression is skipped on window/mirror/reflection scenes. Pelvis/body measurement phrases never go into the public Qwen path. `positive` conditioning is ignored on the new path.
-- `negative_out`: keeps your existing negative conditioning if connected, then only merges camera/video failure modes. On the single-reference path only `multiple people`, `duplicate person`, `cloned person`, `mirrored twin`, `background person` are added for duplicate suppression. `extra arms`, `face mismatch`, and skin-tone contamination guards are NOT added. Negative is encoded text-only without vision, so Qwen Vision encoding runs once for positive only, and `reference_latents` attach to positive only. LLM-suggested extra negatives (llm tier) are merged after the camera negatives.
+- `negative_out`: keeps your existing negative conditioning if connected, then only merges camera/video failure modes. On the single-reference path only `multiple people`, `duplicate person`, `cloned person`, `mirrored twin`, `background person` are added for duplicate suppression. However, on a human topic (or when the topic is empty and there is no basis to judge) the shared base block is always added: anatomy, identity and skin-tone contamination guards (`extra arms`, `face mismatch`, `plastic waxy skin`, `background color spill on skin`, ...). Both paths (base/Skills) use the same shared block. Negative is encoded text-only without vision, so Qwen Vision encoding runs once for positive only, and `reference_latents` attach to positive only. LLM-suggested extra negatives (llm tier) are merged after the camera negatives.
 - On the `prompt_in` standard path, the outfit-only guard is added when outfit-swap intent is explicit with 2+ images, and with multiple images one secondary-reference role-restriction sentence is added. Single images get no role guards.
 - Naming two people across 2 images (e.g. `Image 1's woman and Image 2's man facing each other`) switches to the 2-person duo guard. Slots 3–8 are recognized the same way (`Image 3's man`, `Image 8's woman`, …). `Exactly one main person` suppression, duplicate-person negatives, and role restrictions are all dropped; identity-preservation phrases for those slots go in instead. A two-way body-separation phrase blocks the two bodies merging into one or limbs getting mixed. Outfit-swap phrases are never mistaken for duo.
 - On the standalone path (`prompt_in` disconnected), positive gets face/body/outfit legacy guards, while negative carries only camera failure modes by current policy. For two-sided positive defense, connect `prompt_out` to a separate CLIPTextEncode and reinforce negative yourself.
@@ -92,6 +119,8 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 >
 > 💡 For **finished prompts** from outside, `automation = 수동 (manual)` is recommended (original preserved + camera clauses only)
 > - Console `in=topic 칸` / `in=외부(prompt_in)` tells you which side was used
+
+> ⚠ **Images connected with an empty topic**: there is nothing telling the node what each reference is *for* (character sheets are detected from pixels; pose and person roles are not). It then falls back to `image_1` = main subject, the rest = background/composition/lighting only, and copies no face or clothing. The console logs `⚠ topic 이 비어 있어 참조 이미지의 역할을 구분하지 못했습니다`. Name the roles to get them followed, e.g. `2번은 포즈만, 3번은 1인 캐릭터 시트`.
 
 ## 2b. Output contract
 
@@ -257,7 +286,26 @@ GEMINI_API_KEY=...
 | `keywords_ko_en.json` | auto-tier KO/EN keyword dictionary — add entries freely |
 | `SHOT/LENS/ANGLE/...` in `camera_director.py` | Change camera items and English clauses themselves |
 
-## 6. Verification checklist
+## 6. Operating systems (Windows / macOS / Linux)
+
+All three are supported and **verified in CI** (Windows, macOS and Linux x
+Python 3.10/3.12).
+
+- No external pip packages — only \	orch\, umpy\ and \PIL\, which ComfyUI
+  already ships.
+- All paths are built with \os.path\, so Windows backslashes and macOS/Linux
+  slashes behave identically, including when the node folder is installed as a
+  **symlink**.
+- API keys written to \.env\ get permission 600 (owner-only) on Linux/macOS,
+  and the file is replaced atomically, so a failure never destroys an existing
+  key.
+- On Apple Silicon (M1/M2/M3) there is no \mediapipe\ wheel, so the person
+  mask and pose-based pixel checks switch off automatically. Everything else
+  (lighting flow, spacing, reference lighting conflicts, edge analysis) uses
+  only \	orch\/umpy\ and keeps working.
+- CUDA (NVIDIA), MPS (Apple Silicon) and CPU all run without exceptions.
+
+## 7. Verification checklist
 
 - [ ] 1. Shows in the node list after install
 - [ ] 2. `직접 설정 (custom)`+`85mm` etc. → English clauses in output
@@ -269,7 +317,7 @@ GEMINI_API_KEY=...
 - [ ] 8. Preset vs direct-setup behavior check
 - Local logic pre-check: `python tests/test_node.py` (auto verification)
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -278,12 +326,13 @@ GEMINI_API_KEY=...
 | llm tier gives rule-level results | Check console `LLM 실패` message (key·model name·Ollama running?) |
 | Topic (Korean) echoed in output | `auto/manual` tiers can't translate → switch tier to `llm` |
 | Broken Korean glyphs in image text | Model lacks Korean (Flux/SDXL) → Qwen-Image family or separate overlay |
+| `⚠ could not remove the API key from photo metadata` | ComfyUI did not inject `unique_id` as a hidden input, so the scrub was skipped. The node runs fine but **the key may remain in the saved PNG.** Use the node right-click → *Clear api_key (for sharing)*, or check your ComfyUI version |
 | 📷 shows as `?` in console | Windows console codepage issue — output text itself is fine (cosmetic) |
 | Quality/person drift on regen | See storyboard guide §8 below (fixed original reference + `manual` lock) |
 | Plastic-looking skin | Drop `flawless/smooth` from the front prompt; grainy grades like `시네마틱 필릭`·`35mm 필름`. The node auto-adds pore/texture/directional-light/grain phrases on people scenes. For pore/peach-fuzz detail use lens `100mm 매크로` + people topic (not applied to products) |
 | Smeared anatomy on exposure scenes | Exposure intent (`nude/나체` etc.) auto-adds clinical-completion (positive) and smear-guard (standalone negative). Caveat: explicit detail is bounded by model safety tuning — closer framing, even lighting, lower denoise, and higher resolution help more |
 
-## 8. Storyboard chains (quality·consistency)
+## 9. Storyboard chains (quality·consistency)
 
 Chaining (reusing each output as the next reference) is a **copy of a copy** — quality and identity drift a little every generation (VAE round-trip loss + resampling + Edit-model reinterpretation). For consistent storyboards:
 
@@ -297,7 +346,7 @@ Chaining (reusing each output as the next reference) is a **copy of a copy** —
 6. **Low denoise on regen** — higher Edit/second-pass denoise drifts further from the original (KSampler-side setting).
 7. **Only prompts change per cut** — backgrounds·actions·lines via `prompt_in`/topic only; hands off camera·people·settings.
 
-## 9. Credits·License
+## 10. Credits·License
 
 - Camera prompt composition rules: `higgsfield-ai/skills` (MIT) — prompt-engineering / thumbnail house-structure / video explainer blocks
 - This node: MIT (same as the source)

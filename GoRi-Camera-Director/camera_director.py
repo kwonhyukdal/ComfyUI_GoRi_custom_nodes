@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """camera_director.py — Camera Director 노드 본체.
 
 주제 한 줄(한글 OK) + 프리셋/자동화(tier) → 카메라 조항이 포함된
@@ -26,7 +26,11 @@ try:
 except ImportError:  # 스탠드얼론/테스트 실행용
     import llm_client
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# 왜(Why) realpath인가: macOS/Linux 개발에서는 `custom_nodes/노드폴더`를 개발
+# 폴더로 심볼릭 링크하는 것이 흔하다. abspath는 링크 경로를 그대로 쓰므로
+# keywords_ko_en.json·presets.json을 못 찾아 내장 기본값으로 조용히 떨어진다
+# (사용자에게는 "설정이 안 먹힌 것처럼" 보인다). realpath는 링크를 따라간다.
+HERE = os.path.dirname(os.path.realpath(__file__))
 
 
 def _log(msg: str) -> None:
@@ -296,7 +300,11 @@ def _release_vram() -> None:
     """실행 후 GPU 조각 반납. 왜(Why): reference VAE latent 캐시 등 실행 중
     잡은 VRAM 조각이 다음 노드(KSampler 등)에 넘어가기 전 정리된다.
     LRU 캐시 자체는 유지하므로(재실행 속도 불변) 수십 ms 비용뿐이다.
-    torch가 없어도 조용히 통과한다."""
+    torch가 없어도 조용히 통과한다.
+    왜(Why) MPS도 같이 비우는가: macOS(M1/M2/M3)는 CUDA가 아니라 MPS 메모리
+    파서를 쓴다. cuda만 비우면 맥에서는 이 함수가 아무것도 안 해서, 통합
+    캐시 정리 의도가 그대로 전달되지 않는다. hasattr 가드로 CPU/MPS 없는
+    환경에서도 예외 없이 통과한다."""
     try:
         import gc as _gc
         _gc.collect()
@@ -304,6 +312,13 @@ def _release_vram() -> None:
             import torch as _t
             if hasattr(_t, "cuda") and _t.cuda.is_available():
                 _t.cuda.empty_cache()
+            mps = getattr(_t, "mps", None)
+            if mps is not None and hasattr(mps, "empty_cache"):
+                try:
+                    if mps.is_available():
+                        mps.empty_cache()
+                except Exception:
+                    pass
         except Exception:
             pass
     except Exception:
@@ -355,6 +370,41 @@ def _scrub_api_key_from_prompt(prompt, unique_id) -> bool:
         return False
 
 
+# 사진 메타데이터 scrub 실패 경고는 **프로세스당 1회**만 (매 실행마다 찍으면
+# 로그가 지저분해져 경고가 눈에 띄지 않는다 → 경고의 목적을 잃는다).
+_SCRUB_WARNED = set()
+
+
+def _warn_scrub_unavailable(api_key, prompt, unique_id) -> None:
+    """api_key가 실행 기록에 남을 수 있는데 지워지지 않았을 때 1회 경고.
+
+    왜(Why) 이게 조용한 실패인가: 이 scrub는 **hidden 입력 주입**에 의존한다
+    (ComfyUI가 `unique_id`/`prompt`를 hidden으로 넘겨줘야 한다). 코어가
+    주입 방식을 바꾸면 노드는 **에러 없이 정상 실행**되고, 대신 사진 PNG의
+    메타데이터에 API 키가 그대로 남는다. 사용자가 알 수 있는 단서는 이것뿐이므로,
+    못 지웠으면 반드시 말해야 한다.
+    """
+    try:
+        if not (api_key or "").strip():
+            return                      # 키가 없으면 남을 것도 없다
+        if unique_id is not None and isinstance(prompt, dict):
+            return                      # 정상 경로(스크럽 성공/키 없음)는 경고 안 함
+        _tag = f"uid={'none' if unique_id is None else type(unique_id).__name__}"
+        if _tag in _SCRUB_WARNED:
+            return
+        _SCRUB_WARNED.add(_tag)
+        _reason = ("hidden 입력으로 unique_id가 주입되지 않음"
+                   if unique_id is None else
+                   f"hidden prompt 입력 형식이 예상과 다름 ({type(prompt).__name__})")
+        _log(f"⚠ [GoRi Camera Director] 사진 메타데이터에서 API 키를 지우지 "
+             f"못했습니다 ({_reason}). ComfyUI 버전 변경으로 hidden 주입 방식이 "
+             f"바뀐 것일 수 있습니다. 저장된 이미지(PNG)는 공유하기 전에 "
+             f"메타데이터에서 키를 확인해 주세요. 공유용으로는 노드 우클릭 "
+             f"→ 'api_key 지우기(공유용)' 을 사용하세요.")
+    except Exception:
+        pass
+
+
 def _write_env_file_key(env_name: str, key: str) -> bool:
     """루트 .env에 키 저장/삭제. key가 비면 해당 줄 삭제. 성공 여부 반환.
 
@@ -380,18 +430,58 @@ def _write_env_file_key(env_name: str, key: str) -> bool:
             s = line.strip()
             if s and not s.startswith("#") and "=" in s:
                 k, _, _v = s.partition("=")
-                if k.strip() == env_name:
+                # `export KEY=...` 형태 정규화. 왜(Why): 이 접두사가
+                # 붙은 채면 키 이름이 "export OPENAI_API_KEY" 가 돼
+                # 1) 읽기가 실패하고 2) 쓰기가 **중복 라인을 추가**한다 →
+                # 옛 키가 디스크에 그대로 남는다(비밀 잔존).
+                raw_key = k.strip()
+                prefix = ""
+                if raw_key.lower().startswith("export "):
+                    raw_key = raw_key[7:].strip()
+                    prefix = "export "
+                if raw_key == env_name:
                     found = True
                     if key:
-                        out.append(f"{env_name}={key}")
+                        out.append(f"{prefix}{env_name}={key}")
                     continue
             out.append(line)
         if key and not found:
             out.append(f"{env_name}={key}")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(out) + ("\n" if out else ""))
+        _write_env_file(path, out)
         return True
     except (OSError, UnicodeError):
+        return False
+
+
+def _write_env_file(path: str, lines) -> bool:
+    """.env를 **원자적으로** 쓰고, POSIX에서는 소유자만 읽도록 권한을 낮춘다.
+
+    왜(Why) 원자적 쓰기인가: 그대로 `open(path, "w")` 하면 truncate 직후
+    예외가 나면 **키가 들어 있던 파일이 통째로 사라진다**. 임시 파일에 먼저
+    쓰고 os.replace로 교체하면 교체 전까지 기존 파일은 그대로 남는다.
+    (os.replace는 Windows에서도 동일 파일에 대해 원자적이며, 대상이 열려
+    있어도 Windows가 자체적으로 실패시키므로 안전.)
+
+    왜(Why) chmod인가: 리눅스/macOS의 기본 umask는 022라 `open("w")`로
+    쓰면 0644가 되고 **같은 머신의 다른 사용자도 API 키를 읽을 수 있다.**
+    Windows는 ACL 모델이라 chmod가 없어 적용하지 않는다(오류도 무시).
+    """
+    tmp = f"{path}.gori_tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + ("\n" if lines else ""))
+        try:
+            os.chmod(tmp, 0o600)
+        except (OSError, AttributeError, NotImplementedError):
+            pass          # Windows: chmod 의미 없음. 무시해도 안전.
+        os.replace(tmp, path)
+        return True
+    except (OSError, AttributeError):
+        # 임시 파일이 남지 않게 정리하고 원본은 건드리지 않는다.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         return False
 
 
@@ -698,6 +788,17 @@ QUALITY_GUARD = (
      "clear facial features, consistent subject identity"
 )
 
+# 동물 전용 주제의 대체 가드. 왜(Why) 별도 상수인가: QUALITY_GUARD 의
+# "believable hands with five fingers" 는 "개는 사람처럼 그리지 말라"와
+# 같은 프롬프트 안에서 정면 충돌한다(2026-09-28 실측). "when people are present"
+# 절은 proportions 에만 걸려 있고 손·피부는 무조건 붙는다.
+QUALITY_GUARD_ANIMAL = (
+    "high visual quality, "
+    "correct animal anatomy and natural species proportions, "
+    "detailed fur or feather texture, natural coat pattern, "
+    "clear eyes, consistent subject identity"
+)
+
 FACE_IDENTITY_GUARD = (
     "facial identity lock, preserve original face structure, same eye shape, same nose and mouth, "
     "same jawline, same facial proportions, same age and ethnicity, do not change face identity"
@@ -725,6 +826,24 @@ NEGATIVE_COLOR_CONTAMINATION_GUARD = (
     "orange color cast on skin"
 )
 
+# base run(build_negative) 과 Skills run(build_camera_negative) 이 **공유**하는
+# negative 기본 블록. 두 함수가 각자 하드코딩해서 Skills 경로에서 watermark /
+# flat lighting / washed out 이 조용히 빠졌다(2026-09-28 실측: base 1669자 →
+# Skills 1063자). base 는 CameraDirector 라는 **비등록 내부 클래스**라 사용자에게
+# 노출되지 않으므로 Skills 만 고치면 실질적으로 아무것도 고쳐지지 않는다.
+# 한 곳에 두면 앞으로 한쪽만 고치는 일이 구조적으로 불가능해진다.
+#
+# 주의: **사람 전용 가드는 여기 넣지 않는다.** 예전에
+# NEGATIVE_ANATOMY_GUARD / NEGATIVE_COLOR_CONTAMINATION_GUARD 를 넣었더니
+# 동물 주제에 "plastic waxy skin / different person" 이 붙는 회귀가 생겼다.
+# 사람 여부로 게이트되는 항목은 각 함수에서 _is_human_subject 로 판단한다.
+_NEGATIVE_BASE_COMMON = (
+    "blurry, soft focus, jpeg artifacts, watermark, signature, text, logo",
+    "warped geometry, distorted perspective, broken framing",
+    "flat lighting, harsh unflattering light",
+    "washed out colors, over-saturated colors",
+)
+
 OUTFIT_GUARD = (
     "outfit transfer guard: the main person reference image is only the identity and body reference, "
     "the clothing reference image is only a clothing and wardrobe reference, not a body reference, "
@@ -750,9 +869,15 @@ OUTFIT_RELATION_PATTERNS = (
 def _is_outfit_transfer(text: str) -> bool:
     """단순히 'dress/옷'이 있는 scenes가 아니라, image_N을 의상 참고로 쓰라는 의도만 판별한다."""
     t = (text or "").lower()
-    if not (re.search(r"\b(?:image|img)\s*_?\d+", t) or re.search(r"이미지\s*_?\d+", t)):
+    has_ref = bool(re.search(r"\b(?:image|img)\s*_?\d+", t)
+                   or re.search(r"이미지\s*_?\d+", t))
+    has_slot = bool(_clothing_role_slots(t) or _outfit_target_slots(t))
+    if not (has_ref or has_slot):
         return False
-    return any(re.search(pattern, t) for pattern in OUTFIT_RELATION_PATTERNS)
+    if any(re.search(pattern, t) for pattern in OUTFIT_RELATION_PATTERNS):
+        return True
+    # 슬롯 번호 + 의상 어휘 + 교체 동사가 함께 있으면 의상 참고 의도다.
+    return bool(_clothing_role_slots(t)) and bool(_outfit_target_slots(t))
 
 
 def _reference_items(image_items=None, image_list=None, image=None):
@@ -778,9 +903,20 @@ def _reference_items(image_items=None, image_list=None, image=None):
     return items
 
 
+# 인물 주제 판정 어휘. 왜(Why): 실측에서 "1번 캐릭터를 앉힌다"가 인물로
+# 잡히지 않아 해부·발란스·디테일 경계 가드가 **전부** 조용히 미작동했다.
+# "캐릭터"는 한국어 촬영 씬에서 가장 흔한 인물 지칭인데 빠져 있었다.
+# ("인물 " 앞의 공백은 " 인물"이 접두어로 걸리는 것을 막기 위한 잔재 — 정리)
+# "model"은 단독으로 넣지 않는다 — "3D model of a car" 같은 사물 모형까지
+# 사람으로 잡힌다. 사람이 쓰는 경우만 "fashion model"로 좁힌다. (기존에도
+# 단독이 아니라 "fashion model"만 넣었으나, 실측 테스트가 "3D model" 검사를
+# 걸도록 이 형태를 유지한다. 아래에서 "model"을 빼면 그 테스트가 깨진다.)
 HUMAN_SUBJECT_KEYWORDS = (
-    "woman", "women", "female", "girl", "lady", "human", "person", "people", "man", "men", "male",
-    "fashion model", "portrait", "_character", "아이", "인물", "여성", "남성", "여자", "남자", "사람", "모델", " 인물"
+    "woman", "women", "female", "girl", "lady", "human", "person", "people",
+    "man", "men", "male", "boy", "actor", "actress",
+    "fashion model", "portrait", "_character",
+    "캐릭터", "인물", "여성", "남성", "여자", "남자", "사람", "아이",
+    "소년", "소녀", "남아", "여아", "주인공", "인물체", "모델",
 )
 
 # "3D model of a car"처럼 사물 모형을 가리키는 표기. 왜(Why): 영어 "model"
@@ -792,11 +928,30 @@ _MODEL_OBJECT_PATTERN = re.compile(r"(?:3d|3-d|3차원|scale)\s*(?:model|모델)
 
 def _is_human_subject(text: str) -> bool:
     t = (text or "").lower()
+    # **의상 교체** 표현은 사람을 함의한다(2026-09-29 실측 결함 수정).
+    # "1 의상, 2 교체" 에는 인물 키워드가 하나도 없어서 이 함수가 False 였다.
+    # 결과적으로 identity 앵커·해부·발란스 등 **인물 가드가 전부 조용히
+    # 미작동**했다(프롬프트에 사람이 없으니 의도한 것도 아니고). 옷을 입는다는
+    # 것은 결국 그 옷을 입을 사람이 있다는 뜻이므로 사람으로 친다.
+    # 단, **동물/인물 키워드가 명시됐으면 그쪽이 우선**이다
+    # (혼재 장면에서 "강아지" 가 있는데 사람 가드까지 붙으면 오탐).
+    if _is_outfit_transfer(t):
+        for animal in ANIMAL_SUBJECT_KEYWORDS:
+            if animal in t:
+                return False
+        return True
     if _MODEL_OBJECT_PATTERN.search(t):
         keywords = tuple(k for k in HUMAN_SUBJECT_KEYWORDS
                          if k not in ("fashion model", "모델"))
         return any(keyword in t for keyword in keywords)
-    return any(keyword in t for keyword in HUMAN_SUBJECT_KEYWORDS)
+    for keyword in HUMAN_SUBJECT_KEYWORDS:
+        if keyword in _ASCII_AMBIGUOUS:
+            # 원자(holder) 후보: 단어 경계가 없으면 오탐
+            if _ascii_word_present(t, keyword):
+                return True
+        elif keyword in t:
+            return True
+    return False
 
 
 # 동물 주제 판별. 왜(Why): 인물 키워드만 있어서 "강아지" 주제는 어떤 가드에도
@@ -828,6 +983,90 @@ ANIMAL_ANATOMY_NEGATIVE = (
 )
 
 
+# 한국어 명사 뒤에 붙는 조사·수량사 ��들만 "그 단어를 썼다"로 인정한다.
+# 왜(Why) 이 목록이 필요한가: 한국어는 어절이 공백으로 분리되지 않아
+# `keyword in text` 로는 "소파/태양/양옆" 이 "소/양" 으로 잡힌다(2026-09-28 실측).
+# 사람이 있는 장면이 동물로 분류되면 인체 가드가 전부 사라진다.
+_KO_SUFFIX_CHARS = (
+    "가"          # 주격
+    "이가을를"    # 목적격/보조격
+    "은는"        # 보조사
+    "과와"        # 조화
+    "의"          # 관형
+    "에"          # 방향
+    "에서"        # 출발
+    "로"          # 방향
+    "만"          # 제한
+    "도"          # 주제
+    "까지"        # 한계
+    "부터"        # 기점
+    "에게"        # 간접목적
+    "한테"        # 간접목적
+    "그"          # 관형
+    "것"          # 명사화
+    "들"          # 복수
+    "한"          # 수량
+    "두세"        # 수량
+    "마리"        # 가축 계수
+    "짝"          # 짝
+    "층"          # 층
+)
+
+
+def _ascii_only(word: str) -> bool:
+    """영문 단어인지 (한글 어휘는 조사 규칙이 다르다)."""
+    return all(ord(c) < 128 for c in word)
+
+
+def _ko_word_present(text: str, word: str) -> bool:
+    """한국어 단어가 독립형으로 쓰였는지 판정한다.
+
+    **앞뒤 양쪽**을 본다. 한쪽만 보면 접합을 못 잡는다(2026-09-28 실측):
+      - 뒤만 보면: "소파" 의 "소" 를 통과("파" 가 조사 아님 → 이건 OK),
+        "고양이" 의 "양" 이 "이"(조사) 때문에 통과 → **오탐**
+      - 앞만 보면: "태양" 의 "양"(앞이 "태") → **오탐**
+    규칙: 앞 글자는 한글이면 거부(접합), 뒤 글자는 조사/수량사면 인정.
+    어휘 목록에 "고양이"/"강아지" 같은 결합형이 이미 들어 있으므로
+    정작 그 단어는 앞 글자가 공백이라 정상 통과한다.
+    """
+    start = 0
+    while True:
+        i = text.find(word, start)
+        if i < 0:
+            return False
+        if i > 0 and "가" <= text[i - 1] <= "힣":
+            start = i + 1          # 앞이 한글 = 앞 단어의 일부
+            continue
+        nxt = text[i + len(word): i + len(word) + 1]
+        if nxt == "" or not ("가" <= nxt <= "힣"):
+            return True
+        if nxt in _KO_SUFFIX_CHARS:
+            return True
+        if nxt == "까" and text[i + len(word):i + len(word) + 2] == "까지":
+            return True
+        if nxt == "부" and text[i + len(word):i + len(word) + 2] == "부터":
+            return True
+        start = i + 1
+    return False
+
+
+# 영문 어휘는 단어 경계로만 매칭한다. 왜(Why): `man` 이 "romantic/german/
+# manicured" 안에서, `cat` 이 "catalogue", `bear` 가 "bearable" 안에서 잡혔다
+# (2026-09-28 실측). 풍경·사물 주제가 인물/동물로 분류되면 인물 가드가 붙거나
+# 인체 가드가 빠진다.
+_ASCII_AMBIGUOUS = frozenset({
+    "man", "men", "woman", "women", "cat", "bear", "pig", "dog", "hen", "ewe",
+    "goat", "rat", "ram", "ape", "fox", "elk", "gnu", "imp", "kid", "nut",
+    "pet", "cod", "boa", "carp", "sole", "hart", "crane", "newt", "toad",
+})
+
+
+def _ascii_word_present(text: str, word: str) -> bool:
+    """영문 단어를 단어 경계로만 찾는다 (\b 매칭)."""
+    import re as _re
+    return bool(_re.search(r"\b" + _re.escape(word) + r"\b", text))
+
+
 def _is_animal_subject(text: str) -> bool:
     """동물 주제면 True. 인물 키워드가 명시되면 사람 우선(장면 혼재 대응)."""
     t = (text or "").lower()
@@ -835,7 +1074,13 @@ def _is_animal_subject(text: str) -> bool:
         return False
     if _is_human_subject(t):
         return False
-    return any(keyword in t for keyword in ANIMAL_SUBJECT_KEYWORDS)
+    for keyword in ANIMAL_SUBJECT_KEYWORDS:
+        if _ascii_only(keyword):
+            if _ascii_word_present(t, keyword):
+                return True
+        elif _ko_word_present(t, keyword):
+            return True
+    return False
 
 
 def body_proportion_guard(image_count: int, topic: str, image_labels=None) -> str:
@@ -982,6 +1227,18 @@ SECOND_PERSON_PATTERNS = (
     r"(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)[^,，.。;；!！?？\n]{0,20}?(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
     r"두\s*번째\s*(?:사람|남자|남성|여자|여성|인물)",
     r"second\s+(?:person|man|woman|male|female)",
+    # 번호 선행형: "2번 이미지의 남성이" — 위 4개 패턴은 모두 이미지 표기가
+    # 앞에 오는 구문만 커버한다. 자연스러운 "N번 이미지" 표현을 놓치면
+    # 두 번째 인물이 보조 역할(배경/소품)로 오분류된다.
+    r"([2-9]|10)\s*(?:번|번째)\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*[^,，.。;；!！?？\n]{0,20}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)",
+    r"([2-9]|10)\s*(?:번|번째)\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b",
+    # 번호 **나열**형: "1번과 2번 인물이", "2번·3번", "image 1 and image 2".
+    # 위 패턴들은 "2번 이미지의 남성이"처럼 **한 슬롯만 지칭**하는 구문만
+    # 잡는다. 두 슬롯을 함께 나열하는 최상위 표현("1번과 2번 인물이 함께")이
+    # 잡히지 않아 duo 앵커가 빈 문자열로 빠지고, 그 결과 두 번째 참조가
+    # "소품/배경 역할"로 강등됐다(2026-09-28 실측). 캡처 그룹 2개를 모두 수집.
+    r"(?:[1-9]|10)\s*(?:번|번째)\s*(?:와|과|및|그리고|·|,|、|\+)\s*([2-9]|10)\s*(?:번|번째)?[^,，.。;；!！?？\n]{0,16}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람|커플|쌍)",
+    r"\b(?:image|img)\s*_?\s*(?:[1-9]|10)\s*(?:and|&|,)\s*(?:image|img)?\s*_?\s*([2-9]|10)\b[^,，.。;；!！?？\n]{0,24}?\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person|people|couple)\b",
 )
 
 _NUMBER_WORDS = {2: "Two", 3: "Three", 4: "Four", 5: "Five",
@@ -1016,8 +1273,8 @@ _TEMPERED_GAP = (r"(?:(?!남성|남자|여성|여자|인물|사람"
 # (구버전)이 아니라 "의상 슬롯만 제외"로 작동하려면 슬롯 번호를 잡아야 한다
 # (정밀 검토 발견 #3).
 _KO_CLOTHING_WORDS = (
-    "의상|옷|패션|드레스|셔츠|블라우스|바지|원피스|코트|아우터|재킷|자켓|슈트"
-    "|정장|한복|웨딩드레스|구두|신발"
+    "의상|옷|옷차림|의장|생활복|패션|드레스|셔츠|블라우스|바지|원피스"
+    "|코트|아우터|재킷|자켓|슈트|정장|한복|웨딩드레스|구두|신발"
 )
 _EN_CLOTHING_WORDS = "outfit|clothing|wardrobe|dress|shirt|coat|garment|apparel"
 CLOTHING_WORDS = _KO_CLOTHING_WORDS + "|" + _EN_CLOTHING_WORDS
@@ -1041,7 +1298,104 @@ def _role_patterns(words: str, en_words: str):
 
 
 OBJECT_ROLE_PATTERNS = _role_patterns(OBJECT_WORDS, _EN_OBJECT_WORDS)
-CLOTHING_ROLE_PATTERNS = _role_patterns(CLOTHING_WORDS, _EN_CLOTHING_WORDS)
+# 슬롯 번호 + 의상 표현(2026-09-29 추가). 왜(Why): 기존 4패턴은
+# "이미지 2의 의상"(라벨 필수)만 잡았다. 사용자가 "2 의상, 1 교체" 처럼
+# **숫자만** 쓰면 아무것도 안 잡혔다(전수 확인: 6개 표현 전부 미인식).
+# 포즈 슬롯과 같은 취지로 자연스러운 표현을 받아들인다.
+#
+# 제외 조건: 의상 어휘 뒤에 **착용 동사**가 바로 붙으면 그 슬롯은 의상 소스가
+# 아니라 **인물**이다("2번 드레스를 입은 여성" -> 2번은 사람). 의상 소스로
+# 잡으면 그 사람이 신원 소스에서 제외돼 사람이 사라진다(2026-09-29 실측 위험).
+# 주의(Why): 동사는 어휘에서 **직접** 붙어야 한다. "을/ 를" 까지 보면
+# "2번 의장을 1번에 입혀"(= 의상 소스 2번 + 대상 1번)까지 삼켜서 놓친다.
+CLOTHING_ROLE_PATTERNS = _role_patterns(CLOTHING_WORDS, _EN_CLOTHING_WORDS) + (
+    r"(\d{1,2})\s*(?:번|번째)?\s*(?:은|는|의|에|에서|으로)?\s*(?:" + CLOTHING_WORDS
+    + r")(?!\s*(?:을|를|이|가)?\s*(?:입은|입고|입혀|입히|착용|신은|신고))"
+      r"(?![^,，]{0,4}(?:wearing|wears|dressed)\b)",
+    # 역순: "1번에 2번 의장을 입혀" — 의상 소스 뒤에 **대상** 슬롯이 온다.
+    r"(?:\d{1,2}\s*(?:번|번째)?\s*(?:에|에게|한테|의|은|는)\s*)"
+    r"(\d{1,2})\s*(?:번|번째)?\s*(?:은|는|의|으로)?\s*(?:" + CLOTHING_WORDS + r")",
+)
+
+# **교체 대상** 슬롯 — 의상 소스가 아니라 "이 슬롯에 입히라" 는 뜻.
+# 왜(Why) 별도로 둔다(2026-09-29): "2 의상, 1 교체" 에서 1번을 의상 슬롯으로 잡으면
+# 1번(주인물)이 신원 소스에서 제외된다 -> 사람이 사라진다. 캡처 그룹을 만든 채로
+# "제외 패턴"을 넣으면 **반대로** 슬롯이 추가되므로 빼기 전용으로 분리해야 한다.
+# 동사는 슬롯 **앞**(1번에 입혀)이나 **뒤**(1번 교체) 양쪽에 올 수 있다.
+# 주의(Why): 접미에 \\b 를 붙이면 안 된다 — 파이썬이 백스페이스(\x08)로
+# 해석해 정규식이 깨진다(실측: 한국어 동사 매칭이 전부 실패했다).
+_OUTFIT_VERB = (r"(?:교체|바꿔|바꾼|바꾸|바꿜|갈아입|갈아입혀|입혀|입히|입게|적용"
+                r"|변경|변하게|옮겨|wear|swap|replace|change|apply)")
+# "의상 + 을/를 + 대상 슬롯" — 대상은 소스가 아니다.
+# 골격 패턴 2번(의상 → 이미지 N)이 여기서 1번을 의상 소스로 오염시킨다(2026-09-29 실측).
+# 주의(Why) 여기서는 "이미지 N(을) V" 형태만 뺀다. 라벨+V 형태를 넣으면
+# "이미지 2 의상" 의 **2번(진짜 소스)** 까지 잡혀 소스가 사라진다(실측).
+_OUTFIT_APPLY_SLOT_PATTERNS = (
+    r"(?:" + CLOTHING_WORDS + r")\s*(?:을|를)?\s*(?:은|는)?\s*"
+    r"(?:image|img|이미지)\s*_?\s*(\d+)(?![0-9])",
+)
+# 슬롯과 조사 사이에 역할명사가 끼는 형태: "1번 인물에게 입히고".
+# 실제로는 아주 흔하다(사람을 지칭해야 "입히라" 가 성립하므로).
+_OUTFIT_TARGET_ROLE = r"(?:인물|사람|여자|남자|여성|남성|모델|얼굴|신원|여학생|남학생)?"
+OUTFIT_TARGET_PATTERNS = (
+    # 동사가 슬롯 뒤: "1 교체", "2번 적용"
+    r"(\d{1,2})\s*(?:번|번째)?\s*(?:은|는)?\s*(?:에|로|한테)?\s*" + _OUTFIT_VERB + r"(?![0-9])",
+    # 동사가 슬롯 앞: "1번에 입혀", "1번 인물에게 입히고"
+    r"(\d{1,2})\s*(?:번|번째)?\s*" + _OUTFIT_TARGET_ROLE
+    + r"\s*(?:에게|한테|에|으로|로)\s*" + _OUTFIT_VERB,
+    # 역순 + 동사까지: "1번에 2번 의장을 입혀" (2026-09-29 실측 결함).
+    # 주의(Why): 슬롯과 동사 사이에 **자유 구간**을 두면 안 된다.
+    # "2번 의장을 1번 인물에게 입히고" 에서 왼쪽 2번이 먼저 잡혀 소비되고
+    # finditer 가 1번까지 못 간다(실측: 대상=[] 로 조용히 실패).
+    r"(\d{1,2})\s*(?:번|번째)?\s*" + _OUTFIT_TARGET_ROLE
+    + r"\s*(?:에게|한테|에|으로|로)\s*\d{1,2}\s*(?:번|번째)?\s*(?:의|은|는|을|를)?\s*"
+    r"(?:" + CLOTHING_WORDS + r")[^,，]{0,14}?" + _OUTFIT_VERB,
+)
+
+# 포즈 참조 역할. 왜(Why): 사용자가 "2번 이미지의 포즈를 따라"라고 명시한 슬롯은
+# 신원·의상·사물 소스가 아니라 **자세 전용**이다. DNA(=신원·외양)에서 포즈를
+# 뺀 이유(의도와 무관한 포즈 고정)와 달리, 여기서는 사용자가 직접 지정했으므로
+# 해당 슬롯만 자세 따라하기를 허용한다.
+# **자세 표현 어휘**(슬롯 번호 뒤에 바로 오는 자연스러운 표현).
+# 왜(Why) 넓혔나(2026-09-29 실측): 기존은 "이미지 2의 포즈" 처럼 **역할
+# 명사**(포즈/자세/스탠스/몸매/동작)만 인식했다. 그래서 사용자가
+# "2번은 포즈만", "2번 앉은 자세", "2 서 있는 모습" 처럼 **실제 자세를
+# 묘사**하는 자연스러운 표현을 쓰면 아무것도 안 잡혔다(전부 미인식 실측).
+# 사용자는 "2번" + 무엇을 할지 를 적는 게 자연스럽다. 그래서 자세 묘사
+# 어휘까지 받아들인다.
+_KO_POSE_STATE = (
+    "앉|앉아|앉은|앉는|서있|서 있|선|선상태|서있는|서 있는|서서|누워|누운"
+    "|눕는|쪼그|쪼갠|쪼고|무릎|엎드|일어서|숨을|움직임|움직이는|동작"
+    "|자세|스탠스|몸매|모습|상태|형태|구도|각도|위치|손|팔|다리|발"
+    "|허리|목|고개|뒤통수|엉덩이|골반|어깨"
+)
+_EN_POSE_STATE = (
+    "pose|posture|stance|body ?position|position|angle|leaning|sitting|sit"
+    "|standing|stand|kneeling|kneel|crouching|crouch|lying|lie|reaching"
+    "|holding|arms?|hands?|legs?|bent|lean|smiling|looking|walking"
+)
+_KO_POSE_WORDS = ("포즈|자세|스탠스|몸매|동작|"
+                   + _KO_POSE_STATE + "|" + _EN_POSE_STATE)
+_EN_POSE_WORDS = "pose|posture|stance|body position"
+POSE_ROLE_PATTERNS = _role_patterns(_KO_POSE_WORDS, _EN_POSE_WORDS) + (
+    # "2번 이미지의 포즈" — 번호가 앞서는 한국어 구문. 기존 4패턴은
+    # "이미지 2의 포즈"(뒤에 온다)만 커버해서 자연스러운 표현을 놓쳤다.
+    # 슬롯 번호는 반드시 캡처 그룹이어야 한다(_collect_role_slots 계약).
+    r"(\d{1,2})\s*(?:번|번째|번의)?\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*(?:" + _KO_POSE_WORDS + r")",
+    # "3번과 7번 이미지의 포즈" — 접���으로 나열하면 앞 번호가 뒤 번호 창에
+    # 밀려 잡히지 않았다. 나열 멤버마다 캡처 그룹을 두어 전부 수집한다.
+    r"(\d{1,2})\s*(?:번|번째)\s*(?:와|과|and|,|，)\s*(\d{1,2})\s*(?:번|번째)?\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*(?:" + _KO_POSE_WORDS + r")",
+    # 2026-09-29 추가: "2번은 포즈만" / "2번 포즈만" — 이미지 라벨 없이
+    # 슬롯 번호 + 포즈 역할명사. 사용자가 가장 자주 쓰는 형태다.
+    r"(\d{1,2})\s*(?:번|번째)?\s*(?:은|는|의|에|에서)?\s*(?:"
+      + _KO_POSE_WORDS
+      + r")\s*(?:만|참고|기준|따라|따라가|그대로)?",
+    # "2번은 앉은 자세" / "2 서 있는 모습" / "2번 손에 든 상태" —
+    # 슬롯 번호 + **자세 묘사**(역할명사 없이 실제 자세를 적은 형태).
+    r"(\d{1,2})\s*(?:번|번째)?\s*(?:은|는|이|가|의)?\s*(?:"
+      + _KO_POSE_STATE
+      + r")",
+)
 
 
 def _collect_role_slots(text: str, patterns) -> set:
@@ -1051,15 +1405,17 @@ def _collect_role_slots(text: str, patterns) -> set:
     for pattern in patterns:
         try:
             for m in re.finditer(pattern, t):
-                groups = [g for g in m.groups() if g]
-                if not groups:
-                    continue
-                try:
-                    n = int(groups[0])
-                except ValueError:
-                    continue
-                if 1 <= n <= 10:
-                    slots.add(n)
+                # 캡처 그룹이 여러 개인 패턴(나열형)이 있으므로 전부 수집한다.
+                # 기존 4패턴은 그룹이 하나뿐이라 동작이 달라지지 않는다.
+                for grp in m.groups():
+                    if not grp:
+                        continue
+                    try:
+                        n = int(grp)
+                    except ValueError:
+                        continue
+                    if 1 <= n <= 10:
+                        slots.add(n)
         except (ValueError, re.error):
             continue
     return slots
@@ -1070,8 +1426,56 @@ def _clothing_role_slots(text: str) -> set:
 
     왜(Why): _second_person_slots의 outfit 게이트가 의상 슬롯만 정밀하게
     제외하도록 (구버전은 의상 의도만 있으면 모든 인물 번호를 지웠다).
+    그리고 슬롯 N 교체를 쓰면 그 번호는 **교체 대상**이므로 의상 소스에서
+    빼준다(OUTFIT_TARGET_PATTERNS).
     """
-    return _collect_role_slots(text, CLOTHING_ROLE_PATTERNS)
+    slots = _clothing_source_slots(text)
+    targets = _outfit_target_slots(text)
+    return slots - targets if targets else slots
+
+
+def _clothing_source_slots(text: str) -> set:
+    """의상 소스 슬롯(교체 대상 판정 전 원본)."""
+    slots = _collect_role_slots(text, CLOTHING_ROLE_PATTERNS)
+    # 구버전 결함 교정(2026-09-29 실측): 골격 패턴 2번은
+    # "이미지 2 의상을 이미지 1에 적용" 에서 "의상을 이미지 1" 을 잡아
+    # **1번(주인물)까지 의상 소스로** 밀어 넣었다. 의상 슬롯이 늘어나면
+    # 1번이 신원 소스에서 제외돼 사람이 사라진다.
+    if _has_outfit_apply_verb(text):
+        slots -= _collect_role_slots(text, _OUTFIT_APPLY_SLOT_PATTERNS)
+    return slots
+
+
+def _has_outfit_apply_verb(text: str) -> bool:
+    """의장 교체/적용 동사가 있는 문장인지(대상 슬롯 오염 교정용)."""
+    t = (text or "").lower()
+    return bool(re.search(_OUTFIT_VERB, t))
+
+
+def _outfit_target_slots(text: str) -> set:
+    """교체 대상 슬롯(1~10). 슬롯 N 교체 -> 그 슬롯이 의상 소스가 아니라
+    이쪽에 입히는 대상이다.
+
+    왜(Why) 따로 두나(2026-09-29): 이 슬롯을 의상 슬롯으로 잡으면 **주인물
+    이미지가 신원 소스에서 제외**돼 사람이 사라진다. 캡처 그룹을 만든
+    제외용 패턴을 넣으면 반대로 슬롯이 추가되므로 빼기 전용으로 분리한다.
+
+    왜(Why) 여기서 소스를 다시 빼나(2026-09-29): 슬롯과 동사 사이에 말이 끼면
+    "2번 의장을 1번에 입혀" 에서 **2번(소스)도** 대상 후보로 잡힌다. 그대로
+    빼면 _clothing_role_slots 에서 소스까지 사라져 의상 가드가 통째로 죽는다.
+    순환을 피하려로 _clothing_source_slots(원본) 를 쓴다.
+    """
+    slots = _collect_role_slots(text, OUTFIT_TARGET_PATTERNS)
+    return slots - _clothing_source_slots(text)
+
+
+def _pose_role_slots(text: str) -> set:
+    """포즈 참조 역할이 명시된 번호(1~10) 집합. 없으면 set().
+
+    왜(Why): 포즈 지정 슬롯은 신원·의상·사물 소스가 아니다. 이걸 분리하지 않으면
+    포즈만 빌려오려던 사람이 참조 이미지의 얼굴까지 복사당한다.
+    """
+    return _collect_role_slots(text, POSE_ROLE_PATTERNS)
 
 
 def _second_person_slots(text: str) -> list:
@@ -1105,8 +1509,9 @@ def _is_second_person_request(text: str) -> bool:
     return bool(_second_person_slots(text))
 
 
-def _secondary_role_labels(labels, main=None, persons=()):
-    """보조 역할 목록(주 슬롯·추가 인물 제외)에서 9·10번(외양 참조 전용 슬롯)을 제외한다.
+def _secondary_role_labels(labels, main=None, persons=(), poses=(),
+                           clothing=()):
+    """보조 역할 목록(주 슬롯·추가 인물·포즈 슬롯 제외)에서 9·10번(외양 참조 전용)을 제외한다.
 
     왜(Why): 9·10번의 역할은 외양 참조 가드(APPEARANCE_REF_POSITIVE / LLM
     image_note)가 전담한다. 일반 보조 역할 목록("배경·의상·소품…")에 9·10번이
@@ -1116,6 +1521,12 @@ def _secondary_role_labels(labels, main=None, persons=()):
     주 피사체인 것은 아니다(첫 연결이 핸드백 + 다음이 여성). 넘기지 않으면
     기존 규약(첫 식별 = 주 피사체)대로 첫 슬롯을 제외한다. persons는
     추가 인물로 보존할 번호 -- 추가 인물은 배경/소품 역할 목록에 섞이면 안 된다.
+    poses도 동일: 포즈 전용 슬롯을 "배경·의상·소품 중 요청된 역할" 목록에 넣으면
+    자세 참고 지시와 충돌해 자세가 무시된다(포즈 참조 가드가 전담한다).
+    clothing도 동일(2026-09-29 실측 결함 수정): 의상 소스 슬롯을 일반 보조
+    역할 목록에 넣으면 그 슬롯에 "never their clothing or outfit" 이 붙어
+    **의상 교체 가드와 정면 충돌**한다(같은 프롬프트 안에서 서로 반대 지시).
+    의상 역할은 outfit transfer guard 가 전담한다.
     """
     try:
         main_n = int(str(main)) if main is not None else int(str((labels or ["1"])[0]))
@@ -1123,6 +1534,16 @@ def _secondary_role_labels(labels, main=None, persons=()):
         main_n = None
     person_ns = set()
     for p in (persons or ()):
+        try:
+            person_ns.add(int(str(p)))
+        except (ValueError, TypeError):
+            continue
+    for p in (poses or ()):
+        try:
+            person_ns.add(int(str(p)))
+        except (ValueError, TypeError):
+            continue
+    for p in (clothing or ()):
         try:
             person_ns.add(int(str(p)))
         except (ValueError, TypeError):
@@ -1153,6 +1574,126 @@ def _object_role_slots(text: str) -> set:
     return _collect_role_slots(text, OBJECT_ROLE_PATTERNS)
 
 
+# 가구·사물 DNA 보존 가드. 왜(Why): 사물 역할 문구가 "prop/product 역할로만
+# 써라"까지만 말하면 모델이 **같은 종류의 다른 사물**을 새로 그린다. 실측에서
+# 2번 침대 원본(먼 이불·러그·원목 프레임·쿠션 배치)이 3번 생성물에서 다른
+# 침대로 바뀌었다. 사물도 인물과 마찬가지로 **참조가 곧 DNA**다.
+# 형제 빌더(bass)와는 달리 여기서는 positive/negative를 한 쌍으로 준다.
+FURNITURE_DNA_POSITIVE = (
+    "prop identity guard: every object, furniture piece and prop keeps the exact "
+    "identity of its reference image — same silhouette and construction, same "
+    "material and surface texture, same colour and pattern, same proportions and "
+    "part count, same placement in the frame. Do not substitute a different "
+    "object, a different style, or a cleaner/simpler version of it."
+)
+FURNITURE_DNA_NEGATIVE = (
+    "different furniture, substituted prop, generic furniture, simplified "
+    "version, different material, wrong colour, wrong pattern, missing parts, "
+    "extra parts, changed silhouette, object moved to a different spot"
+)
+
+# "살짝만 달라진 사물" 방어. 왜(Why): 사물 DNA 문구가 "형태를 유지하라"여도
+# 모델은 색·무늬·비율을 조금씩 바꾸며 그린다. 실측에서 침대가 원본과 다른
+# 침대로 바뀌었지만, 더 흔한 실패는 **비슷하지만 다른** 사물이다.
+OBJECT_DRIFT_NEGATIVE = (
+    "object replaced by a similar-looking but different object, near-miss "
+    "furniture, almost-right prop, different fabric pattern, different wood "
+    "tone, different cushion count, tidied-up version, simplified bedding, "
+    "generic bedding, recoloured object, reshaped object"
+)
+
+# 사물 DNA 가드를 **제외**할 슬롯을 지정하는 어휘. 기본은 모든 보조 슬롯에
+# DNA 보존을 적용한다(사용자가 topic에 "침대 원본"을 안 써도 켜져야 한다).
+# 단, style/lighting/mood 전용으로 명시된 슬롯은 "사물 모양"이 아니라 분위기만
+# 빌려오는 것이므로 DNA 보존이 오히려 해롭다.
+NON_OBJECT_SLOT_KEYWORDS = (
+    "style", "style reference", "mood", "moodboard", "lighting reference",
+    "color palette", "colour palette", "grade", "composition reference",
+    "style_only", "분위기", "무드", "분위기만", "색감", "색조",
+    "조명만", "조명참고", "톤", "레퍼런스분위기",
+)
+
+# 찌꺼기 방어는 **항상** 켠다 (사용자 지적: topic에 안 써도 자동으로).
+# 왜(Why): "벗는다"고 써도 안 써도 잔여물 자체는 언제든 틀린 결과다 — 완전히
+# 없거나 그대로여야 하고, 반쪽은 어떤 경우에도 아니다. 트리거를 만들면
+# 사용자가 문구를 외워야 하므로 방어 효과가 반감된다. garment·accessory는
+# 인물이 거의 항상 있는 장면이므로 텍스트 한 줄이 비용 대비 이득이 크다.
+# 다만 인물이 전혀 없는 실행(제품·공간 단독)에는 붙이지 않는다.
+PARTIAL_OBJECT_NEGATIVE = (
+    "leftover fragment of a removed item, detached shoe, half a shoe, "
+    "shoe scrap, floating debris, orphaned object piece, partial object, "
+    "cut-off object, object remnant on the floor, ghost object, "
+    "debris of something that was taken off, orphaned garment piece, "
+    "half a sleeve, floating cuff, detached collar, stray accessory"
+)
+
+
+def _furniture_dna_guard(text: str, object_slots) -> str:
+    """가구·사물 DNA positive 문구. 사물 슬롯이 없으면 "".
+
+    기본값(사용자 지적 반영): topic에 "2번 침대 원본"을 **안 써도** 켜져야 한다.
+    사물도 참조가 곧 DNA이므로, 참조로 들어온 사물은 사용자가 별도로 지시하지
+    않는 한 형태를 그대로 따라야 한다. 오직 style/mood/lighting 전용으로
+    명시된 슬롯만 예외로 뺀다.
+    """
+    try:
+        slots = sorted(int(x) for x in set(object_slots or []))
+    except (TypeError, ValueError):
+        return ""
+    if not slots:
+        return ""
+    t = (text or "").lower()
+    if any(k in t for k in NON_OBJECT_SLOT_KEYWORDS):
+        # 분위기 전용 지정이 있으면 DNA 문구에서 "사물 대체 금지"를 약하게 한다
+        # (분위기만 빌려오는 슬롯에 "같은 사물로 재현"을 강요하면 역효과).
+        return FURNITURE_DNA_POSITIVE.replace(
+            "Do not substitute a different object, a different style, or a "
+            "cleaner/simpler version of it.",
+            "Take only the mood and lighting from it, not the object shape."
+        ) + f" This applies specifically to reference image(s) {slots and ', '.join(str(x) for x in slots)}."
+    listed = ", ".join(str(x) for x in slots)
+    return (FURNITURE_DNA_POSITIVE
+            + f" This applies specifically to reference image(s) {listed}.")
+
+
+def _object_dna_slots(topic: str, image_labels, image_count: int) -> set:
+    """가구·사물 DNA를 적용할 슬롯 집합. topic에 아무 말 없어도 채운다.
+
+    왜(Why): 사용자가 "2번 침대 원본을 써라"고 쓰지 않아도 2번에 침대를
+    연결했다면 그 침대가 곧 DNA다. 기존 구현은 topic에 사물 역할이 명시될
+    때만 발동해서(topic 미작성) DNA 가드가 조용히 꺼졌다.
+
+    판정: **주 피사체·추가 인물·포즈 슬롯을 제외한 모든 연결 슬롯**이 기본
+    대상이다. 단 style/mood/lighting 전용으로 명시된 슬롯은 제외한다.
+    """
+    try:
+        if image_count <= 0:
+            return set()
+        labels = [int(str(x)) for x in (image_labels
+                                       or list(range(1, image_count + 1)))]
+        plan = _person_object_plan(topic or "", labels)
+        excluded = {plan["main"]} | set(plan["persons"]) | set(plan["poses"])
+        return {x for x in labels if x not in excluded}
+    except Exception:
+        return set()
+
+
+def _remove_item_guard(text: str) -> str:
+    """사물 제거 잔여물 negative. **항상** 켠다 (인물 주제 한정).
+
+    왜(Why): 사용자가 "벗는다"고 topic에 쓰지 않아도 잔여물 자체는 틀린 결과다.
+    반쪽 물체는 완전 제거도 완전 유지도 아닌 유일한 상태이고, 그것은 언제나
+    틀리다. 트리거를 만들면 사용자가 문구를 외워야 하므로 효과가 반감된다.
+    """
+    try:
+        t = (text or "").lower()
+        if not _is_human_subject(t):
+            return ""
+        return PARTIAL_OBJECT_NEGATIVE
+    except Exception:
+        return ""
+
+
 def _person_object_plan(text, labels):
     """연결 슬롯의 역할을 토픽 명시에서 분류한다.
 
@@ -1162,21 +1703,55 @@ def _person_object_plan(text, labels):
     을 지원한다. 명시 근거가 없으면 기존 규약(첫 식별 = 주 피사체)을 유지해
     기존 실행과 결과가 완전히 동일하다. 9·10번(외양 참조 전용)은
     인물·사물 번호에서 모두 제외한다 -- 외양 참조는 인물도 사물도 아니다.
+    포즈 지정 슬롯도 인물·사물에서 제외하고 주 피사체 후보에서도 뺀다 --
+    자세만 빌려오는 슬롯을 신원 소스로 쓰면 참조의 얼굴이 섞인다.
     """
     try:
         label_ns = [int(str(l)) for l in (labels or [])]
     except (ValueError, TypeError):
         label_ns = []
-    objects = _object_role_slots(text) & set(label_ns) - {9, 10}
+    poses = _pose_role_slots(text) & set(label_ns)
+    # 의상 소스 슬롯(교체 대상은 제외됨). 옷은 사람이 아니라 의상 소스이므로
+    # 신원 소스 후보가 아니다 -- 아래 주 피사체 교정에서 함께 쓴다.
+    outfits = _clothing_role_slots(text) & set(label_ns)
+    objects = _object_role_slots(text) & set(label_ns) - {9, 10} - poses
     persons = (set(_second_person_slots(text)) & set(label_ns)
-               - objects - {9, 10})
+               - objects - {9, 10} - poses)
+    # **교체 대상**은 이쪽에 의상을 입는 사람이므로 인물이다(실측 결함 수정).
+    # "1 의상, 2 교체" 에서 2번이 persons 에 없으면 main 이 1번(주피사체=옷)으로
+    # 남아 프롬프트가 "use reference image 1 as the only main human identity"
+    # 라고 역전 지시한다 -> 2026-09-29 실제 실행에서 확인.
+    targets = _outfit_target_slots(text) & set(label_ns)
+    persons = (persons | targets) - objects - outfits
     main = label_ns[0] if label_ns else 1
+    # **교체 대상이 첫 슬롯이면 그 사람이 곧 주 피사체다**(2026-09-29 실측).
+    # 라벨 순서와 topic 을 무관하게 일관되게 하려면 여기서 먼저 확정한다.
+    if main in targets:
+        persons = persons - {main}
     # 첫 식별이 사물로 명시됐고 인물 후보가 있으면 첫 인물이 주 피사체가 된다.
     # 근거 없는 번호로 넘기지 않는다 -- 근거 없으면 기존 규약 유지.
     if main in objects and persons:
         main = min(persons)
         persons = persons - {main}
-    return {"main": main, "persons": sorted(persons), "objects": sorted(objects)}
+    # 첫 식별이 **의상 소스**면(옷 사진이 1번) 그 옷을 입을 사람이 주 피사체다.
+    # 옷을 신원 소스로 지목하면 사람이 사라진다 -- 실측에서 확인된 결함.
+    if main in outfits:
+        rest = [x for x in label_ns if x not in outfits and x not in poses]
+        if rest:
+            # 교체를 명시했으면(rest 안에서 대상이 보이면) 그 사람을 우선한다.
+            pick = next((x for x in rest if x in targets), None)
+            main = pick if pick is not None else rest[0]
+            persons = persons - {main}
+    # 첫 식별이 포즈 지정이면(1번 = 자세 참고) 신원 소스를 다음 슬롯으로 넘긴다.
+    # 전부 포즈 지정이면 신원 소스가 없으므로 기존 번호를 유지한다(graceful).
+    if main in poses:
+        rest = [x for x in label_ns if x not in poses]
+        if rest:
+            main = rest[0]
+            if main in persons:
+                persons = persons - {main}
+    return {"main": main, "persons": sorted(persons), "objects": sorted(objects),
+            "poses": sorted(poses), "outfits": sorted(outfits)}
 
 
 def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> str:
@@ -1202,8 +1777,21 @@ def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> 
         # 9·10번은 외양 참조 전용, 사물 명시 슬롯은 사물, 이미 주 피사체인 슬롯은
         # 중복 지정 대상이 아니다.
         wanted = [int(labels[1])]
+    # 슬롯 번호 없이 "두 명 / couple / two people" 만 말한 경우.
+    # 왜(Why) 이 폴백이 없으면: duo 앵커가 빈 문자열로 빠져서 reference_guard 가
+    # 두 번째 참조를 "배경/소품/제품 역할로만" 지시한다(2026-09-28 실측). 사용자가
+    # 두 사람의 사진을 붙였는데 두 번째 사람이 **소품으로 강등**되는 정반대 지시가
+    # 나간다 — 가장 흔한 표현에서 가장 큰 오작동이다.
+    _multi_fallback = False
+    if (not wanted and len(labels) >= 2 and _is_multi_person_request(topic)
+            and int(labels[1]) not in (9, 10) and int(labels[1]) not in objects
+            and int(labels[1]) != main):
+        wanted = [int(labels[1])]
+        _multi_fallback = True
     persons = [str(main)] + [str(s) for s in wanted if int(str(s)) != main]
-    if len(persons) < 2 or not _is_second_person_request(topic):
+    # 마지막 게이트: 슬롯 명시("두 번째 사람") 또는 다인물 표현("두 명") 둘 중.
+    if len(persons) < 2 or not (_is_second_person_request(topic)
+                                or _multi_fallback):
         return ""
     count_word = _NUMBER_WORDS.get(len(persons), str(len(persons)))
     roles = " and ".join(
@@ -1234,6 +1822,19 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
     plan = _person_object_plan(topic, labels)
     main = str(plan["main"])
+    # 동물 주제면 "얼굴 구조·헤어스타일"은 정면 모순이다(2026-09-28 실측:
+    # "강아지 한 마리" 에 same facial structure/same hairstyle 과
+    # 별도 five fingers/human proportions 까지 붙어 충돌했다). 품종명을
+    # 하드코딩하지 않고 종·무늬 수준으로 일반화한다.
+    if _is_animal_subject(topic or ""):
+        if image_count == 1:
+            return (f"preserve the same subject identity as reference image "
+                    f"{main}, same species, same coat pattern and markings, "
+                    "same body proportions, same overall color identity")
+        return (f"use reference image {main} as the main subject identity "
+                f"(same species, same coat pattern and markings, same body "
+                f"proportions), do not humanize it, do not give it human hands "
+                f"or facial features")
     if image_count == 1:
         return (f"preserve the same subject identity as reference image {main}, "
                 "same facial structure, same hairstyle, same outfit, "
@@ -1244,13 +1845,24 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
         # 사물 명시 슬롯의 소품 방어는 duo 앵커가 함께 전달한다.
         return duo
     secondary = _secondary_role_labels(labels, main=plan["main"],
-                                       persons=plan["persons"])
+                                       persons=plan["persons"],
+                                       poses=plan["poses"],
+                                       clothing=plan["outfits"])
     head = f"use reference image {main} as the only main human identity, "
     if secondary:
         head += ("use reference image(s) " + ", ".join(secondary)
                  + " only for their explicitly requested roles "
-                 "such as background, outfit, prop, product, style, "
-                 "lighting, composition, or mood, ")
+                 "such as background, composition, lighting, mood, or color, "
+                 # 왜(Why) outfit 을 기본 목록에서 뺐나(2026-09-28 실측):
+                 # topic 이 비면 "explicitly requested role" 이 없어서 모델이
+                 # 이 목록에서 **자유롭게** 고른다. 그때 outfit 을 골랐고,
+                 # 포즈 참조 이미지의 카디건+청바지가 그대로 복제됐다
+                 # (포즈 가드 문구는 정확했는데 그 문구가 실행조차 안 됐다).
+                 # 옷은 **명시 요청 시에만** 옮기고, 그 경로는 OUTFIT_GUARD 가
+                 # 전담한다. 명시 요청 없는 옷 복사는 항상 실패였다.
+                 "never their face, hair, skin tone, body identity, "
+                 "clothing or outfit, and never their pose unless it was "
+                 "explicitly requested, ")
     return head + (
         "do not duplicate the main subject, face, body, outfit, product, or background subject, "
         "do not turn secondary references into extra people, animals, products, or props "
@@ -1273,7 +1885,9 @@ def build_secondary_role_anchor(image_count: int, topic: str, image_labels=None)
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
     plan = _person_object_plan(topic, labels)
     secondary = _secondary_role_labels(labels, main=plan["main"],
-                                       persons=plan["persons"])
+                                       persons=plan["persons"],
+                                       poses=plan["poses"],
+                                       clothing=plan["outfits"])
     head = f"Use reference image {plan['main']} as the only main subject, "
     if secondary:
         head += ("use reference image(s) " + ", ".join(secondary)
@@ -1286,13 +1900,22 @@ def build_secondary_role_anchor(image_count: int, topic: str, image_labels=None)
 def add_quality_guard(prompt: str, image_count: int = 0, topic: str = "", image_labels=None) -> str:
     """모델 공통 positive 품질 가드. negative 프롬프트는 건드리지 않는다."""
     prompt = (prompt or "").strip().rstrip(". ")
-    parts = [p for p in [prompt, QUALITY_GUARD] if p]
+    # 동물 전용 주제면 사람 손·피부 품질 문구가 정면 모순이다. 사람/동물
+    # 혼재 장면은 사람 가드를 유지한다(사람이 있으면 필요하다).
+    _only_animal = _is_animal_subject(topic or "") and not _is_human_subject(
+        topic or "")
+    parts = [p for p in [prompt, QUALITY_GUARD_ANIMAL if _only_animal
+                         else QUALITY_GUARD] if p]
     ref_guard = reference_guard(image_count, image_labels=image_labels, topic=topic)
     if ref_guard:
         parts.append(ref_guard)
-    body_guard = body_proportion_guard(image_count, topic, image_labels=image_labels)
-    if body_guard:
-        parts.append(body_guard)
+    if not _only_animal:
+        # 골반·힙 비율 가드는 사람 전용(동물의 실루엣을 humanoid 비율로
+        # 끌고 간다). reference_guard 가 이미 종 보존 문구를 준다.
+        body_guard = body_proportion_guard(image_count, topic,
+                                           image_labels=image_labels)
+        if body_guard:
+            parts.append(body_guard)
     fit_guard = outfit_guard(image_count, topic)
     if fit_guard:
         parts.append(fit_guard)
@@ -1410,6 +2033,32 @@ ANATOMY_DETAIL_NEGATIVE = (
     "deformed teeth, extra teeth, "
     "deformed ears, malformed feet, extra toes, "
     "broken joints, twisted knees"
+)
+
+# 인체 부위 **개수** 명시. 왜(Why): 기존 negative는 "6손가락 금지"만 강하게
+# 있고 positive는 범용 품질 가드에 "believable hands with five fingers" 한 줄
+# 묻혀 있었다. diffusion은 "X가 아니다"보다 "Y가 있다"에 잘 반응하므로
+# 개수를 positive에 직접 박는다. 발가락·팔·다리는 positive가 아예 없었다.
+# 한계(정직): 텍스트는 **부드러운 사전확률**이라 개수를 강제하지 못한다.
+# 진짜 픽셀 강제는 참조 latent + 낮은 denoise로 원본 손을 보존하는 경로다
+# (KSampler denoise 0.4~0.6, 노드 밖 설정).
+ANATOMY_COUNT_POSITIVE = (
+    "correct limb and digit count, clearly readable anatomy: exactly five "
+    "fingers on each hand (one thumb plus four fingers), five toes on each "
+    "foot, two arms ending in two hands, two legs ending in two feet, "
+    "both sides of the body symmetrical, every limb fully formed and "
+    "separated from its neighbour, hands and feet drawn as complete "
+    "unambiguous shapes"
+)
+# 개수가 틀릴 때의 실제 형태. 왜(Why): 6손가락은 "6개가 추가"되는 게 아니라
+# 손가락 2개가 붙거나(6→5로 보이게) 한 개가 갈라져 나오는 경우가 대부분이다.
+# 그래서 "갯수 초과"가 아니라 **"붙음·갈라짐"** 형태를 막는다.
+ANATOMY_COUNT_NEGATIVE = (
+    "fused fingers, webbed fingers, mitten hands, fingers split down the "
+    "middle, double thumbs, extra fingers, missing fingers, fingers merging "
+    "into the palm, fused toes, split toes, extra toes, missing toes, "
+    "feet merged into a single blob, arms fused to the torso, legs fused "
+    "together, three arms, three legs, asymmetric limbs, one arm, one leg"
 )
 
 
@@ -1584,7 +2233,15 @@ def preflight_warnings(topic: str, camera: dict, latent_mp=None,
         if denoise and not 0.0 < denoise <= 1.0:
             msgs.append(f"denoise={denoise} 범위 이탈 (0 초과 1 이하)")
         elif denoise and denoise > 0.9:
-            msgs.append(f"denoise={denoise} 과다 — 원본에서 멀어짐·재생성 뭉개짐 주의")
+            # 왜(Why): "주의"만으로는 사용자가 무엇을 바꿔야 하는지 모른다.
+            # 실측에서 denoise=1.0 + 참조 이미지 조합은 다리·팔·어깨 같은
+            # 세부가 필요한 부위부터 뿌옇게 뭉개졌다. denoise는 "얼마나 다시
+            # 그릴 것인가"이므로 낮을수록 원본 픽셀을 보존한다.
+            msgs.append(
+                f"denoise={denoise} 과다 — 원본 픽셀을 거의 안 써서 다시 그립니다. "
+                "참조 이미지의 형태·색·디테일이 살아남으려면 0.6~0.8을 권장 "
+                "(1.0은 완전히 새로 생성 → 다리·팔·어깨·손 같은 세부가 "
+                "먼저 뭉개지고 가구 형태도 원본에서 벗어납니다)")
     except Exception:
         pass
     return msgs
@@ -1592,19 +2249,50 @@ def preflight_warnings(topic: str, camera: dict, latent_mp=None,
 
 def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
                           topic: str = "", image_count: int = 0,
-                          image_labels=None) -> str:
+                          image_labels=None, pose_ref: bool = False,
+                          physics_neg: str = "", detail_def: bool = False,
+                          furniture: bool = False,
+                          remove_item: bool = False,
+                          anatomy_count: bool = False,
+                          character_sheet: bool = False) -> str:
     """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
-    neg = ["warped geometry, distorted perspective, broken framing"]
+    neg = list(_NEGATIVE_BASE_COMMON)
+    # topic 이 비면(판단 근거 없음) 사람 기본값을 쓴다. ComfyUI 사용의
+    # 대부분이 인물이고, 비었을 때 가드를 빼는 쪽이 더 위험하다.
+    if not (topic or "").strip() or _is_human_subject(topic):
+        neg.append(NEGATIVE_ANATOMY_GUARD)
+        neg.append(NEGATIVE_COLOR_CONTAMINATION_GUARD)
     neg.extend(_camera_failure_modes(cam, topic))
     if cam.get("grade") == "느와르 (noir)":
         neg.append("unwanted color cast")
     if _is_human_subject(topic or ""):
         neg.append(ANATOMY_DETAIL_NEGATIVE)
+    if anatomy_count:
+        neg.append(ANATOMY_COUNT_NEGATIVE)
+    if character_sheet:
+        neg.append(CHARACTER_SHEET_NEGATIVE)
+        # 시트 뷰가 별개 인물로 세어지는 것까지 막는다 (신원 일관성이 목적이므로).
+        if not _is_multi_person_sheet(topic):
+            neg.append(CHARACTER_SHEET_PEOPLE_NEGATIVE)
     _, _eth_neg = _ethnicity_guard(topic or "", image_count, image_labels)
     if _eth_neg:
         neg.append(_eth_neg)
     if _is_animal_subject(topic or ""):
         neg.append(ANIMAL_ANATOMY_NEGATIVE)
+    # 포즈 negative: 빈 문자열을 넣지 않는다 (빈 조각이 ", " 꼬리를 남긴다)
+    _pose_neg = _pose_reference_negative(
+        _pose_role_slots(topic or "") & set(image_labels or [])) if pose_ref else ""
+    if _pose_neg:
+        neg.append(_pose_neg)
+    if physics_neg:
+        neg.append(physics_neg)
+    if detail_def:
+        neg.append(DETAIL_DEFINITION_NEGATIVE)
+    if furniture:
+        neg.append(FURNITURE_DNA_NEGATIVE)
+        neg.append(OBJECT_DRIFT_NEGATIVE)
+    if remove_item:
+        neg.append(_remove_item_guard(topic))
     if _needs_scale_guard(topic or "", cam):
         neg.append(SCALE_COHERENCE_NEGATIVE)
     if prevent_duplicates:
@@ -1640,6 +2328,478 @@ MIX_GUARD_NEGATIVE = ("clothing fusion with skin, melted garment edges, "
                       "body parts merging into clothing, mixed facial features, "
                       "identity blending, duplicated person")
 
+# 포즈 참조 가드. 왜(Why): Qwen reference 경로는 이미지 전체를 latent로 주입하므로
+# 자세만 빌려오게 해도 참조 인물의 얼굴·피부·머리·의상이 함께 유입된다. 텍스트
+# 가드만으로는 이미지 모델이 텍스트보다 시각 근거를 더 강하게 따르는 특성상
+# 막기 어렵기 때문에, LLM 비전에서는 아예 빼고(픽셀 경로로만 전달) + 여기서
+# "자세 전용"을 명시한다.
+def _pose_reference_guard(pose_slots) -> str:
+    """포즈 참조 positive 문구. 지정 슬롯이 없으면 ""."""
+    try:
+        slots = [int(x) for x in sorted(set(pose_slots or []))]
+    except (TypeError, ValueError):
+        return ""
+    if not slots:
+        return ""
+    listed = ", ".join(str(x) for x in slots)
+    return (f"Pose reference guard: reproduce the body pose and limb angles of "
+            f"reference image(s) {listed} and nothing else from them. Take ONLY "
+            f"the posture from those images — never their face, facial features, "
+            f"skin tone, hair, body identity, clothing, or background. The "
+            f"subject's identity and wardrobe come from the main reference and "
+            f"the topic, not from the pose reference.")
+
+
+def _pose_reference_negative(pose_slots) -> str:
+    """포즈 참조 negative 문구. 지정 슬롯이 없으면 ""."""
+    try:
+        slots = [int(x) for x in sorted(set(pose_slots or []))]
+    except (TypeError, ValueError):
+        return ""
+    if not slots:
+        return ""
+    listed = ", ".join(str(x) for x in slots)
+    return (f"face of the pose reference image {listed}, "
+            f"clothing of the pose reference image {listed}, "
+            f"body identity of the pose reference image {listed}, "
+            f"background of the pose reference image {listed}, "
+            f"face swap with the pose reference, identity blending between "
+            f"the pose reference and the subject")
+
+
+# ---------------------------------------------------------------------------
+# 물리·공간 가드 (2026-09-28)
+#
+# 왜(Why): topic에 "벽에 밀어붙였다/던진다/붙잡는다"라고 써도 노드가 아무 지시도
+# 안 붙이면 모델은 그 단어를 그릴 정보로 못 받아 "나란히 서 있는 두 사람"을
+# 그린다. 언어를 **이미지의 물리 상태**로 번역해 붙이는 것이 이 가드의 역할이다.
+#
+# 범위(정직한 한계): 정확한 관절 각도·타격 프레임은 ControlNet OpenPose 영역이며
+# 이 가드가 보장하지 않는다. 대신 모델이 수렴하는 해를 "정지 정면 배치"에서
+# "접촉·비행·충격" 쪽으로 밀어 올리는 것이 목적이다.
+# ---------------------------------------------------------------------------
+
+# 주의(한국어 활용): 동사 어간이 끝 모음이면 활용 때 음절이 변한다.
+# "던지"는 "던진다·던져·던졌다"에 문자열로 들어가지 **않는다**(던지→던진+다).
+# 그래서 활용 형태를 여러 개 적거나, 끝 자음이 있는 어간(뛰/달리/당기/끌/잡)을 쓴다.
+# 이걸 놓치면 무협 액션 장면이 그대로 "나란히 서 있기"로 수렴한다.
+# 물리 접촉/동작 → (positive 물리 상태, negative 되돌림 방지)
+PHYSICS_CONTACT_RULES = (
+    (("밀어붙", "밀어", "붙여", "붙여넣", "벽에", "누르", "눌러", "가뒀", "가두",
+      "붙잡", "붙들", "조인다", "꽉 잡", "press against", "pin against",
+      "push against", "pressed against"),
+     "physical contact between the people: their bodies are touching with no gap "
+     "between them, one person's body braced against a surface while the other "
+     "leans into them, overlapping silhouettes, weight visibly transferred",
+     "standing apart, empty space between the two people, both standing upright "
+     "and separate, no contact"),
+    (("안고", "안는", "안은", "안키", "안김", "품에", "감싸", "拥抱", "hold",
+      "hug", "embrace", "carried"),
+     "close hold: arms wrapped around the other person's body, bodies pressed "
+     "together, the held person lifted with feet clear of the ground",
+     "standing separately, arms at sides, no embrace, both feet on the ground"),
+    (("던지", "던진다", "던져", "던졌", "던짐", "던질", "투척", "채비", "throw",
+      "hurl", "toss", "fling"),
+     "throwing motion: the thrown figure is airborne with both feet off the "
+     "ground and the body rotated, the thrower's weight shifted onto the back "
+     "leg with the torso leaning away, limbs trailing",
+     "both people standing normally, nobody airborne, static pose, no throwing"),
+    (("뛰", "달리", "달렸", "질주", "전력질주", "sprint", "run", "dash",
+      "chase", "race"),
+     "running motion: the body pitched forward, legs split mid-stride, one foot "
+     "off the ground, arms driving, clothing and hair pushed backward by motion",
+     "standing still, feet together, static posture, no motion"),
+    (("넘어", "넘었", "추락", "쓰러", "쓰러져", "굴러", "무너", "fall",
+      "tumble", "collapse", "trip"),
+     "falling motion: the body tilted off axis and mid-collapse, limbs flung "
+     "outward for balance, the ground plane clearly visible beneath",
+     "upright standing, balanced on both feet, no fall"),
+    (("부딪", "충돌", "충격", "격돌", "튕겨", "부딪혀", "부딪히", "몰아붙",
+      "impact", "collide", "slam", "crash", "strike"),
+     "impact moment: the bodies locked together at the point of collision, "
+     "compressed posture at the contact point, force visibly transferred "
+     "through the limbs, hair and clothing whipping away from the blow",
+     "gentle contact, relaxed posture, no impact, calm static scene"),
+    (("당기", "끌어", "끌고", "잡아당", "grab", "pull", "rope", "chain",
+      "사슬", "줄을"),
+     "grappling: a closed grip around the other person, arms locked and bent, "
+     "both bodies leaning into the pull with feet braced apart",
+     "hands at sides, no grip, relaxed arms, no tension"),
+    # 무협·격투·전투 — 사용자가 가장 많이 쓰는 시나리오라 맨 뒤(최저 우선순위)에
+    # 둔다. 위 규칙(밀어붙/던지/넘어 등)이 있으면 그쪽이 더 구체적이다.
+    (("공격", "무협", "액션", "격투", "전투", "싸움", "싸", "정면으로",
+      "칼", "검", "무기", "격", "attack", "fight", "combat", "battle",
+      "sword", "blade", "duel", "fistfight", "grapple"),
+     "combat engagement: the two figures are locked in close-quarters contact "
+     "mid-exchange, one figure advancing and the other reacting, limbs "
+     "interlocked, bodies angled into each other rather than parallel",
+     "the two figures standing side by side, facing the same direction, "
+     "relaxed neutral posture, no combat contact"),
+)
+
+# 빠른 동작 → 시간/속도 표현. 접지·무게중심은 전 인물의 기본값(각주 아님).
+PHYSICS_MOTION_POSITIVE = (
+    "frozen mid-action at the peak of the motion, believable center of gravity, "
+    "correct contact shadows where the body meets the ground, no floating "
+    "subjects, no missing weight"
+)
+# 빠른 동작 키워드 — 이게 있을 때만 속도 표현을 붙인다(정지 장면 오탐 방지).
+FAST_MOTION_KEYWORDS = (
+    "던지", "던진다", "던져", "던졌", "투척", "채비", "throw", "hurl", "toss",
+    "fling", "뛰", "달리", "달렸", "질주", "sprint", "dash", "chase", "race",
+    "넘어", "넘었", "추락", "쓰러", "굴러", "무너", "fall", "tumble",
+    "collapse", "trip", "부딪", "충돌", "충격", "격돌", "튕겨", "몰아붙",
+    "impact", "collide", "slam", "crash", "strike", "싸", "전투", "격투",
+    "무협", "fight", "battle", "공격", "방어", "검", "칼", "무기", "sword",
+    "combat", "attack", "밀어붙", "붙잡", "당기", "안고", "고수", "액션",
+    "action",
+)
+# 정적 장면 — 오히려 "노 motion blur"를 붙여 인물이 뭉개지는 걸 막는다.
+STATIC_SCENE_KEYWORDS = (
+    "정지", "멈춰", "조용한", "정숙", "수목도", "물결", "고요",
+    "still", "static", "serene", "calm", "quiet", "peaceful", "motionless",
+)
+
+
+def physics_contact_guard(topic: str) -> tuple:
+    """(positive, negative). 접촉/동작 신호가 없으면 ("", "").
+
+    왜(Why): 사용자가 topic에 쓴 물리 동사는 이미 의도다. 그걸 이미지의
+    물리 상태로 번역해 붙이는 것이 이 노드가 실제로 기여할 수 있는 부분이다.
+    정밀 각도는 ControlNet 영역이므로 여기서는 수렴 지점을 올리는 데 그친다.
+    """
+    try:
+        t = (topic or "").lower()
+        if not t:
+            return "", ""
+        for keywords, pos, neg in PHYSICS_CONTACT_RULES:
+            if any(k in t for k in keywords):
+                # 시간·속도 축: 빠른 동작일 때만 중간 프레임을 명시한다.
+                if any(k in t for k in FAST_MOTION_KEYWORDS):
+                    pos = pos + ", " + PHYSICS_MOTION_POSITIVE
+                elif any(k in t for k in STATIC_SCENE_KEYWORDS):
+                    neg = neg + ", motion blur on the subject"
+                return pos, neg
+        return "", ""
+    except Exception:
+        return "", ""
+
+
+def physics_grounding_guard(topic: str) -> str:
+    """정적 인물 장면에도 붙는 최소 물리(접지·무게중심) 문구. 없으면 ""."""
+    try:
+        t = (topic or "").lower()
+        if not t or not _is_human_subject(t):
+            return ""
+        if any(k in t for k in FAST_MOTION_KEYWORDS):
+            return ""
+        return ("believable center of gravity, correct contact shadows under the "
+                "feet, feet firmly on the ground, no floating subjects")
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# 픽셀 기반 공간 측정 (2026-09-28)
+#
+# 왜(Why): topic에 "벽에 밀어붙였다"를 사용자가 직접 써야만 접촉 가드가 켜졌다.
+# 그런데 접촉/간격은 기하 사실이므로 픽셀에서 읽는 것이 정확하다. 노드에 이미
+# 있는 _reference_lighting_flow와 같은 numpy 저해상도 접근을 재사용한다.
+#
+# 원리: 저해상도 명암 격자 → "전경으로 보이는" 열 밀도 프로파일 → 봉우리(피사체)
+# 사이 골짜기(간격) 폭. 골짜기가 없으면 실루엣이 겹친 것 = 접촉/밀착.
+#
+# 정직한 한계(중요):
+#  1) "붙어 있다"까지만 읽는다. 그게 격투인지 포옹인지는 모른다 — topic 텍스트와
+#     합쳐져야 한다.
+#  2) 배경(나무·건물)이 봉우리로 잡힐 수 있다. 그래서 보수적으로만 발동시키고
+#     측정값을 로그에 남겨 사용자가 확인할 수 있게 한다.
+#  3) 새 의존성 없음 (numpy만). MediaPipe를 넣지 않는다.
+# ---------------------------------------------------------------------------
+SPACING_GRID = 48          # 저해상도 격자 (세로 기준, 가로는 2배 해상도)
+# 피부색 임계는 노드가 다루는 HDR/명암 이미지와 맞아야 한다. headshot 텐서는
+# 0~1 스케일이고 배경(바=The Rock, 하늘)은 채도가 낮다. 채도 조건을
+# 느슨하게 두면 회색 배경까지 "머리"로 잡혀 오탐이 된다(실측 확인).
+SPACING_SKIN_CHROMA = 0.12  # 최소 채도
+SPACING_RG = 0.05           # 최소 R-G 차이
+SPACING_TOUCH_RATIO = 0.03  # 간격이 이보다 작으면 "근접"으로 판단
+SPACING_APART_RATIO = 0.05  # 간격이 이보다 크면 "확연히 떨어짐"으로 판단
+SPACING_FAR_RATIO = 0.28   # 간격이 이보다 크면 "크게 떨어짐"(화면 양끝 수준)
+SPACING_HEAD_BAND = 0.18    # 머리 분리 판정용 상단 밴드 비율 (어깨 위까지만)
+
+
+def _skin_score(rgb_small):
+    """저해상도 RGB 격자 → 피부색 가능성(0~1) 맵. 실패 시 None.
+
+    왜(Why): 머리 검출을 명암 차이로만 하면 어깨선·난간·울타리도 "머리"로
+    잡힌다. 사람은 피부색 덩어리로 구분하는 것이 가장 싼 신호다.
+    규칙은 고전 RGB 임계(Kovacic et al.)를 0~1 스케일로 옮긴 것으로 새
+    의존성이 없다.
+    """
+    try:
+        import numpy as _np
+        a = _np.asarray(rgb_small, dtype=_np.float32)
+        if a.ndim != 3 or a.shape[2] < 3:
+            return None
+        r, g, b = a[..., 0], a[..., 1], a[..., 2]
+        mx = a.max(axis=2)
+        mn = a.min(axis=2)
+        chroma = mx - mn
+        cond = ((r > g) & (r > b) & (chroma > SPACING_SKIN_CHROMA)
+                & (_np.abs(r - g) > SPACING_RG))
+        return cond.astype(_np.float32)
+    except Exception:
+        return None
+
+
+def subject_spacing(image) -> dict:
+    """참조 이미지 1장의 피사체 공간 상태를 **기하만** 측정한다. 실패 시 {}.
+
+    반환: {"gap_ratio": 두 덩어리 사이 저밀도 열 비율, "peaks": 덩어리 수,
+           "heads": 상단 밴드에서 센 머리 수, "close"/"apart"/"far": bool,
+           "v_separate": bool, "bottom_margin": 하단 여백, "subject_ratio": 전경 비율}
+
+    왜 인원수는 여기서 판정하지 않는가:
+    실측에서 "1인물"도 접촉으로 오검출됐다. 세그멘테이션 없이 픽셀만으로
+    "1명인가 2명인가"를 구분하는 것은 신뢰할 수 없다. 그래서 **픽셀은 공간
+    (간격·하단 여백)만 측정하고, 인원수는 topic 텍스트가 맡는다.**
+    """
+    out = {}
+    try:
+        import numpy as _np
+        import torch as _t
+        px = image[0] if isinstance(image, _t.Tensor) else image
+        px = px.detach().cpu() if hasattr(px, "detach") else px
+        arr = _np.asarray(px, dtype=_np.float32)
+        if arr.ndim == 4:
+            arr = arr[0]  # (B,H,W,C) → (H,W,C). IMAGE 텐서·배열 모두 허용
+        if arr.ndim != 3 or arr.shape[0] < 4 or arr.shape[1] < 4:
+            return out
+        h, w = arr.shape[0], arr.shape[1]
+        if arr.max() > 1.5:
+            arr = arr / 255.0
+        # 저해상도 격자로 축소 (평균 풀링). 가로를 세로보다 2배 해상도로 둔다
+        # — 간격이 작으므로 가로 해상도가 곧 측정 정밀도다.
+        # 주의: gh/gw 는 **셀 개수**, rows/cols 는 **셀 픽셀 크기**다.
+        # (실측에서 둘을 뒤바꾸어 8x16 격자로 간격을 못 잰 결함 발생)
+        # 저해상도 격자: 인덱스 표본(linspace)으로 줄인다. reshape 풀링은
+        # 픽셀 수가 격자로 안 나누어떨어지면 잘라 먹거나(실측 256px에 96열 →
+        # 5x2 격자로 붕괴) reshape가 실패한다. linspace는 어떤 크기도 정확히
+        # gh x gw 격자로 만들고 원본 픽셀도 빠짐없이 쓴다.
+        gh = max(1, min(SPACING_GRID, h))
+        gw = max(1, min(SPACING_GRID * 2, w))
+        yi = _np.linspace(0, h - 1, gh).astype(_np.int64)
+        xi = _np.linspace(0, w - 1, gw).astype(_np.int64)
+        # RGB와 명암을 같은 격자로 함께 만든다(셀 경계가 어긋나면 안 됨)
+        small_rgb = arr[yi][:, xi]
+        small = (small_rgb[..., 0] * .299 + small_rgb[..., 1] * .587
+                 + small_rgb[..., 2] * .114)
+        skin = _skin_score(small_rgb)
+        border = _np.concatenate([small[0, :], small[-1, :], small[:, 0], small[:, -1]])
+        bg = float(border.mean())
+        fg = _np.abs(small - bg)
+        cx = _np.linspace(-1, 1, gw, dtype=_np.float32)
+        weight = 1.0 - 0.55 * _np.abs(cx)[None, :]
+        fg = fg * weight
+        thr = float(fg.mean()) + 0.6 * float(fg.std())
+        mask = fg > thr
+        col = mask.sum(axis=0).astype(_np.float32)
+        out["subject_ratio"] = round(float(mask.mean()), 3)
+        if out["subject_ratio"] < 0.02:
+            return out  # 피사체가 거의 없으면 측정 불가
+        cmax = float(col.max())
+        if cmax <= 0:
+            return out
+        # 두 겹 기준: core(50%)는 덩어리 중심, edge(15%)는 덩어리 경계.
+        # 간격은 core가 아니라 **edge 기준으로 끊긴 두 덩어리 사이의 폭**으로 잰다.
+        # (core로 재면 경계 셀이 통과해 간격이 0으로 계��된다 — 실측 오류)
+        edge_thr = max(0.4, cmax * 0.15)
+        runs, cur = [], None
+        for i, v in enumerate(col):
+            if v >= edge_thr:
+                cur = [i, i] if cur is None else [cur[0], i]
+            elif cur is not None:
+                runs.append(tuple(cur))
+                cur = None
+        if cur is not None:
+            runs.append(tuple(cur))
+        if not runs:
+            return out
+        out["peaks"] = len(runs)
+        # 실루엣 폭은 **측정하지 않는다** — 실측에서 근경 1인(0.50)이 붙은 2인
+        # (0.44)보다 넓게 나와 "몇 명인가" 판정에 쓸 수 없었다. 판정 근거로 쓰면
+        # 오탐이 되므로 아예 계산하지 않는다(과잉 계산 제거).
+        # 간격: 인접한 덩어리 사이에서 밀도가 낮게 떨어진 열 수
+        gap_cells = 0
+        for ri in range(len(runs) - 1):
+            between = col[runs[ri][1] + 1:runs[ri + 1][0]]
+            if between.size == 0:
+                continue
+            low = int((between < edge_thr).sum())
+            if low > gap_cells:
+                gap_cells = low
+        out["gap_ratio"] = round(gap_cells / float(gw), 3)
+        # 접촉은 "서로 다른 덩어리 2개 + 간격 0"일 때만 판정한다.
+        # 왜: 두 사람이 맞닿으면 실루엣이 하나로 뭉쳐서 세그멘테이션 없이는
+        # 구분할 수 없다. 폭 추정은 근경 1인과 붙은 2인을 구분하지 못해
+        # 실측에서 폐기했다(오탐). 모르는 건 말하지 않는 편이 낫다.
+        out["close"] = bool(len(runs) >= 2
+                            and out["gap_ratio"] <= SPACING_TOUCH_RATIO)
+        out["apart"] = bool(len(runs) >= 2
+                            and out["gap_ratio"] >= SPACING_APART_RATIO)
+        out["far"] = bool(len(runs) >= 2
+                          and out["gap_ratio"] >= SPACING_FAR_RATIO)
+        # 붙어 있는 경우의 보완 신호: 상단 프로파일의 "머리 개수".
+        # 왜(Why): 두 사람이 맞닿으면 몸 실루엣이 하나로 뭉쳐서 간격 측정으로
+        # 잡을 수 없다. 하지만 머리 둘은 별개로 세어진다 — 세그멘테이션 없이도
+        # 2인 근접을 판별할 수 있는 유일한 신뢰 신호다.
+        heads = 0
+        try:
+            # 상단 밴드는 **어깨 위**로 좁게 잡아야 한다. 넓으면 몸통까지 포함돼
+            # 머리 둘이 하나로 뭉개진다(실측: 25% 이상에서 머리 분리 실패).
+            top_rows = max(2, int(gh * SPACING_HEAD_BAND))
+            top = mask[:top_rows, :]
+            tcol = top.sum(axis=0).astype(_np.float32)
+            # 머리는 피부색이다. 명암 톤만 보면 어깨선·난간도 "머리"로 잡힌다
+            # (실측 오탐). MIX_GUARD의 plastic skin 방어가 이미 피부색을 근거로
+            # 쓰고 있으므로 그 근거를 재사용한다. skin 은 위에서 small_rgb로
+            # 계산한 값(명암 small 이 아니라 RGB 격자 기준)이다.
+            if skin is not None:
+                skin_top = skin[:top_rows, :]
+                if skin_top.size:
+                    tcol = tcol * (1.0 + 0.8 * skin_top.mean(axis=0))
+            tmax = float(tcol.max())
+            if tmax >= 0.5:
+                truns, cur = [], None
+                for i, v in enumerate(tcol):
+                    if v >= max(0.5, tmax * 0.35):
+                        cur = [i, i] if cur is None else [cur[0], i]
+                    elif cur is not None:
+                        truns.append(tuple(cur))
+                        cur = None
+                if cur is not None:
+                    truns.append(tuple(cur))
+                heads = len(truns)
+        except Exception:
+            heads = 0
+        out["heads"] = heads
+        # 머리 둘이면서 몸 실루엣이 하나로 뭉친 경우 = 서로 붙어 있는 2인
+        if not out["close"] and heads >= 2 and len(runs) == 1:
+            out["close"] = True
+        row = mask.sum(axis=1)
+        nz = _np.nonzero(row)[0]
+        if nz.size:
+            out["bottom_margin"] = round(float((gh - 1 - int(nz[-1])) / gh), 3)
+        else:
+            out["bottom_margin"] = None
+        # 세로 방향: 위아래로 늘어선 피사체. 행(세로) 밀도 프로파일에
+        # "이중 봉우리"가 있는지 본다 — 상단(머리·상체)과 하단(하체)이 서로
+        # 떨어진 채 존재하면 세로로 늘어선 배치다.
+        # 왜(Why): 누운 자세·계단·상단 부감처럼 화면 상하로 배치된 구도에서
+        # 세로 간격이 공간 관계의 핵심인데, 가로만 재면 이 구도를 놓친다.
+        rowc = mask.sum(axis=1).astype(_np.float32)
+        rmax = float(rowc.max()) if rowc.size else 0.0
+        v_two = False
+        if rmax > 0.5:
+            rt = max(0.5, rmax * 0.35)
+            rvals = [v >= rt for v in rowc]
+            # 연속 True 구간 개수
+            runs_n, prev = 0, False
+            for on in rvals:
+                if on and not prev:
+                    runs_n += 1
+                prev = on
+            v_two = runs_n >= 2
+        out["v_separate"] = bool(v_two)
+    except Exception:
+        return out
+    return out
+
+
+def spacing_guard(measure: dict, topic: str) -> tuple:
+    """(positive, negative). 픽셀 측정(거리) × topic(인원수)을 합쳐 판단.
+
+    왜 둘을 합치는가: 픽셀은 "얼마나 떨어져 있는가"를 신뢰성 있게 읽지만
+    "몇 명인가/붙었는가"를 세그멘테이션 없이 구분하지 못한다(실측 오검출 확인).
+    반대로 인원수는 topic이 정확히 안다. 그래서 **거리는 픽셀이, 인원수는 topic이**
+    맡고, 둘이 합의할 때만 문구를 붙인다.
+
+    픽셀이 확실히 아는 것은 "떨어진 거리" 하나뿐이다. 그래서 부각은 "떨어져 있든
+    붙어 있든 **측정된 거리를 유지하라**"로 통일한다 — 모델이 참조의 공간 관계를
+    깨뜨리는(포옹인데 떨어지게, 떨어져 있는데 겹치게) 실패를 막는 것이 목적.
+    """
+    try:
+        m = measure or {}
+        if not m:
+            return "", ""
+        if not (_is_human_subject(topic or "") or _is_multi_person_request(topic or "")):
+            return "", ""
+        pos, neg = "", ""
+        if m.get("close"):
+            pos = ("spatial fidelity: keep the two subjects in contact as in "
+                   "the reference — bodies touching with no gap between them")
+            neg = "the subjects standing apart with empty space between them"
+        elif m.get("far"):
+            # 화면 양끝 수준으로 떨어진 구도. "가까이 떨어짐"과 구분한다 --
+            # 실측에서 좌우 끝에 선 두 사람(간격 50%)에도 가까운 문구가 붙었다.
+            pos = ("spatial fidelity: the two subjects stay far apart at the "
+                   "opposite sides of the frame as in the reference, the wide "
+                   "empty space between them preserved")
+            neg = ("the subjects pulled close together, the wide empty space "
+                   "between them filled in")
+        elif m.get("apart"):
+            pos = ("spatial fidelity: keep the same separation between the "
+                   "subjects as the reference — the space between them stays "
+                   "the same size, they do not crowd together")
+            neg = ("the subjects pushed together into overlapping silhouettes, "
+                   "merged into one mass")
+        if m.get("v_separate"):
+            # 세로로 늘어선 구도 — 가로 거리만 재면 이 배치를 놓친다.
+            pos = (pos + ", " if pos else "") + (
+                "spatial fidelity: keep the same vertical arrangement as the "
+                "reference, one subject higher in the frame than the other, "
+                "do not align them on the same level")
+        if m.get("bottom_margin") is not None and m.get("bottom_margin", 0) > 0.03:
+            # 접지 여부는 한 장에서 확정할 수 없다(바닥이 보이는 게 정상이라
+            # 전경이 최하단에 닿는지만 보면 근거가 없다). 대신 **측정 가능한
+            # 사실**인 "피사체 아래 남은 여백(=보이는 바닥 비율)"만 유지시킨다.
+            # 스케일 가드(인물-사물 비율)와 같은 축의 사실이라 서로 보강된다.
+            pos = (pos + ", " if pos else "") + (
+                "spatial fidelity: keep the same amount of floor and ground "
+                "visible below the subject as in the reference, subject seated "
+                "at the same height in the frame")
+        return pos, neg
+    except Exception:
+        return "", ""
+
+
+def spacing_log_text(measure: dict) -> str:
+    """측정값 로그 문자열. 실패 시 ""."""
+    try:
+        m = measure or {}
+        if not m:
+            return ""
+        bits = []
+        if "gap_ratio" in m:
+            bits.append(f"간격 {int(m['gap_ratio'] * 100)}%")
+        if "peaks" in m:
+            bits.append(f"영역 {m['peaks']}개")
+        if m.get("close"):
+            bits.append("근접")
+        elif m.get("far"):
+            bits.append("크게 떨어짐")
+        elif m.get("apart"):
+            bits.append("떨어짐")
+        if m.get("v_separate"):
+            bits.append("세로 분리")
+        if m.get("heads"):
+            bits.append(f"머리 {m['heads']}")
+        if m.get("bottom_margin") is not None:
+            bits.append(f"하단 여백 {int(m['bottom_margin'] * 100)}%")
+        return " · ".join(bits)
+    except Exception:
+        return ""
+
 
 # 9·10번 슬롯 전용 "외양 참조" 가드 (사용자 전용 기능 — 2026-09-27).
 # (Why: 9·10번에 신체 외양 클로즈업(예: 성기 디테일)을 연결하면 LLM은 외양을
@@ -1673,6 +2833,26 @@ APPEARANCE_HAIR_REALISM_POSITIVE = (
 )
 
 
+# 부위별 디테일 뭉개짐 방어. (Why: 실측에서 참조 이미지를 쓰는 실행의 결과물이
+# 다리·팔·어깨부터 뿌옇게 뭉개졌다. "blurry"는 초점 문제라 별개이고,
+# 여기선 **부위 경계가 지워지는** 문제다 — 살갗/원단 경계, 무릎·팔꿈치 관절 선,
+# 손가락 마디 같은 구조 경계가 사라져 보솜처럼 뭉개진다. denoise가 높은
+# 실행일수록 심해진다.)
+DETAIL_DEFINITION_POSITIVE = (
+    "anatomical edge definition: every body part keeps a clear readable "
+    "boundary against what surrounds it — legs separate from each other and "
+    "from the background, arms separate from the torso, shoulders keep a "
+    "defined line, fabric keeps its weave and seams, skin keeps natural "
+    "texture, hands keep distinct fingers, knees and elbows keep a visible "
+    "joint line"
+)
+DETAIL_DEFINITION_NEGATIVE = (
+    "melted body boundaries, legs blending into each other, arm merging into "
+    "torso, smeared fabric, waxy skin, featureless limbs, indistinct fingers, "
+    "boots melting into the foot, foot blending into the floor, "
+    "soft shapeless body parts, plastic doll skin, blanket-like skin folds"
+)
+
 # 인물 신체 발란스 가드. (Why: 전신·신체 중심 장면에서 팔/다리 길이 불균형,
 # 머리-몸 비율 붕괴, 부위별 스케일 불일치가 자주 발생. 인물 주제면 참조 이미지
 # 유무와 무관하게 항상 첨부한다 — 비율 문구는 장면 훼손이 없어 상시 붙여도 안전.)
@@ -1688,12 +2868,55 @@ BODY_BALANCE_NEGATIVE = ("disproportionate limbs, elongated arms, shortened legs
 # 캐릭터 시트 참조 가드. (Why: 참조 이미지가 캐릭터 시트(여러 각도 동일 인물
 # 나열)일 때 시트 레이아웃 자체(격자·라벨·멀티패널)가 출력으로 복제되는 실측
 # 사례 — 시트는 신원 소스로만 쓰고 출력은 요청된 카메라 구도 한 컷이어야 한다.)
-CHARACTER_SHEET_TOPICS = ("캐릭터 시트", "캐릭터시트", "character sheet",
+CHARACTER_SHEET_TOPICS = ("캐릭터 시트", "캐릭터시트", "캐릭터시", "캐릭터 시",
+                          "character sheet", "charactersheet", "character_sheet",
                           "턴어라운드", "turnaround", "삼면도", "다면도",
-                          "multiple angles of the same")
+                          "다각도", "정면후면", "전신 다각도",
+                          "multiple angles of the same", "reference sheet",
+                          "model sheet", "모델 시트", "시트 참고")
+# **다인물 시트**(얼굴·옷이 전부 다른 여러 캐릭터가 한 장에)는 위 시트와
+# 의미가 반대다 — "전부 같은 한 사람"으로 말하면 틀린 지시가 된다. 두 종류를
+# 먼저 나눠 판정한다.
+MULTI_PERSON_SHEET_TOPICS = (
+    "여러 캐릭터", "여러캐릭터", "인물 시트", "인물시트", "다캐릭터", "다 캐릭터",
+    "라인업", "lineup", "cast sheet", "ensemble sheet", "오디션 시트",
+    "여러 인물", "복수 캐릭터", "여명", "다인물 시트",
+)
 CHARACTER_SHEET_NEGATIVE = ("grid layout, contact sheet, sprite sheet, "
                             "multi-panel layout, annotated sheet, "
-                            "character sheet layout in output")
+                            "character sheet layout in output, "
+                            # 2026-09-29 실측: 시트 용어만 금지하면 레이아웃이
+                            # 그대로 렌더링됐다(실제 생성 확인). negative 는
+                            # "무엇이 아닌지"만 말하므로 **결과 형태**로
+                            # 지목해야 한다 — "the same person repeated several
+                            # times" 가 실제로 렌더링되는 것을 막는다.
+                            "the same person repeated several times in one "
+                            "image, several copies of the same figure, "
+                            "figure shown from multiple angles side by side, "
+                            "front view and back view both visible at once, "
+                            "full body and close-up shown together, "
+                            "reference sheet reproduced in output")
+# 동일인 다중 뷰를 **여러 사람으로 세는** 실패. 왜(Why): 사용자가 캐릭터 시트를
+# 쓰는 목적은 신원 일관성이다. 기존 negative는 레이아웃(격자·패널)만 막았고
+# "뷰가 여러 명으로 복제된다"는 방향은 duo/멀티 인물 가드에만 있었는데, 그
+# 가드는 시트 참조 실행에서 plan["persons"]가 비어 걸리지 않는다.
+CHARACTER_SHEET_PEOPLE_NEGATIVE = (
+    "the reference sheet's views counted as separate people, multiple people "
+    "from one reference, a second person, extra person, cloned faces, "
+    "identical duplicated faces, mirrored duplicates, crowd, group of people, "
+    "background people, a lineup of different characters"
+)
+# 시트 뷰 구성 — 실사용 표준 구조(정면·후면·상부 얼굴·좌우 측면)를 명시한다.
+CHARACTER_SHEET_VIEWS = (
+    "front full-body view, back full-body view, close-up head front, "
+    "close-up head back, left profile close-up, right profile close-up"
+)
+
+
+def _is_multi_person_sheet(text: str) -> bool:
+    """여러 캐릭터가 한 장에 있는 시트인가. 동일인 다중 뷰 시트와 구분한다."""
+    t = (text or "").lower()
+    return any(k in t for k in MULTI_PERSON_SHEET_TOPICS)
 
 
 def _is_character_sheet_request(text: str) -> bool:
@@ -1702,37 +2925,461 @@ def _is_character_sheet_request(text: str) -> bool:
     return any(keyword in t for keyword in CHARACTER_SHEET_TOPICS)
 
 
-def character_sheet_guard(image_count: int, topic: str, image_labels=None) -> str:
-    """캐릭터 시트 참조 가드 — 시트는 신원 소스, 출력은 카메라 구도 한 컷."""
-    if image_count <= 0 or not _is_character_sheet_request(topic):
+# ---------------------------------------------------------------------------
+# 참조 이미지에서 캐릭터 시트를 **픽셀로** 판별 (2026-09-28)
+#
+# 왜(Why) 이게 필요한가: 시트 가드는 topic 텍스트("캐릭터 시트" 등)로만
+# 발동했다. 사용자가 topic 을 비워 두면(테스트 조건을 러프하게 두는 습관)
+# **6뷰 시트를 연결해 놓고도 아무 지시도 안 나간다** → 실측으로 시트가 1명인데
+# 결과에 2명이 나왔다. 정보는 이미 **픽셀에** 있는데 쓰지 않았다.
+#
+# 판별 원리(Consistency Keeper 의 proven 알고리즘과 동일 — 2026-09-28 검증):
+#   1) 각 열의 표준편차 프로파일 → "평탄하지 않은 열"이 콘텐츠
+#   2) 콘텐츠가 **3개 이상** 연속 구간으로 반복 = 패널
+#   3) 패널 폭이 고르고(폭비 ≤1.6) 간격이 고르면(간격비 ≥0.6) 시트로 인정
+#
+# 오탐이 누락보다 위험한 이유: 시트로 잘못 보면 6개 뷰가 6명 신원으로
+# 평균나 **신원 일관성이 망가지며**, 그건 조용히 일어난다.
+# 그래서 이렇게 빡빡한 기준을 쓴다(실사용 사진 7장으로 보정: 폭비 1.55~6.48
+# 인 사진은 전부 탈락, 합성 시트는 1.00).
+# ---------------------------------------------------------------------------
+# 참조 이미지에서 캐릭터 시트를 **픽셀로** 판별 (2026-09-28)
+#
+# 왜(Why) 텍스트만 믿으면 안 된다(실측): topic 이 비어 있으면 시트 가드의
+# 텍스트 조건이 거짓이 되어 **아예 발동하지 않는다** → 1인 6뷰 시트가 결과에서
+# **2명**으로 복제됐다. 정보는 이미 픽셀에 있었다.
+#
+# 판별 기준 = 구조(격자) + 내용(같은 피사체 반복) 두 가지의 교집합:
+#   1) 프로파일 표준편차로 콘텐츠 연속 구간을 찾는다 (패널 사이 빈 공간은
+#      STD≈0, 실루엣이 있는 열/행은 값이 크다)
+#   2) 간격 균일성(중심 간격의 min/max) >= 0.45 — 격자 구조 확인
+#   3) 패널끼리 나눈 셀의 평균 유사도 >= 0.20 — **같은 사람의 반복** 확인
+#
+# 왜 폭 균일성(wreg)을 버렸나: 실제 사용자 시트(10896x6800, 전신 2 + 얼굴 4)를
+# 재측정하니 wreg=2.50 으로 탈락했다. 전신 뷰와 얼굴 클로즈업은 **구조적으로
+# 폭이 다르다** — 폭이 고른다는 건 시트의 조건이 아니라 우연일 뿐이다. 그
+# 조건을 버리고 "같은 피사체가 반복된다"는 시트의 진짜 정의를 직접 썼다.
+#
+# 한계를 정직하게: 실제 시트 표본이 1장뿐이다. 실측치는 시트 0.41~0.42 vs
+# 일반 사진 최대 0.11 로 약 4배 격차라 0.20 을 하한으로 잡았지만, 시트가
+# 배경을 크게 바꾸면(예: 어두운 배경) 유사도는 내려갈 수 있다. 그래서
+# 텍스트 경로(_is_character_sheet_request)와 **병존**시키고, 텍스트가 명시하면
+# 픽셀 판정이 틀려도 그걸 따른다.
+#
+# 오탐이 누락보다 위험한 이유: 시트로 잘못 보면 여러 뷰를 여러 신원으로
+# 평균내며 **신원 일관성이 조용히** 망가지기 때문이다.
+#
+# 2026-09-29 실측 교정 (ComfyUI 실제 실행): stride 샘플링(a[::step, ::step])
+# 은 원본 해상도에 따라 **다른 픽셀을 본다**. 세로로 긴 사진(4296x7696)은
+# 행 경계가 1~2px 어긋나 "1열짜리 거대한 셀"이 만들어졌고, 그 결과
+# 포즈 사진이 sim=0.209 로 **시트로 오인**됐다(PIL resize 경로는 0.023).
+# 같은 파일인데 경로에 따라 다른 판정이 나오는 상태였다. 그래서 프로파일은
+# 고정 격자 블록 평균(linspace 인덱스)으로 바꾼다 — 해상도 무관하게 같은
+# 결과를 낸다.
+# ---------------------------------------------------------------------------
+_SHEET_MIN_PANELS = 3
+# 간격 균일성 하한 0.45: 사용자 실제 시트는 0.95, 실사용 사진은 0.38~0.71.
+_SHEET_MIN_SPACING_RATIO = 0.45
+# 셀 평균 유사도 하한 0.20: 실제 시트 0.414, 실사용 사진 0.109 이하.
+_SHEET_MIN_CELL_SIMILARITY = 0.20
+# 프로파일의 크기. 512면 충분하고 더 볼 필요 없다(비용 대비 정보량 낮음).
+_SHEET_PROFILE_W = 512
+# 셀 서명의 격자 크기. 8x8 은 색/명도 구조를 남기면서 노이즈는 줄인다.
+_SHEET_SIG_GRID = 8
+
+
+def _column_profile(arr, width: int = _SHEET_PROFILE_W):
+    """RGB 배열 → 열별 표준편차 프로파일. 실패 시 None.
+
+    왜(Why) 표준편차인가: 패널 **사이 빈 공간**은 균일해서 STD≈0 이고,
+    실루엣이 있는 패널 열은 값이 크다. 그래서 "평탄하지 않은 연속 구간"이
+    곧 패널이다. 에지맵(16x16)이 아니라 **전 해상도**를 본다 — 16x16 으로
+    줄이면 패널 하나가 2~3칸에 불과해 세 개만 잡히는 문제가 실제로 발생했다.
+    """
+    try:
+        import numpy as _np
+        if arr is None or getattr(arr, "ndim", 0) != 3:
+            return None
+        a = _np.asarray(arr, dtype=_np.float32)
+        if a.shape[0] < 8 or a.shape[1] < 8:
+            return None
+        h, w = a.shape[0], a.shape[1]
+        if w > width:                       # 축소해 비용을 제한한다
+            step = max(1, w // width)
+            a = a[:, ::step, :]
+        lum = (a[..., 0] * .299 + a[..., 1] * .587 + a[..., 2] * .114)
+        prof = lum.std(axis=0)
+        if prof.size < 8:
+            return None
+        return prof.astype(_np.float32)
+    except Exception:
+        return None
+
+
+def _row_profile(arr, height: int = _SHEET_PROFILE_W):
+    """행(=세로) 기준 프로파일. 세로로 쌓인 시트를 놓치지 않기 위함."""
+    try:
+        import numpy as _np
+        if arr is None or getattr(arr, "ndim", 0) != 3:
+            return None
+        a = _np.asarray(arr, dtype=_np.float32)
+        if a.shape[0] < 8 or a.shape[1] < 8:
+            return None
+        h, w = a.shape[0], a.shape[1]
+        if h > height:
+            step = max(1, h // height)
+            a = a[::step, :, :]
+        lum = (a[..., 0] * .299 + a[..., 1] * .587 + a[..., 2] * .114)
+        prof = lum.std(axis=1)
+        if prof.size < 8:
+            return None
+        return prof.astype(_np.float32)
+    except Exception:
+        return None
+
+
+def _panels_from_profile(prof, min_w_ratio: float = 0.04):
+    """프로파일 → 콘텐츠 연속 구간 [(x0, x1), ...]."""
+    try:
+        import numpy as _np
+        p = _np.asarray(prof, dtype=_np.float32)
+        if p.ndim != 1 or p.size < 8:
+            return []
+        peak = float(p.max())
+        if peak <= 1e-6:
+            return []                      # 전부 평탄 → 시트 아님
+        on = p >= peak * 0.30
+        min_w = max(1, int(round(p.size * min_w_ratio)))
+        panels = []
+        start = None
+        for i, v in enumerate(on):
+            if v and start is None:
+                start = i
+            elif not v and start is not None:
+                if i - start >= min_w:
+                    panels.append((start, i))
+                start = None
+        if start is not None and len(on) - start >= min_w:
+            panels.append((start, len(on)))
+        return panels
+    except Exception:
+        return []
+
+
+def _axis_spacing_ratio(bands) -> float:
+    """밴드 중심 간격의 균일성(min/max). 격자면 1.0 에 가깝다."""
+    if len(bands) < 2:
+        return 0.0
+    try:
+        centers = [(x0 + x1) / 2.0 for x0, x1 in bands]
+        gaps = [centers[i + 1] - centers[i] for i in range(len(centers) - 1)]
+        if not gaps or max(gaps) <= 0:
+            return 0.0
+        return min(gaps) / max(gaps)
+    except Exception:
+        return 0.0
+
+
+def _best_axis(arr):
+    """가로/세로 중 격자 구조가 더 뚜렷한 축의 밴드와 간격 균일성."""
+    best = ([], 0.0)
+    for prof in (_column_profile(arr), _row_profile(arr)):
+        if prof is None:
+            continue
+        bands = _panels_from_profile(prof)
+        if len(bands) < _SHEET_MIN_PANELS:
+            continue
+        g = _axis_spacing_ratio(bands)
+        if g > best[1]:
+            best = (bands, g)
+    return best
+
+
+def _sheet_cell_boxes(arr):
+    """패널 셀 = 열 밴드 × 행 밴드. 한 축만 있으면 그 축을 쓴다."""
+    # 주의: `prof or []` 로 쓰면 numpy 배열의 진릿값 평가가 ValueError 를
+    # 던진다. except 에 삼켜져 **조용히** 0 이 되어 시트를 놓친다(실측).
+    cp = _column_profile(arr)
+    rp = _row_profile(arr)
+    cols = _panels_from_profile(cp) if cp is not None else []
+    rows = _panels_from_profile(rp) if rp is not None else []
+    if len(cols) >= 2 and len(rows) >= 2:
+        return cols, rows
+    if len(cols) >= 2:
+        return cols, [(0, int(arr.shape[0]))]
+    if len(rows) >= 2:
+        return [(0, int(arr.shape[1]))], rows
+    return [], []
+
+
+def _cell_signature(arr, y0, y1, x0, x1, g: int = _SHEET_SIG_GRID):
+    """셀 → 길이 1로 정규화된 색/명도 서명. 종횡비와 무관하게 같은 크기.
+
+    **내용 없는 셀(평탄)은 None 을 돌려준다.** 서명이 영벡터가 되면 셀
+    간 내적이 0 이 되어, 빈 셀이 하나만 섞여도 평균 유사도가 0 으로 내려가
+    판별이 통째로 죽는다(합성 케이스에서 실측). 빈 셀은 피사체에 대한 정보가
+    없으므로 평균에서 제외하는 게 옳다.
+    """
+    try:
+        import numpy as _np
+        cell = arr[y0:y1, x0:x1]
+        if cell.size == 0 or cell.shape[0] < 1 or cell.shape[1] < 1:
+            return None
+        h, w = cell.shape[0], cell.shape[1]
+        ys = _np.linspace(0, h - 1, g).astype(int)
+        xs = _np.linspace(0, w - 1, g).astype(int)
+        s = cell[_np.ix_(ys, xs)].reshape(-1, 3).astype(_np.float32)
+        s = s - s.mean(axis=0, keepdims=True)      # 전역 밝기 차 제거
+        n = float(_np.linalg.norm(s))
+        return s / n if n > 1e-6 else None
+    except Exception:
+        return None
+
+
+def _cell_similarity(arr) -> float:
+    """셀 간 평균 유사도(0~1). 같은 인물 반복이면 크고, 다른 장면이면 0 근처."""
+    try:
+        import numpy as _np
+        cols, rows = _sheet_cell_boxes(arr)
+        if not cols or not rows:
+            return 0.0
+        sigs = []
+        for (y0, y1) in rows:
+            for (x0, x1) in cols:
+                s = _cell_signature(arr, y0, y1, x0, x1)
+                if s is not None:
+                    sigs.append(s)
+        if len(sigs) < 3:
+            return 0.0
+        dots = [(sigs[i] * sigs[j]).sum()
+                for i in range(len(sigs)) for j in range(i + 1, len(sigs))]
+        return float(_np.mean(dots))
+    except Exception:
+        return 0.0
+
+
+def _sheet_normalize(arr):
+    """분석용 배열로 축소(최대 변 512). **좌표 공간을 통일하기 위해 필수.**
+
+    왜(Why) 필수인가(2026-09-28 실측): 프로파일은 512 기준으로 좌표를 내는데
+    그 좌표를 원본 배열로 자르면 **엉뚱한 곳**을 읽는다. 1536 폭 배열에서
+    밴드가 (67,100) 이면 실제 실루엣은 (204,296) 이었고, 잘라낸 셀은 전부
+    흰 배경이었다 → 셀 유사도가 0 이 되어 판별이 조용히 죽는다.
+    이제 _looks_like_sheet 는 자기 입력의 크기와 무관하게 동작한다.
+    """
+    try:
+        import numpy as _np
+        if arr is None or getattr(arr, "ndim", 0) != 3:
+            return None
+        a = _np.asarray(arr, dtype=_np.float32)
+        h, w = a.shape[0], a.shape[1]
+        if h < 8 or w < 8:
+            return None
+        if max(h, w) <= _SHEET_PROFILE_W:
+            return a
+        # **양쪽 축에 같은 step** (2026-09-29 실측). 축마다 다른 step 을
+        # 쓰면(내 첫 교정안) 종횡비가 깨진다: 4296x7696 이 (513, 537) 로
+        # 뭉개져 1.79:1 이 0.96:1 이 됐다. 한 step 을 양쪽에 적용해야
+        # 종횡비가 보존된다(513x286 = 1.79:1).
+        # 이 step 은 위 _np_as_rgb 의 PIL 경로가 쓰는
+        # `max(w, h) // _SHEET_PROFILE_W` 와 **같은 값**이라, 두 경로의
+        # 배열 크기까지 동일해진다 → 판정이 경로에 무관해진다.
+        step = max(1, max(h, w) // _SHEET_PROFILE_W)
+        a = a[::step, ::step, :]
+        # **올림을 버림으로 맞춰야 한다** (2026-09-29 실측). a[::step] 은
+        # 마지막 행/열을 **올림해서** 포함하므로(4296/15 → 287) PIL 경로의
+        # resize((w//step, h//step)) = 286 과 1픽셀 어긋난다. 그 1픽셀이
+        # 패널 경계를 밀어 포즈 사진을 시트로 오인시켰다(sim 0.209 vs 0.023).
+        # PIL 과 정확히 같은 크기로 잘라야 좌표가 일치한다.
+        return a[:max(1, h // step), :max(1, w // step), :]
+    except Exception:
+        return None
+
+
+def _looks_like_sheet(arr) -> dict:
+    """패널 격자 + 내용 유사도로 캐릭터 시트인지 판정.
+
+    반환: {"sheet", "n", "greg", "sim"} — n 은 판별 근거가 된 축의 밴드 수.
+    """
+    out = {"sheet": False, "n": 0, "greg": 0.0, "sim": 0.0}
+    try:
+        a = _sheet_normalize(arr)
+        if a is None:
+            return out
+        bands, greg = _best_axis(a)
+        if len(bands) < _SHEET_MIN_PANELS:
+            return out
+        sim = _cell_similarity(a)
+        out["n"] = len(bands)
+        out["greg"] = round(greg, 2)
+        out["sim"] = round(sim, 3)
+        out["sheet"] = (greg >= _SHEET_MIN_SPACING_RATIO
+                        and sim >= _SHEET_MIN_CELL_SIMILARITY)
+        return out
+    except Exception:
+        return out
+def sheet_like_slots(image_items) -> list:
+    """연결된 참조 중 캐릭터 시트로 판별된 슬롯 번호 목록.
+
+    왜(Why) 이미지에서 찾나: 사람이 "시트"라고 쓴다는 보장은 없다. 실제로도
+    안 썼다. 픽셀에 6뷰 반복이 보이면 그게 시트다.
+    """
+    slots = []
+    try:
+        for label, img in (image_items or []):
+            if img is None:
+                continue
+            try:
+                arr = _np_as_rgb(img)
+            except Exception:
+                continue
+            if arr is None:
+                continue
+            if _looks_like_sheet(arr).get("sheet"):
+                slots.append(str(label))
+    except Exception:
+        pass
+    return slots
+
+
+def _np_as_rgb(img):
+    """PIL 이미지 → numpy(H,W,3) float32 0~1. 실패 시 None."""
+    try:
+        import numpy as _np
+        if img is None:
+            return None
+        if hasattr(img, "mode") and hasattr(img, "convert"):
+            img = img.convert("RGB")
+            w, h = img.size
+            if w < 8 or h < 8:
+                return None
+            step = max(1, max(w, h) // 512)
+            img = img.resize((max(1, w // step), max(1, h // step)))
+            a = _np.asarray(img, dtype=_np.float32) / 255.0
+        else:
+            a = _np.asarray(img, dtype=_np.float32)
+            if a.ndim == 2:
+                a = a[..., None].repeat(3, axis=2)
+            if a.ndim == 4:
+                a = a[0]
+            if a.ndim != 3:
+                return None
+            if a.max() > 1.5:
+                a = a / 255.0
+        if a.ndim != 3 or a.shape[2] < 3:
+            return None
+        a = _np.clip(a[..., :3], 0.0, 1.0)
+        # **분석 전에 축소한다 (ComfyUI 텐서 경로 실측 2026-09-29).**
+        # 왜(Why) 필수인가: ComfyUI LoadImage 는 원본 해상도(BHWC) 텐서를
+        # 넘긴다. 10896x6800 을 그대로 프로파일/서명 분석하면 픽셀 경로와
+        # **다른 판정**이 나왔다 — 같은 파일인데 PIL 경로는 sim=0.414(시트),
+        # 텐서 경로는 0.422(시트)로 시트는 같았지만, 포즈 이미지(4296x7696)는
+        # PIL sim=0.023(아님) vs 텐서 sim=0.209(**시트로 오인**) 로 갈렸다.
+        # 원인은 해상도 의존적인 세부 판정(패널 경계·셀 서명 샘플링)이
+        # 원본/축소본에서 어긋나는 것. PIL 경로가 이미 512 기준으로
+        # 축소하므로, 여기서 **항상 같은 해상도로 맞춘다** → 두 경로의 판정이
+        # 일치하고 입력 크기에 무관해진다. 분석 전용이므로 정보 손실은 무관.
+        # 이 함수는 변환만 한다. **축소는 하지 않는다** — 아래 주석.
+        #
+        # 왜(Why) 여기서 축소하지 않는가(2026-09-29 실측): 이 축소를 남기면
+        # **가로로 긴 배열(512x1536 등)이 171x171 로 뭉개졌다**. 위 PIL
+        # 경로의 resize() 는 종횡비를 보존하는데(512x1536 유지), stride
+        # 는 두 축을 같은 step 으로 잘라 정사각형에 가깝게 만들기 때문이다.
+        # 6등분 시트 합성 이미지(1536x512)가 통째로 판별 실패했고, 더 나쁘게는
+        # PIL 경로와 판정이 갈렸다. 축소는 전부 _sheet_normalize() 가
+        # **종횡비 보존 방식**으로 담당한다(시그니처가 `_np_as_rgb` 와 같다).
+        return a
+    except Exception:
+        return None
+
+
+def character_sheet_guard(image_count: int, topic: str, image_labels=None, pixel_sheet_slots=None) -> str:
+    """캐릭터 시트 참조 가드 — 시트는 신원 소스, 출력은 카메라 구도 한 컷.
+
+    왜(Why): 사용자가 시트를 연결하는 목적은 **신원 일관성**이다. 실사용 표준
+    구조는 정면·후면 전신 + 상부 얼굴 정면·후면 + 좌우 측면(한 사람)인데,
+    이 뷰들을 "여러 사람"으로 세면 신원 의도와 정반대가 된다. 실측으로
+    시트 참조 실행에서 뷰가 별개 인물로 복제되는 문제가 있었다.
+    """
+    # 다인물 시트 어휘("인물 시트"·"라인업" 등)는 CHARACTER_SHEET_TOPICS에
+    # 없어서 여기서 걸러지면 아래 분기에 도달하지 못한다 → 둘 다 시트로 인정.
+    # 픽셀 판별 결과(슬롯 목록)를 받는다. topic 에 "시트" 라고 안 써도
+    # 6뷰 반복 구조가 보이면 발동한다 (2026-09-28 실측: topic 이 비어
+    
+    # 있어 1인 시트가 결과에 2명으로 복제됨). 정보는 이미 픽셀에 있다.
+    px_slots = [str(s) for s in (pixel_sheet_slots or [])]
+    if image_count <= 0 or not (_is_character_sheet_request(topic)
+                                or _is_multi_person_sheet(topic)
+                                or px_slots):
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
     first = labels[0] if labels else "1"
-    return (f"character sheet reference: reference image {first} is a character "
-            "sheet showing the same person from several angles — every view is "
-            "one identical person (same face, hairstyle, body type, and outfit). "
-            "Use the sheet for identity consistency and frame the output by the "
-            "requested camera composition. Do not copy the sheet layout: no "
-            "grid, no borders, no labels, no multi-panel arrangement; unless "
-            "multiple views are explicitly requested, render one single scene view.")
+    # **시트로 지목할 슬롯.** 픽셀 판별이 찾아냈으면 그 슬롯(들)을 쓴다.
+    # 왜(Why) 실측(2026-09-29 ComfyUI 실행): 시트가 연결된 3번인데 프롬프트가
+    # "reference image 1 is a character sheet" 라고 했다. first(=labels[0])를
+    # 무조건 썼기 때문이고, 1번은 신원 사진이라 **시트가 아닌데 시트라 지목**
+    # 됐다 — 정반대 지시라 모델이 엉뚱하게 반응한다. 시트 슬롯이 있으면
+    # 그걸 지목하고, 없을 때만 first 로 물러선다.
+    if px_slots:
+        sheet_slot = ", ".join(px_slots)
+        sheet_ref = f"reference image(s) {sheet_slot}"
+    else:
+        sheet_slot = first
+        sheet_ref = f"reference image {first}"
+    # 다인물 시트(라인업·오디션)는 "전부 한 사람"이 틀린 지시가 된다.
+    if _is_multi_person_sheet(topic):
+        return (f"multi-person reference sheet: {sheet_ref} is a "
+                "sheet showing SEVERAL DIFFERENT characters side by side, each "
+                "one a distinct individual with their own face, hair and "
+                "outfit. Use the sheet for per-character identity "
+                "consistency. Do not merge the characters into one person, and "
+                "do not copy the sheet layout: no grid, no borders, no labels, "
+                "no multi-panel arrangement; unless multiple characters are "
+                "explicitly requested, render one single scene view.")
+    return (f"character sheet reference: {sheet_ref} is a character "
+            "sheet of ONE SINGLE person shown from several angles ("
+            f"{CHARACTER_SHEET_VIEWS}). Every view is the same one person — "
+            "identical face, identical hairstyle, identical body type, "
+            "identical outfit, identical height and build. The repeated views "
+            "are reference angles of one identity, NOT separate people. "
+            # 2026-09-29 실측 교정: 여기가 "한 컷을 그려라" 고치지 않으면
+            # **시트가 그대로 렌더링**된다(실제 생성으로 확인). 위 문구는
+            # 시트를 *설명*하고 "one single scene view" 를 *권하기만* 한다.
+            # 시트 이미지가 지배적이라 모델이 그 사이에서 6뷰 배치를 최선으로
+            # 해석한다. negative 로 막는 것도 실패했다(시트 용어 금지만으로는
+            # 통과). 그래서 **무엇을 그릴지**를 positive 로 직접 박는다.
+            "Use the sheet ONLY to copy this person's identity. The output is "
+            "ONE photograph: a single continuous scene showing that one "
+            "person once, shot with the camera described above. The reference "
+            "sheet's multi-view arrangement must NOT appear in the output. "
+            "Render a single scene view, never a crowd, never a second "
+            "person, never duplicated or mirrored faces, never a lineup of "
+            "different characters.")
 
 
 def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str = "",
                    hint_defense: bool = False, mix_guard: bool = False,
                    appearance_ref: bool = False, body_balance: bool = False,
                    character_sheet: bool = False, image_count: int = 0,
-                   image_labels=None) -> str:
-    neg = ["blurry, soft focus, jpeg artifacts, watermark, signature, text, logo",
-           "warped geometry, distorted perspective, broken framing",
-           "flat lighting, harsh unflattering light",
-           "washed out colors, over-saturated colors",
-           NEGATIVE_ANATOMY_GUARD,
-           NEGATIVE_COLOR_CONTAMINATION_GUARD]
+                   image_labels=None, pose_ref: bool = False,
+                   physics_neg: str = "", detail_def: bool = False,
+                   furniture: bool = False, remove_item: bool = False,
+                   anatomy_count: bool = False) -> str:
+    neg = list(_NEGATIVE_BASE_COMMON)
+    # topic 이 비면(판단 근거 없음) 사람 기본값을 쓴다. ComfyUI 사용의
+    # 대부분이 인물이고, 비었을 때 가드를 빼는 쪽이 더 위험하다.
+    if not (topic or "").strip() or _is_human_subject(topic):
+        neg.append(NEGATIVE_ANATOMY_GUARD)
+        neg.append(NEGATIVE_COLOR_CONTAMINATION_GUARD)
     neg.extend(_camera_failure_modes(cam, topic))
     if cam.get("grade") == "느와르 (noir)":
         neg.append("color tint")
     if _is_human_subject(topic or ""):
         neg.append(ANATOMY_DETAIL_NEGATIVE)
+    # positive(ANATOMY_COUNT_POSITIVE) 는 붙는데 negative 짝이 없으면
+    # "5개여야 한다" 는 지시가 방향 없는 한쪽_only 가 된다(2026-09-28 발견).
+    if anatomy_count:
+        neg.append(ANATOMY_COUNT_NEGATIVE)
     _, _eth_neg_sa = _ethnicity_guard(topic or "", image_count, image_labels)
     if _eth_neg_sa:
         neg.append(_eth_neg_sa)
@@ -1750,6 +3397,23 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
         neg.append(BODY_BALANCE_NEGATIVE)
     if character_sheet:
         neg.append(CHARACTER_SHEET_NEGATIVE)
+        # 시트 뷰가 별개 인물로 세어지는 것까지 막는다 (신원 일관성이 목적이므로).
+        if not _is_multi_person_sheet(topic):
+            neg.append(CHARACTER_SHEET_PEOPLE_NEGATIVE)
+    # 형제 빌더(build_camera_negative)와 동일: 빈 조각을 넣지 않는다
+    _pose_neg = _pose_reference_negative(
+        _pose_role_slots(topic or "") & set(image_labels or [])) if pose_ref else ""
+    if _pose_neg:
+        neg.append(_pose_neg)
+    if physics_neg:
+        neg.append(physics_neg)
+    if detail_def:
+        neg.append(DETAIL_DEFINITION_NEGATIVE)
+    if furniture:
+        neg.append(FURNITURE_DNA_NEGATIVE)
+        neg.append(OBJECT_DRIFT_NEGATIVE)
+    if remove_item:
+        neg.append(_remove_item_guard(topic))
     for src in (llm_extra, extra):
         if src and src.strip():
             neg.append(src.strip())
@@ -1970,6 +3634,11 @@ class CameraDirector:
         # 바인딩되어 실행에 쓰이므로 기록 제거와 무관하게 정상 동작한다.
         if _scrub_api_key_from_prompt(prompt, unique_id):
             _log("사진 메타데이터 안전: 실행 기록의 api_key 제거")
+        else:
+            # 왜(Why) 여기를 봐야 하는가: scrub가 조용히 실패하면 사진에 키가
+            # 남는데 아무 신호가 없다. hidden 주입이 안 됐는지(=ComfyUI 버전
+            # 변경 가능성) 사용자에게 알려야 원인을 찾을 수 있다.
+            _warn_scrub_unavailable(api_key, prompt, unique_id)
         # 프롬프트 진입점: 선 연결(prompt_in)이 있으면 우선, 없으면 topic 칸
         external = (prompt_in or "").strip()
         if external:
@@ -2018,6 +3687,9 @@ class CameraDirector:
         failed_labels = []
         metrics = {}
         hints_note = ""
+        # 포즈 지정 슬롯은 topic 텍스트로 판정한다 (이미지가 없어도 참조 슬롯
+        # 번호가 텍스트에 있으면 유효하므로).
+        _pose_slots = _pose_role_slots(topic or "")
         if primary_image is not None:
             try:
                 metrics = image_metrics(primary_image)
@@ -2036,7 +3708,13 @@ class CameraDirector:
             try:
                 if reference_images:
                     _vision_px = vision_detail_px(vision_detail)
+                    # 포즈 지정 슬롯은 LLM 비전에서 제외한다. 왜(Why): 포즈는
+                    # ref_latents(픽셀) 경로로 전달되므로 LLM이 볼 필요가 없고,
+                    # 보면 얼굴·의상·배경까지 읽어 시간이 걸리며 그 사람이 장면
+                    # 묘사에 섞여 주 인물 신원을 오염시킨다.
                     for label, img in reference_items:
+                        if label in _pose_slots:
+                            continue
                         encoded = llm_client.image_to_b64(img, max_side=_vision_px)
                         if encoded:
                             img_b64s.append(encoded)
@@ -2065,7 +3743,9 @@ class CameraDirector:
                                       f"Use reference image {main_label} as the only main human identity. ")
                         secondary = _secondary_role_labels(
                             converted_labels, main=main_label,
-                            persons=plan["persons"])
+                            persons=plan["persons"],
+                            poses=plan["poses"],
+                            clothing=plan["outfits"])
                         if secondary:
                             image_note += ("Use reference image(s) " + ", ".join(secondary)
                                            + " only for explicitly requested roles "
@@ -2095,6 +3775,17 @@ class CameraDirector:
                     image_note = ("\nReference image conversion failed for slots: "
                                   + ", ".join(str(x) for x in failed_labels)
                                   + ". Continue with text-only camera direction.")
+                if _pose_slots:
+                    # 포즈 슬롯은 위에서 LLM 비전에서 제외됐다. 그래도 LLM이
+                    # 장면을 쓰면서 그 슬롯을 잊지 않도록 역할을 명시한다.
+                    image_note += (
+                        "\nReference image(s) " + ", ".join(str(x) for x in sorted(_pose_slots))
+                        + " are BODY POSE references only — you did not see them and "
+                        "must not describe or invent their appearance, clothing, face, "
+                        "or background. Simply state that the subject holds the same "
+                        "body pose and limb angles, and let the image model copy the "
+                        "posture from those images. Identity and wardrobe stay with "
+                        "the main reference and the topic.")
                 if 9 in converted_labels or 10 in converted_labels:
                     # 9·10번 = 외양 참조. LLM에게 역할을 명확히 알려 판정에 반영.
                     # 어떤 부위(가슴/성기)가 어떤 슬롯에 와도 올바르게 매칭되도록
@@ -2167,21 +3858,45 @@ class CameraDirector:
                     _log("[Camera Director] 다중 vision 전달 (Ollama — 비전 모델 필요)")
                 _notify_llm_status(unique_id, "on")
             except llm_client.LLMError as e:
-                # 왜(Why): "timed out"만으로는 클라우드 45초 기본값으로 끊긴
-                # 것인지 로컬 300초까지 버틴 것인지 구분할 수 없다. provider·
-                # model·실제 타임아웃을 함께 찍어 원인을 바로 특정하게 한다.
+                # 왜(Why): 오류 문자열만으로는 원인이 특정되지 않는다.
+                # timeout이면 어느 제한에 걸렸는지, 인증 오류면 provider·키 조합을
+                # 알려야 사용자가 무엇을 바꿔야 하는지 안다. provider·model·
+                # timeout은 **항상** 찍는다(실측에서 401이 provider 없이 찍혀
+                # 원인을 특정하지 못했다).
                 _to = llm_client.effective_timeout(provider, custom_base_url)
-                _hint = ""
-                if "timed out" in str(e).lower():
-                    _local = _to >= llm_client.LOCAL_TIMEOUT
-                    _hint = (f" | provider={provider or '없음'} model={model or '없음'} "
-                             f"timeout={_to}s (이미 {_to}초 대기 후 끊김 — "
+                _local = _to >= llm_client.LOCAL_TIMEOUT
+                _err = str(e)
+                _low = _err.lower()
+                _head = (f" | provider={provider or '없음'} "
+                         f"model={resolved_model or '없음'} timeout={_to}s")
+                if "timed out" in _low:
+                    _hint = (_head + " (이미 {_to}초 대기 후 끊김 — "
                              + ("로컬 LLM이 비전 추론에 실패했습니다. "
                                 "vision_detail을 512/384로 낮추거나 "
                                 "이미지 수를 줄여 보세요."
                                 if _local else
-                                "클라우드 기본 45초 초과입니다. vision_detail을 "
-                                "384로 낮추거나 이미지 수를 줄여 보세요."))
+                                "클라우드 기본 45초 초과입니다. "
+                                "vision_detail을 384로 낮추거나 "
+                                "이미지 수를 줄여 보세요."))
+                elif "401" in _err or "403" in _err or "unauthorized" in _low \
+                        or "api key" in _low or "credential" in _low:
+                    # 인증 실패: 키가 provider와 맞는지·비었는지가 두 후보다.
+                    _has_key = bool((api_key or "").strip())
+                    _why = ("키가 들어오지 않았습니다. 노드 api_key 칸 또는 "
+                            "루트 .env / 환경변수(OPENAI_API_KEY 등)를 "
+                            "확인하세요."
+                            if not _has_key else
+                            f"provider='{provider}'에 넣은 키가 인증되지 "
+                            "않았습니다. 다른 서비스 키를 넣었거나 만료되었을 "
+                            "수 있습니다. provider와 키가 같은 서비스인지 "
+                            "확인하세요.")
+                    _hint = _head + " (인증 실패 — " + _why + ")"
+                elif "404" in _err:
+                    _hint = (_head + " (모델 없음 — model 칸이 이 provider에서 "
+                             "제공되지 않습니다. provider 기본 모델로 비우거나 "
+                             "올바른 모델명을 입력하세요.)")
+                else:
+                    _hint = _head
                 _log(f"[Camera Director] LLM 실패 → 규칙(auto) 폴백: {e}{_hint}")
                 llm_obj = None
                 _notify_llm_status(unique_id, "fail")
@@ -2272,13 +3987,110 @@ class CameraDirector:
         body_balance = _is_human_subject(topic or scene)
         if body_balance:
             positive = positive.rstrip(". ") + ". " + BODY_BALANCE_POSITIVE + "."
-        # 캐릭터 시트 참조: 시트 이미지 연결 + 시트 의도 명시 실행에만 첨부.
-        char_sheet = character_sheet_guard(image_count, topic or scene,
-                                           image_labels=image_labels)
+        # 부위별 디테일 경계: 인물 + 참조 이미지 실행일 때만 첨부. 실측에서
+        # 참조 사용 실행에서 다리·팔·어깨가 뿌옇게 뭉개졌다. 참조 없는 txt2img는
+        # 붙이지 않는다(원본 픽셀을 지킬 대상이 없기 때문).
+        detail_def = _is_human_subject(topic or scene) and image_count >= 1
+        if detail_def:
+            positive = positive.rstrip(". ") + ". " + DETAIL_DEFINITION_POSITIVE + "."
+            _log("[Camera Director] 부위별 디테일 경계 가드 활성 "
+                 "(다리·팔·어깨·손가락 뭉개짐 방어)")
+        # 부위 개수(손가락 5·발가락 5·양팔·양다리) 명시. 인물 주제면 항상 붙인다
+        # (텍스트 비용 한 줄). 참조 실행에서는 원본 손을 그대로 살리는 쪽
+        # (낮은 denoise)과 짝을 이룬다 — 텍스트는 개수를 강제하지 못하므로.
+        anatomy_count = _is_human_subject(topic or scene)
+        if anatomy_count:
+            positive = positive.rstrip(". ") + ". " + ANATOMY_COUNT_POSITIVE + "."
+        # 가구·사물 DNA: 주 피사체·인물·포즈 슬롯을 제외한 **모든** 보조 슬롯에
+        # 기본 적용한다. topic에 "2번 침대 원본"을 안 써도 켜져야 한다(사용자
+        # 지적: 이런 건 topic 명시가 아니라 자동으로 걸어야 한다). 사물도
+        # 참조가 곧 DNA다 — "prop으로만 써라"만으로는 모델이 같은 종류의
+        # 다른 사물을 새로 그린다(침대 실측 사례).
+        _furn_slots = _object_dna_slots(topic or scene, image_labels, image_count)
+        _furn_text = _furniture_dna_guard(topic or scene, _furn_slots)
+        if _furn_text:
+            positive = positive.rstrip(". ") + ". " + _furn_text + "."
+            _log("[Camera Director] 가구·사물 DNA 가드 활성 ("
+                 + "/".join(str(x) for x in sorted(_furn_slots))
+                 + "번 — 형태·재질·색·비율 원본 유지)")
+        # 제거 사물 잔여물(찌꺼기): 인물 주제면 항상. 벗을지 말지의 판단은
+        # AI가 하는 게 맞고, "조각만 남기는 것"만 막으면 된다.
+        _rm_text = _remove_item_guard(topic or scene)
+        if _rm_text:
+            _log("[Camera Director] 반쪽 물체·찌꺼기 방어 활성 "
+                 "(제거된 사물은 완전 제거 또는 그대로)")
+        # 캐릭터 시트 참조 — 시트 의도(topic 텍스트) 또는 **픽셀 판별** 중 하나라도.
+        #
+        # 왜(Why) 픽셀 판별이 필요한가(2026-09-28 실측): topic 이 비어 있으면
+        # 텍스트 조건이 거짓이라 가드가 아예 발동하지 않았다 → 1인 시트가
+        # 결과에서 **2명**으로 복제됐다. 6뷰 반복 구조는 눈에 보이는데 아무도
+        # 쓰지 않았다. 정보는 이미 픽셀에 있다.
+        _px_sheet = sheet_like_slots(image_items)
+        if _px_sheet:
+            _log(f"[Camera Director] 참조 이미지 {'/'.join(_px_sheet)}번에서 "
+                 f"캐릭터 시트 패턴 감지 (여러 뷰가 반복 배치) — topic 문구와 "
+                 f"무관하게 시트 지시를 적용합니다")
+        char_sheet = character_sheet_guard(
+            image_count, topic or scene,
+            image_labels=image_labels, pixel_sheet_slots=_px_sheet)
+        # topic 이 비었는데 참조가 붙어 있으면 역할이 지정되지 않은 것이다.
+        # 조용히 아무 지시도 안 나가는 것을 막기 위해 무엇을 쓸 수 있는지
+        # 알려준다(2026-09-28 실측: 포즈 이미지에서 옷까지 복제됨).
+        if image_count >= 2 and not (topic or "").strip() and not _px_sheet:
+            _log('[Camera Director] ⚠ topic 이 비어 있어 참조 이미지의 역할을 '
+                 '구분하지 못했습니다. 기본값으로 1번=주 피사체, 나머지=배경/구도/'
+                 '조명 전용(옷·얼굴은 복사 안 함)이 적용됩니다. 포즈·시트·인물 '
+                 '구분을 원하면 topic 에 \'2번은 포즈만, 3번은 1인 캐릭터 시트\' '
+                 '처럼 역할을 적어주세요')
         if char_sheet:
             positive = positive.rstrip(". ") + ". " + char_sheet + "."
             _log("[Camera Director] 캐릭터 시트 참조 가드 활성 "
                  "(신원 일관성 + 시트 레이아웃 복제 방어)")
+        # 포즈 참조: topic에 포즈 역할이 명시된 슬롯이 있을 때만 첨부.
+        # 왜(Why): 참조 이미지 전체가 latent로 들어가므로 자세만 빌려와도 그
+        # 사람의 얼굴·의상이 유입된다. 포즈 전용임을 positive/negative 양쪽에
+        # 명시하고, LLM 비전에서는 이미 제외했다(이미지 모델에는 픽셀로 전달됨).
+        _pose_ref_text = _pose_reference_guard(
+            _pose_role_slots(topic or "") & set(image_labels))
+        # 저장하지 않는다: run_prompt는 이 값을 getattr로 읽지 않고 같은 판정을
+        # 다시 한다(재계산이的正确성 보장이자 dead attribute를 피한다).
+        if _pose_ref_text:
+            positive = positive.rstrip(". ") + ". " + _pose_ref_text + "."
+            _log("[Camera Director] 포즈 참조 가드 활성 ("
+                 + "/".join(str(x) for x in sorted(
+                     _pose_role_slots(topic or "") & set(image_labels)))
+                 + "번 — 자세만 따르고 얼굴·의상·배경은 비전에서 제외)")
+        # 물리·공간 가드: topic의 접촉/동작 동사를 이미지의 물리 상태로 번역한다.
+        # 왜(Why): "벽에 밀어붙였다/던진다"가 아무 지시 없이 넘어가면 모델이
+        # "나란히 서 있는 두 사람"으로 수렴한다. 접촉·속도·접지를 명시한다.
+        _phys_pos, _phys_neg = physics_contact_guard(topic or scene)
+        # 픽셀 기반 공간 측정: topic에 접촉 동사를 안 써도 참조 이미지에서
+        # "얼마나 떨어져 있는가"를 읽어 거리 유지 문구를 붙인다.
+        # subject_spacing/spacing_guard가 내부에서 예외를 {}·("", "")로 흡수하므로
+        # 바깥 방어는 과잉이다(두 분기 중 한쪽에만 씌워져 소스만 다르게 읽혔다).
+        # 거리 지시는 topic 동사가 있을 때(더 구체적 문구가 붙을 때)는 중복되므로
+        # 생략하고 negative(떨어짐 유지)만 보강한다.
+        if image_count >= 2:
+            self._last_spacing_measure = subject_spacing(primary_image)
+            _sp_pos, _sp_neg = spacing_guard(self._last_spacing_measure,
+                                              topic or scene)
+            if _phys_pos == "" and _sp_pos:
+                positive = positive.rstrip(". ") + ". " + _sp_pos + "."
+                _log("[Camera Director] 픽셀 공간 측정 ("
+                     + (spacing_log_text(self._last_spacing_measure)
+                        or "판정 불가")
+                     + ") — topic에 동작 표현 없어도 거리 유지 지시 적용")
+            if _sp_neg:
+                _phys_neg = (_phys_neg + ", " + _sp_neg) if _phys_neg else _sp_neg
+        if _phys_pos:
+            positive = positive.rstrip(". ") + ". " + _phys_pos + "."
+            _log("[Camera Director] 물리·공간 가드 활성 (접촉/동작 상태를 "
+                 "이미지 조건으로 번역)")
+        elif _is_human_subject(topic or scene):
+            # 접촉 신호가 없는 정적 인물 장면에도 최소 물리(접지·무게중심)만 붙인다.
+            _ground = physics_grounding_guard(topic or scene)
+            if _ground:
+                positive = positive.rstrip(". ") + ". " + _ground + "."
         # llm_hint 방어어는 LLM 판정이 실제로 이뤄진(llm 티어) 실행에만 붙인다.
         # Skills run_prompt가 negative를 다시 만들 때도 같은 판정을 재사용한다.
         hint_defense = tier == "llm" and bool((llm_hint or "").strip())
@@ -2287,6 +4099,12 @@ class CameraDirector:
         self._last_appearance_ref = appearance_ref
         self._last_body_balance = body_balance
         self._last_character_sheet_text = char_sheet
+        # Skills run_prompt 가 negative 를 다시 만들 때 **같은 소스**를
+        # 쓰게 한다. 왜(Why): 예전엔 run_prompt 가 (prompt_in + topic) 만
+        # 봤다. LLM 이 장면을 확장하면 그 내용은 **어디에도 없는데**
+        # positive 에는 들어 있었고, 짝인 negative 43조각(해부·피부·얼굴·
+        # 관절)이 통째로 사라졌다(2026-09-28 실측).
+        self._last_subject_text = ((topic or "") + " " + (scene or ""))
         negative = build_negative(camera, extra=extra_negative or "",
                                   llm_extra=llm_extra,
                                   topic=((topic or "") + " " + (scene or "")),
@@ -2295,11 +4113,20 @@ class CameraDirector:
                                   body_balance=body_balance,
                                   character_sheet=bool(char_sheet),
                                   image_count=image_count,
-                                  image_labels=list(image_labels))
+                                  image_labels=list(image_labels),
+                                  pose_ref=bool(_pose_ref_text),
+                                  physics_neg=_phys_neg,
+                                  detail_def=detail_def,
+                                  furniture=bool(_furn_text),
+                                  remove_item=bool(_rm_text),
+                                  anatomy_count=anatomy_count)
         self._last_camera = dict(camera)
         self._last_llm_extra = llm_extra
         self._last_image_count = image_count
         self._last_image_labels = list(image_labels)
+        # 픽셀 시트 판별 결과 보관 — Skills run_prompt 가 다시 계산하지 않고
+        # 그대로 쓴다(전체 해상도 프로파일 계산이라 중복이 아깝다).
+        self._last_pixel_sheet_slots = list(_px_sheet)
 
         hint_text = (" | hints: " + "; ".join(hints)) if hints else ""
         _log(f"📷 Camera Director | tier={tier} preset={preset} source={cam_source} "
@@ -2539,8 +4366,22 @@ class CameraDirectorEncode(CameraDirector):
         return (None, None)
 
     @staticmethod
-    def _prepare_qwen_image_data(image_items, vae=None, latent_image=None):
-        """Prepare Qwen vision images and VAE reference latents once."""
+    def _prepare_qwen_image_data(image_items, vae=None, latent_image=None,
+                                 latent_skip_labels=None):
+        """Prepare Qwen vision images and VAE reference latents once.
+
+        latent_skip_labels 에 해당하는 슬롯은 **언어 모델용 vision image 로만**
+        넣고 VAE reference latent 에서는 제외한다.
+
+        왜(Why) 필요한가 — 2026-09-29 실측: Qwen-Image-2.1 은 reference latent
+        의 **레이아웃까지** 따라 그린다. 1인 6뷰 캐릭터 시트를 reference 로
+        넣으면 결과도 **6뷰 시트 그대로** 렌더링됐다. 분리 실험으로 확정:
+        시트 없으면 항상 1인 정상 / 시트 있으면 topic 에 "a single continuous
+        photograph of one young woman" 라고 명시해도 4뷰가 나온다.
+        프롬프트로는 이길 수 없다 — pixel-level 레이아웃 힌트라서.
+        그래서 시트는 LLM(신원 파악)에만 보여주고 diffusion 에서는 뺀다.
+        """
+        latent_skip_labels = {str(x) for x in (latent_skip_labels or set())}
         if not image_items or not all(hasattr(image, "movedim") for _label, image in image_items):
             return [], None
         try:
@@ -2559,7 +4400,8 @@ class CameraDirectorEncode(CameraDirector):
                 if cached is not None:
                     cached_rgb, cached_latent = cached
                     images_vl.append(cached_rgb)
-                    if cached_latent is not None:
+                    if (cached_latent is not None and
+                            str(_label) not in latent_skip_labels):
                         ref_latents.append(cached_latent)
                     continue
                 samples = image[:1].movedim(-1, 1)
@@ -2585,7 +4427,10 @@ class CameraDirectorEncode(CameraDirector):
                 if s.shape[-1] > 3:
                     rgb = rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
                 images_vl.append(rgb)
-                latent = vae.encode(s) if vae is not None else None
+                # 시트 슬롯은 vision 에만 넣고 latent 에서는 제외한다(위 docstring).
+                latent = None
+                if vae is not None and str(_label) not in latent_skip_labels:
+                    latent = vae.encode(s)
                 if latent is not None:
                     ref_latents.append(latent)
                 _qwen_ref_cache_put(cache_key, (rgb, latent, vae))
@@ -2597,11 +4442,13 @@ class CameraDirectorEncode(CameraDirector):
 
     @staticmethod
     def _qwen_image_edit_conditioning(clip, text, image_items=None, vae=None,
-                                       latent_image=None, prepared=None):
+                                       latent_image=None, prepared=None,
+                                       latent_skip_labels=None):
         """Encode Qwen image-edit text with precomputed shared reference data."""
         if prepared is None:
             images_vl, ref_latents = CameraDirectorEncode._prepare_qwen_image_data(
-                image_items, vae=vae, latent_image=latent_image
+                image_items, vae=vae, latent_image=latent_image,
+                latent_skip_labels=latent_skip_labels
             )
         else:
             images_vl, ref_latents = prepared
@@ -2674,9 +4521,72 @@ class CameraDirectorEncode(CameraDirector):
         for _warn in preflight_warnings(external_prompt or (topic or ""),
                                         camera, latent_mp=_latent_mp(latent_image)):
             _log(f"[Camera Director] 출발 점검 ⚠ {_warn}")
-        # 국가 표현형 가드는 참조 슬롯 정보를 함께 봐야 하므로 바깥에서 확보한다.
+        # 국가 표현형·포즈 참조 가드는 참조 슬롯 정보를 함께 봐야 하므로
+        # 바깥에서 확보한다 (negative 생성도 이 블록 밖에서 일어난다).
         last_count = getattr(self, "_last_image_count", 0)
-        last_labels = getattr(self, "_last_image_labels", None)
+        # **폴백 필수(2026-09-29 실측 결함 수정)**: Skills 는 base run() 을
+        # 거치지 않으므로 _last_image_labels 가 항상 None 이었다. 그래서
+        # 슬롯 정보가 필요한 가드(포즈 참조·캐릭터 시트·가구 DNA·국가 표현형)가
+        # 전부 "슬롯 교집합 = 공집합" 이 되어 조용히 미작동했다.
+        # 실제 실행에서 "3번은 포즈만" 인데 포즈 가드가 붙지 않은 것이 이 결함이다.
+        # image_items 로 직접 폴백해야 한다(아래쪽 image_out 블록은 같은 폴백 사용).
+        last_labels = (getattr(self, "_last_image_labels", None)
+                       or [l for l, _ in (image_items or [])])
+        if not last_count:
+            last_count = len(image_items or [])
+        # positive·negative가 **같은 텍스트 소스**를 본다. 이음새가 어긋나면
+        # positive 지시의 짝인 negative가 조용히 사라진다(리뷰로 실제 확인).
+        # base run 이 저장한 판정 소스(topic + LLM 확장 scene)를 재사용한다.
+        # 예전엔 (prompt_in + topic) 뿐이라 LLM 확장이 negative 판정에서
+        # 사라졌다 — positive 지시만 있고 짝인 negative 가 없는 상태(2026-09-28).
+        _subject_pi = (getattr(self, "_last_subject_text", "") or "").strip()
+        _eth_text_pi = " ".join(
+            x for x in (external_prompt, topic, _subject_pi) if x)
+        _pose_text_pi = _eth_text_pi
+        _pose_pos_pi = _pose_reference_guard(
+            _pose_role_slots(_pose_text_pi) & set(last_labels or []))
+        # 물리·공간 가드도 base run과 동일 판정으로 prompt_in 경로에 합친다.
+        # (Korean 동작어는 위젯 topic 쪽에만 있을 수 있어 양쪽 다 본다)
+        # 왜(Why) 접촉 결과와 최종 결과를 분리하나: 아래 spacing 게이트는 base run
+        # 과 **동일**해야 한다. base 는 접촉 결과가 없을 때만 spacing 블록에
+        # 들어가고, grounding 은 그 **뒤의 elif** 로 붙는다. 예전엔 grounding 이
+        # _phys_pos_pi 를 먼저 채워서 `== ""` 이 영원히 거짓이 되었고, positive
+        # 문구는 우연히 살아 있는 반면 **짝인 negative 만 사라졌다**
+        # (지시가 한쪽_only 가 됨, 2026-09-28 실측).
+        _phys_contact_pi, _phys_neg_pi = physics_contact_guard(_pose_text_pi)
+        _phys_pos_pi = _phys_contact_pi
+        if not _phys_pos_pi and _is_human_subject(_pose_text_pi):
+            _phys_pos_pi = physics_grounding_guard(_pose_text_pi)
+        # 부위별 디테일 경계 / 가구 DNA / 제거 잔여물 — positive·negative가
+        # **같은 판정**을 써야 한다(하나만 갱신되면 짝인 방어가 사라진다).
+        _detail_def_pi = _is_human_subject(_pose_text_pi) and last_count >= 1
+        _anatomy_count_pi = _is_human_subject(_pose_text_pi)
+        # 캐릭터 시트 참조: base run과 **동일 판정**(그대로 재계산한다 —
+        # character_sheet_guard가 슬롯 정보를 쓰므로 last_labels가 필요하다).
+        # base run 과 **같은 픽셀 판별**을 쓴다. 안 하면 시트 참조를 넣고도
+        # Skills 경로에서는 인물이 복제된다(양쪽 판정이 어긋나면 조용히 실패).
+        _px_sheet_pi = getattr(self, "_last_pixel_sheet_slots", None)
+        if _px_sheet_pi is None:      # run() 없이 단독 호출된 경우
+            _px_sheet_pi = sheet_like_slots(image_items)
+        if _px_sheet_pi:
+            _log(f"[Camera Director] 참조 이미지 {'/'.join(_px_sheet_pi)}번에서 "
+                 "캐릭터 시트 패턴 감지 (topic 문구와 무관)")
+        _cs_text_pi = character_sheet_guard(
+            last_count, _pose_text_pi, image_labels=last_labels,
+            pixel_sheet_slots=_px_sheet_pi)
+        # 사물 DNA도 base run과 같은 판정(모든 보조 슬롯 기본 적용)
+        _furn_slots_pi = _object_dna_slots(_pose_text_pi, last_labels, last_count)
+        _furn_pos_pi = _furniture_dna_guard(_pose_text_pi, _furn_slots_pi)
+        _remove_item_pi = bool(_remove_item_guard(_pose_text_pi))
+        # 픽셀 공간 측정도 prompt_in 경로에 병합한다 (base run과 동일 판정).
+        # topic에 동작 표현이 없을 때만 거리 유지 문구가 필요하다.
+        if _phys_contact_pi == "" and last_count >= 2 and image_items:
+            _sp_measure_pi = subject_spacing(image_items[0][1])
+            _sp_pos_pi, _sp_neg_pi = spacing_guard(_sp_measure_pi, _pose_text_pi)
+            if _sp_pos_pi:
+                _phys_pos_pi = _sp_pos_pi
+            if _sp_neg_pi:
+                _phys_neg_pi = (_phys_neg_pi + ", " + _sp_neg_pi) if _phys_neg_pi else _sp_neg_pi
         if external_prompt:
             identity_anchor = build_identity_anchor(
                 last_count, external_prompt, image_labels=last_labels)
@@ -2732,10 +4642,25 @@ class CameraDirectorEncode(CameraDirector):
             if getattr(self, "_last_body_balance", False):
                 positive_text = self._combine_prompt_text(positive_text,
                                                           BODY_BALANCE_POSITIVE)
-            # 캐릭터 시트 참조 가드도 병합한다 (문구는 실행마다 갱신된 저장값).
-            _cs_text = getattr(self, "_last_character_sheet_text", "")
-            if _cs_text:
-                positive_text = self._combine_prompt_text(positive_text, _cs_text)
+            # 부위별 디테일 경계·가구 DNA도 Skills positive에 병합한다
+            # (base run과 **동일 판정** — 하나만 갱신되면 positive/negative가
+            #  어긋나 짝인 방어가 사라진다).
+            if _detail_def_pi:
+                positive_text = self._combine_prompt_text(
+                    positive_text, DETAIL_DEFINITION_POSITIVE)
+            if _anatomy_count_pi:
+                positive_text = self._combine_prompt_text(
+                    positive_text, ANATOMY_COUNT_POSITIVE)
+            if _cs_text_pi:
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          _cs_text_pi)
+            if _furn_pos_pi:
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          _furn_pos_pi)
+            # (캐릭터 시트 문구는 위에서 _cs_text_pi 로 이미 병합했다. 여기서
+            # getattr(self, "_last_character_sheet_text") 로 같은 문구를 또
+            # 붙이면 110단어어 positive 가 두 번 들어가 token 을 중복 소비한다.
+            # 2026-09-28 제거)
             # 스케일 일관 가드도 prompt_in 경로에 병합한다.
             # (standalone는 assemble에 이미 포함. 외부 프롬프트 기준 판정)
             if _needs_scale_guard(external_prompt or topic, camera):
@@ -2744,8 +4669,6 @@ class CameraDirectorEncode(CameraDirector):
             # 국가 표현형 가드도 prompt_in 경로에 병합한다.
             # (국가명은 한글 위젯 topic에만 있을 수 있어 양쪽 다 본다)
             # 참조 이미지가 신원을 고정하는 실행은 억제된다 (positive/negative 동일 판정).
-            _eth_text_pi = " ".join(
-                x for x in (external_prompt, topic) if x)
             _eth_pos_pi, _ = _ethnicity_guard(_eth_text_pi, last_count, last_labels)
             if _eth_pos_pi:
                 positive_text = self._combine_prompt_text(positive_text,
@@ -2754,11 +4677,27 @@ class CameraDirectorEncode(CameraDirector):
             if _is_animal_subject(_eth_text_pi):
                 positive_text = self._combine_prompt_text(
                     positive_text, ANIMAL_SPECIES_POSITIVE)
+            # 포즈 참조 가드도 prompt_in 경로에 병합한다 (base run과 동일 판정).
+            if _pose_pos_pi:
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          _pose_pos_pi)
+            # 물리·공간 가드도 prompt_in 경로에 병합한다.
+            if _phys_pos_pi:
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          _phys_pos_pi)
         prevent_duplicates = bool(single_person_anchor) if external_prompt else False
+        # negative도 positive와 **같은 텍스트 소스**를 본다 (topic + prompt_in).
+        # 왜(Why): 이음새가 어긋나면 positive에 붙은 지시의 짝인 negative가
+        # 조용히 사라진다 — 실측으로 국가 표현형(브라질)·동물 가드에서 확인됨.
+        # 국가명은 한글 topic 칸에만 있을 수 있어 prompt_in만 보면 놓친다.
         negative_text = build_camera_negative(
             camera, prevent_duplicates=prevent_duplicates,
-            topic=external_prompt or topic, image_count=last_count,
-            image_labels=last_labels)
+            topic=_eth_text_pi, image_count=last_count,
+            image_labels=last_labels,
+            pose_ref=bool(_pose_pos_pi), physics_neg=_phys_neg_pi,
+            detail_def=_detail_def_pi, furniture=bool(_furn_pos_pi),
+            remove_item=_remove_item_pi, anatomy_count=_anatomy_count_pi,
+            character_sheet=bool(_cs_text_pi))
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
         # 카메라 전용 negative로 덮어쓰면서 조용히 버려졌기 때문이다.
@@ -2783,13 +4722,19 @@ class CameraDirectorEncode(CameraDirector):
         if getattr(self, "_last_body_balance", False):
             negative_text = (negative_text.rstrip("., ")
                              + ", " + BODY_BALANCE_NEGATIVE)
-        # 캐릭터 시트 레이아웃 방어어도 병합한다.
-        if getattr(self, "_last_character_sheet_text", ""):
-            negative_text = (negative_text.rstrip("., ")
-                             + ", " + CHARACTER_SHEET_NEGATIVE)
+        # (캐릭터 시트 negative 는 build_camera_negative(character_sheet=) 가
+        # 두 상수를 이미 넣는다. 수동 병합은 중복. 2026-09-28 제거)
         try:
+            # 시트 슬롯은 **언어 모델(vision) 에만** 넣고 VAE reference
+            # latent 에서는 제외한다 — 그래야 diffusion 이 시트
+            # 레이아웃(6뷰 배치)을 따라 그리지 않는다.
+            # 왜(Why) 실측 2026-09-29: 시트를 reference 로 넣으면
+            # 결과가 **시트 그대로** 렌더링됐다. 분리 실험으로 확정 —
+            # 시트 없으면 항상 1인 정상, 시트 있으면 topic 에 장면을
+            # 명시해도 4뷰. 프롬프트로는 이길 수 없다(pixel 힌트).
             prepared = self._prepare_qwen_image_data(
-                image_items, vae=vae, latent_image=latent_image
+                image_items, vae=vae, latent_image=latent_image,
+                latent_skip_labels=_px_sheet_pi
             )
         except Exception as exc:  # noqa: BLE001
             # reference 준비 실패해도 실행은 살린다 — 텍스트 전용으로 폴백.
@@ -2825,33 +4770,30 @@ class CameraDirectorEncode(CameraDirector):
         last_labels = getattr(self, "_last_image_labels", None) or [l for l, _ in image_items]
         image_out = None
         main_slot = None
+        main_img = None
         try:
             main_slot = _person_object_plan(
                 external_prompt or (topic or ""), last_labels)["main"]
+        except Exception:
+            main_slot = None
+        if image_items:
+            # 주 슬롯 이미지는 image_out과 reference_latent_out이 **같은 픽셀**을
+            # 써야 짝이 맞는다. 한 번만 찾고 두 출력에 함께 쓴다 (리뷰로 확인된 복붙).
             for label, img in image_items:
                 if label == main_slot:
-                    image_out = img
+                    main_img = img
                     break
-        except Exception:
-            pass
-        if image_out is None and image_items:
-            image_out = image_items[0][1]
+            if main_img is None:
+                main_img = image_items[0][1]
+            image_out = main_img
         # 기준 latent 출력 (3번 교정 노드용). _prepare가 이미 인코딩한 결과를
         # 캐시 키로 조회만 한다 — 재인코딩 없음. vae 미연결이면 None.
-        # 왜(Why): 주 reference와 같은 슬롯의 latent라야 image_out과 짝이 맞는다.
         reference_latent_out = None
         try:
-            if vae is not None and image_items:
-                _main_img = None
-                for _label, _img in image_items:
-                    if _label == main_slot:
-                        _main_img = _img
-                        break
-                if _main_img is None:
-                    _main_img = image_items[0][1]
+            if vae is not None and main_img is not None:
                 _tw, _th = CameraDirectorEncode._reference_target_size(latent_image)
                 _cached = _qwen_ref_cache_get(
-                    _qwen_ref_cache_key(_main_img, _tw, _th, vae), vae)
+                    _qwen_ref_cache_key(main_img, _tw, _th, vae), vae)
                 if _cached is not None and _cached[1] is not None:
                     reference_latent_out = {"samples": _cached[1]}
         except Exception:
