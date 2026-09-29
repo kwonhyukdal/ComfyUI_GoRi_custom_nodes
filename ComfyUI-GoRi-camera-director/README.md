@@ -72,10 +72,6 @@ ComfyUI/
     └── ComfyUI-GoRi-camera-director/   ← 이 폴더 전체를 복사
 ```
 
-> 📍 **이 PC의 실제 설치 위치 (2026-09-25 확인):**
-> `C:\ComfyUI\ComfyUI video\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-GoRi-camera-director`
-> 배포 Python: `python_embeded\python.exe` (3.12.10) — 자동 테스트 통과 확인
-
 1. 이 폴더를 `ComfyUI/custom_nodes/` 에 복사
 2. ComfyUI 재시작 (`Start ComfyUI.bat`)
 3. 노드 추가 메뉴 → **HF Skills / Camera** → **`(GoRi) Camera Director Skills`**

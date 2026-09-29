@@ -31,11 +31,22 @@ jobs:
       - name: Run node tests
         shell: bash
         run: |
+          # 왜(Why) 여기서 glob을 하드코딩하지 않나: 배포 폴더명은 Registry 매핑 때문에
+          # `ComfyUI-GoRi-camera-director` / `Comfyui-GoRi-Consistency-Keeper` 처럼
+          # 서로 다른 대소문자를 섞어 쓰고 있다. 예전 `GoRi-*/` 패턴은 이 두 폴더를
+          # 매칭하지 못해 **테스트 0개를 돌고 성공으로 통과**했다.
+          # 그래서 최상위 디렉터리 전부를 훑고 테스트 파일이 있는 것만 실행한다.
           fail=0
-          for node_dir in GoRi-*/; do
+          ran=0
+          for node_dir in */; do
             if [ -f "${node_dir}tests/test_node.py" ]; then
               echo "== ${node_dir} ($(uname -s) py$(python -V 2>&1 | cut -d' ' -f2)) =="
+              ran=$((ran + 1))
               (cd "${node_dir}" && python tests/test_node.py) || fail=1
             fi
           done
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::노드 테스트를 하나도 찾지 못했다. 폴더 구조를 확인하라."
+            fail=1
+          fi
           exit $fail

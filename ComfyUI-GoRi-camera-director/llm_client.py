@@ -440,7 +440,7 @@ def chat(provider: str, model: str, api_key: str,
         if provider == "OpenRouter":
             # OpenRouter는 출처 헤더를 권장한다.
             extra_headers = {
-                "HTTP-Referer": "https://github.com/goriN/comfyui-GoRi-camera-director",
+                "HTTP-Referer": "https://github.com/kwonhyukdal/ComfyUI_GoRi_custom_nodes",
                 "X-Title": "GoRi Camera Director",
             }
         raw = _openai_compatible_chat(

@@ -40,17 +40,82 @@ bicubic resize.
 
 ## Tuning guide
 
-Start with defaults (`strength_camera` 0.2 / `strength_original` 0.2).
+> ### ⭐ Recommended: `camera` 0.33 / `original` 0.33
+>
+> **Real-world testing shows the same value (0.33) on both strengths is the most
+> stable setting.** It keeps camera direction and original identity pulling at the
+> same weight. Use this first, then adjust only from the table below.
+> (The widget default is 0.2, but 0.33 is the verified practical optimum.)
+
+| Value | When |
+|---|---|
+| **0.33 / 0.33** | **Default — most stable. Start here.** |
+| 0.15–0.2 | Pasted-on or flat look (over-pull) |
+| 0.45–0.6 | Strengthen one side specifically (`original` = face lock, `camera` = composition lock) |
+| 0 / unconnected | Only one reference is in use |
 
 | Symptom | Adjust |
 |---|---|
-| Face differs from original | Raise `original` to 0.5–0.6 |
-| Composition/lighting off | Raise `camera` to 0.5–0.6 |
+| Face differs from original | Raise `original` to 0.45–0.6 |
+| Composition/lighting off | Raise `camera` to 0.45–0.6 |
 | Pasted-on / flat look | Lower both to 0.15–0.2 (over-pull) |
+| Two people merging into one | Lower both to 0.15–0.2 |
 | Single reference only | Set the unused side to 0 or leave unconnected |
 
-Adjust one at a time in 0.1 steps (raising both overcooks). Negligible
+Adjust one at a time in 0.05–0.1 steps (raising both high overcooks). Negligible
 compute — no VRAM/speed worry.
+
+## Automatic per-part detail restoration (no setting needed)
+
+If the sampler output is mushier than the reference in a given part (hands,
+legs, face), the node finds it from pixels and raises `original` strength for
+that part only. Console example:
+
+```
+[GoRi Consistency Keeper] per-part restore boost (hand_left(89%), leg_left(72%))
+— pulling the parts where the reference is intact but the result degraded
+```
+
+The "exactly five fingers" wording Camera Director puts in the prompt is not a
+constraint diffusion can enforce. This node is the pixel-level catch for when
+that wording fails.
+
+Limit: a region is left alone when the reference itself has no detail there
+(if the source cannot be trusted, restoring from it is just as wrong). It needs
+MediaPipe for landmarks; without it the node quietly falls back to its existing
+behaviour.
+
+## Character sheet reference detection (no setting needed, detection + log only)
+
+The node checks from pixels whether the `original` reference is a **character
+sheet** (several views laid out in a row: front, back, close-up head, ...) and
+picks the **single view** that best matches the sampled result. Console:
+
+```
+[GoRi Consistency Keeper] 6 panels detected in the original reference — looks like a character sheet
+[GoRi Consistency Keeper]   best matching view: panel 3 (similarity 0.81)
+[GoRi Consistency Keeper]   framing similarity 0.72 — pixels correspond, this view can be the identity source
+```
+
+- Camera Director sees the sheet as one blob, so per-view identity differences
+  cannot be controlled from the prompt. This handles only that part.
+- A false positive is worse than a miss (views would be averaged into several
+  identities), so a sheet is only accepted with 3+ panels of regular width and
+  spacing. Irregular photos are not treated as sheets.
+- **Strength is not changed yet.** The judgement is logged first; panel-based
+  identity sourcing comes in the next step.
+- Without `mediapipe` the framing check is skipped and only the log remains.
+
+## Operating systems (Windows / macOS / Linux)
+
+All three are supported and verified in CI. No external pip packages, and all
+paths are built with os.path, so Windows, macOS and Linux behave identically.
+
+- **macOS Apple Silicon (M1/M2/M3)**: there is no mediapipe wheel, so the
+  person mask switches off automatically. Per-part edge comparison, lighting
+  flow and character sheet panel detection use only torch/numpy and keep
+  working.
+- CUDA, MPS (Mac) and CPU all run without exceptions.
 
 ## Ghosting (double exposure) fix
 
