@@ -12,20 +12,34 @@ sys.path.insert(0, PKG)
 import consistency_keeper as ck  # noqa: E402
 
 PASS = FAIL = 0
+_print = print          # stdlib print 를 그대로 보관 (_say 가 재귀하지 않게)
 
 
 def _say(line):
-    """인코딩 안전 출력. 한국어 Windows 기본 콘솔(cp949)은 em dash(—)를
-    못 인코딩해서 UnicodeEncodeError로 테스트 전체가 중간에 죽는다(실측).
-    노드 쪽 `_log()`과 동일한 폴백을 쓴다."""
+    """인코딩 안전 출력.
+
+    한국어를 못 인코딩하는 콘솔에서는 UnicodeEncodeError 로 테스트 전체가
+    죽는다. 죽으면 **뒤의 검사가 아예 안 돌아가므로** 몇 개가 통과했는지
+    알 수 없다.
+
+    실제 실패한 인코딩은 cp949(한국어 Windows 콘솔)뿐만 아니라
+    **cp1252**(GitHub Windows 러너 기본)였다. 한국어를 아예 모르는
+    charmap 이라 한글이 첫 글자에서 바로 죽는다(2026-09-29 실측:
+    배포 저장소 CI run#28, Consistency-Keeper 157행).
+    그래서 특정 인코딩을 가정하지 않고, 실제 stdout 을 감지해 치환한다.
+    """
     try:
-        print(line)
+        _print(line)
     except UnicodeEncodeError:
         enc = getattr(sys.stdout, "encoding", None) or "utf-8"
         try:
-            print(line.encode(enc, "replace").decode(enc, errors="replace"))
+            _print(line.encode(enc, "replace").decode(enc, errors="replace"))
         except Exception:
-            pass
+            # 인코딩이 한글을 못 하면 어차피 못 쓴다 — 에러 표기만 남긴다.
+            try:
+                _print("".join(c if c.isascii() else "?" for c in line))
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -38,6 +52,12 @@ def check(name, cond, detail=""):
     else:
         FAIL += 1
         _say(f"  FAIL  {name}  {detail}")
+
+
+# 이 파일의 나머지 출력(섹션 헤더·요약)도 전부 안전 경로를 탄다.
+# 섹션 제목만 먼저 죽어 결과를 아예 못 보는 일이 있었다(157행).
+# 테스트 출력 전용이라 부작용은 없다.
+print = _say  # noqa: A001  (섹션 헤더 출력용)
 
 
 try:
@@ -1014,6 +1034,44 @@ check("R62: torch 게이트가 조기 종료로 구현됨 (게이트 밖 사용 
                 _TEST_SRC)
       is not None,
       "torch 게이트가 sys.exit 로 끝나지 않는다")
+
+# R63: 한국어를 못 인코딩하는 콘솔에서 죽지 않는다.
+# 왜(Why) 이것이 실제로 이 저장소를 죽였나(2026-09-29 실측):
+# 배포 저장소 CI(run#28)에서 **Windows 러너 2개만** 실패했다. 6개 job 중
+# macOS 2 / ubuntu 2 는 통과했다. 원인은 157행의 섹션 헤더 `print` 였다 —
+# GitHub Windows 러너의 기본 인코딩은 cp1252 인데, 한글을 아는 charmap 이
+# 아니라 **첫 글자에서** 죽는다. `check()` 는 `_say` 를 타는데 섹션 헤더는
+# raw `print` 였다. 즉 "인코딩 안전"을 한 군데만 고쳐 놓으면 그 공백이
+# 그대로 남는다.
+# 그래서 print 를 전부 `_say` 로 고정하고, 실제 서브프로세스를 여러
+# 인코딩으로 띄워 **파일 전체가 끝까지 도는지** 확인한다.
+check("R63: 섹션 헤더도 인코딩 안전 래퍼를 탄다 (raw print 없음)",
+      print is _say, "print = _say 로 고정해야 한다")
+check("R63: stdlib print 보존 (_say 재귀 방지)", _print is not _say)
+
+import subprocess as _sp2  # noqa: E402
+
+if os.environ.get("GORI_R63_CHILD"):
+    _r63_res = {}
+else:
+    _r63_res = {}
+    for _enc in ("cp949", "cp1252", "ascii", "utf-8"):
+        _env = dict(os.environ, PYTHONIOENCODING=_enc, GORI_R63_CHILD="1")
+        _r = _sp2.run([sys.executable, os.path.abspath(__file__)],
+                      capture_output=True, env=_env, cwd=PKG)
+        _txt = (_r.stdout or b"").decode(_enc, errors="replace")
+        _err = (_r.stderr or b"").decode(_enc, errors="replace")
+        _r63_res[_enc] = (_r.returncode, _txt, _err)
+        check(f"R63: {_enc} 인코딩으로 끝까지 실행 (UnicodeEncodeError 없음)",
+              _r.returncode == 0 and "UnicodeEncodeError" not in _txt
+              and "UnicodeEncodeError" not in _err,
+              f"exit={_r.returncode} "
+              + next((l for l in _err.splitlines()
+                      if "UnicodeEncodeError" in l), ""))
+    check("R63: 모든 인코딩에서 전 검사 통과",
+          all("FAIL=0" in v[1] for v in _r63_res.values()),
+          str({k: next((l for l in v[1].splitlines() if "PASS=" in l), "")
+               for k, v in _r63_res.items()}))
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

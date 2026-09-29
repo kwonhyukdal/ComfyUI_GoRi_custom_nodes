@@ -4002,40 +4002,43 @@ check("R60: '의상 교체' 단독(슬롯 없음)은 사람 아님",
 check("R60: 동물 주제는 사람으로 오탐되지 않음",
       cd._is_human_subject("1 의상, 2 교체 강아지") is False)
 
-# R63: cp949 콘솔에서 테스트가 죽지 않는다.
-# 왜(Why) 이게 필요했나: check() 가 raw print 를 써서 cp949 환경에서
-# UnicodeEncodeError 가 났고(실측 875행), 그 즉시 **뒤의 검사가 아예
-# 안 돌아간다** — 961건 중 몇 개가 통과했는지 알 수 없다. Keeper 쪽에는
-# 이미 같은 폴백이 있는데 이 파일에는 없었다.
+# R63: 한국어를 못 인코딩하는 콘솔에서 테스트가 죽지 않는다.
+# 왜(Why) 여러 인코딩을 도나: 처음엔 cp949(한국어 Windows 콘솔)만 봤다.
+# 그런데 **GitHub Windows 러너의 기본은 cp1252** 라서 cp949 는 아무 문제가
+# 없는 척했다(2026-09-29 실측: 배포 저장소 CI run#27/run#28, Windows 2개만
+# failure). cp1252 는 한글을 아예 모르는 charmap 이라 첫 글자에서 죽는다.
+# 특정 인코딩을 가정하면 "내 PC에선 되니까"가 된다 — 전부 돌린다.
 #
-# 검증 방법: 실제 서브프로세스를 cp949 로 띄워 **파일 전체를 끝까지 돌린다.**
-# 이 파일 안에서 스트림을 흉내내면(원래 시도) print 가 이미 캡처된
-# stdout 을 그대로 써서 실제 인코딩 실패를 재현하지 못한다.
+# 검증 방법: 실제 서브프로세스를 각 인코딩으로 띄워 **파일 전체를 끝까지
+# 돌린다.** 이 파일 안에서 스트림을 흉내내면(원래 시도) print 가 이미
+# 캡처된 stdout 을 그대로 써서 실제 인코딩 실패를 재현하지 못한다.
 import subprocess as _sp  # noqa: E402
 
 # 재귀 방지: 이 하위 프로세스도 같은 검사에 들어오면 자기 자신을 또 띄운다.
 if os.environ.get("GORI_R63_CHILD"):
-    _r63_env = None
-    _r63 = None
+    _r63_results = {}
 else:
-    _r63_env = dict(os.environ, PYTHONIOENCODING="cp949",
-                    GORI_R63_CHILD="1")
-    # 절대경로로 준다. 상대경로("tests/test_node.py")는 현재 디렉터리에
-    # 의존하므로, 상위에서 실행하면(로컬에서 `python GoRi-Camera-Director/...`
-    # 처럼) 파일을 못 찾아 exit 2 로 죽는다. CI 는 저장소 루트에서
-    # `(cd "${node_dir}" && python tests/test_node.py)` 로 돌기 때문에 이
-    # 차이가 OS마다 달랐고, Windows 러너에서만 깨졌다(2026-09-29 실측).
-    # cwd 도 명시해 두는 편이 안전하다(어디서 호출돼도 같은 결과).
-    _r63 = _sp.run([sys.executable, os.path.join(HERE, "test_node.py")],
-                   capture_output=True, env=_r63_env, cwd=PKG)
-    _r63_txt = (_r63.stdout or b"").decode("cp949", errors="replace")
-    check("R63: cp949 인코딩으로 전체가 끝까지 실행됨 (UnicodeEncodeError 없음)",
-          _r63.returncode == 0 and "UnicodeEncodeError" not in _r63_txt,
-          f"exit={_r63.returncode} "
-          f"{'UnicodeEncodeError 발생' if 'UnicodeEncodeError' in _r63_txt else ''}")
-    check("R63: cp949 에서도 전 검사가 통과 (결론이 안 잘리지 않음)",
-          "FAIL=0" in _r63_txt,
-          f"{[l for l in _r63_txt.splitlines() if 'PASS=' in l][:1]}")
+    _r63_results = {}
+    for _r63_enc in ("cp949", "cp1252", "ascii", "utf-8"):
+        # 절대경로 + cwd 지정. 상대경로("tests/test_node.py")는 cwd 에 의존해서
+        # 상위에서 실행하면 exit 2 로 죽는다(2026-09-29 실측).
+        _r63_env = dict(os.environ, PYTHONIOENCODING=_r63_enc,
+                        GORI_R63_CHILD="1")
+        _r63 = _sp.run([sys.executable, os.path.join(HERE, "test_node.py")],
+                       capture_output=True, env=_r63_env, cwd=PKG)
+        _r63_txt = (_r63.stdout or b"").decode(_r63_enc, errors="replace")
+        _r63_err = (_r63.stderr or b"").decode(_r63_enc, errors="replace")
+        _r63_results[_r63_enc] = (_r63.returncode, _r63_txt, _r63_err)
+        check(f"R63: {_r63_enc} 인코딩으로 끝까지 실행 (UnicodeEncodeError 없음)",
+              _r63.returncode == 0 and "UnicodeEncodeError" not in _r63_txt
+              and "UnicodeEncodeError" not in _r63_err,
+              f"exit={_r63.returncode} "
+              + next((l for l in _r63_err.splitlines()
+                      if "UnicodeEncodeError" in l), ""))
+    check("R63: 모든 인코딩에서 전 검사가 통과 (결론이 안 잘리지 않음)",
+          all("FAIL=0" in v[1] for v in _r63_results.values()),
+          str({k: next((l for l in v[1].splitlines() if "PASS=" in l), "")
+               for k, v in _r63_results.items()}))
 # 하위 프로세스에서는 이 블록을 건너뛴다(그쪽에서는 원래 stdout 을 쓴다).
 check("R63: 테스트의 print 가 인코딩 안전 래퍼",
       print is _say, "print = _say 로 고정해야 한다")
