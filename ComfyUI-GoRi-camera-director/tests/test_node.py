@@ -1435,8 +1435,9 @@ try:
     check("R15: 이미지 1장 → 믹스 가드 미포함",
           "Reference mixing guard" not in _p15b
           and "clothing fusion" not in _n15b, _n15b)
-    check("R15: 플래그 갱신 — 1장 실행 후 _last_mix_guard=False",
-          _director_r15._last_mix_guard is False, str(_director_r15._last_mix_guard))
+    check("R15: 플래그 갱신 — 1장 실행 후 plan.mix_guard=False",
+          _director_r15._last_guard_plan["flags"]["mix_guard"] is False,
+          str(_director_r15._last_guard_plan["flags"]["mix_guard"]))
 finally:
     llm_client._post = _orig_post_r15
 llm_client.clear_cache()
@@ -1697,8 +1698,8 @@ try:
     check("R21: 외양 참조 negative에 체모 방어어 포함",
           "sticker-like body hair" in _n21e
           and "clumped hair patches" in _n21e, _n21e[-200:])
-    check("R21: 발란스·외양 가드 플래그 저장 (Skills 병합용)",
-          _director_r21._last_body_balance is True
+    check("R21: 발란스·외양 가드 판정 저장 (Skills 병합용)",
+          _director_r21._last_guard_plan["flags"]["body_balance"] is True
           and _director_r21._last_appearance_ref is True, "flags")
 finally:
     llm_client._post = _orig_post_r21
@@ -4034,6 +4035,110 @@ check("R63: 테스트의 print 가 인코딩 안전 래퍼",
       print is _say, "print = _say 로 고정해야 한다")
 # 원본 stdlib print 를 덮어쓰지 않았는지 — _say 가 재귀하면 스택 초과다.
 check("R63: stdlib print 보존 (재귀 방지)", _print is not _say)
+
+# R64: 가드 판정이 한 곳에 있다 (run / run_prompt 수동 동기화 구조 제거).
+# 왜(Why) 이게 중요했나: 두 메서드가 같은 가드를 각자 반복 판정하면서
+# 결과를 self._last_* 로 넘겨 받았다. **텍스트 소스도 달랐다** — run_prompt
+# 는 prompt_in 을 앞에 붙인 문자열로 판정해서, 양쪽이 어긋나면 짝인 negative
+# 가 조용히 사라졌다(2026-09-28 실측: 지시가 한쪽_only 가 됨).
+# CLAUDE.md 에 "둘을 손으로 동기화한다"고 적혀 있던 그 구조.
+_src64 = open("camera_director.py", encoding="utf-8").read()
+check("R64: resolve_guard_plan 존재 (판정 단일 진입점)",
+      "def resolve_guard_plan(" in _src64)
+check("R64: run_prompt 가 개별 판정을 다시 하지 않음",
+      'getattr(self, "_last_guard_plan"' in _src64
+      and "_pose_role_slots(_pose_text_pi)" not in _src64,
+      "run_prompt 에 판정이 남아 있다")
+check("R64: run_prompt 가 plan 플래그를 사용",
+      '_gflags_pi["mix_guard"]' in _src64
+      and '_gflags_pi["body_balance"]' in _src64)
+check("R64: 개별 _last 플래그 중복 저장 제거",
+      "self._last_mix_guard =" not in _src64
+      and "self._last_body_balance =" not in _src64
+      and "self._last_hint_defense =" not in _src64,
+      "plan 과 개별 속성이 둘 다 있으면 값이 어긋난다")
+# 결정적 판정: 같은 입력이면 같은 plan. 순수 함수여야 한다.
+_p_a = cd.resolve_guard_plan("1번 이미지 여성, 2번 배경", dict(cd.DEFAULTS),
+                             2, ["1", "2"], [], None, [], tier="auto")
+_p_b = cd.resolve_guard_plan("1번 이미지 여성, 2번 배경", dict(cd.DEFAULTS),
+                             2, ["1", "2"], [], None, [], tier="auto")
+check("R64: 같은 입력 → 같은 판정 (순수 함수)",
+      _p_a["flags"] == _p_b["flags"]
+      and _p_a["positive"] == _p_b["positive"])
+# plan 이 positive/negative 짝을 함께 준다 — 한쪽만 갱신될 수 없다.
+check("R64: plan 이 positive 조각과 negative 플래그를 함께 제공",
+      isinstance(_p_a["positive"], dict) and isinstance(_p_a["flags"], dict)
+      and "mix_guard" in _p_a["flags"], str(sorted(_p_a["flags"])))
+# 인물 주제면 발란스·부위경계·부위개수가 켜지고, 비인물이면 꺼진다.
+_p_h = cd.resolve_guard_plan("a woman", dict(cd.DEFAULTS), 1, ["1"], [],
+                             None, [], tier="auto")
+_p_a2 = cd.resolve_guard_plan("a product photo", dict(cd.DEFAULTS), 1, ["1"],
+                              [], None, [], tier="auto")
+check("R64: 인물 주제 → 발란스·부위 가드 ON, 비인물 → OFF",
+      _p_h["flags"]["body_balance"] and _p_h["flags"]["anatomy_count"]
+      and not _p_a2["flags"]["body_balance"]
+      and not _p_a2["flags"]["anatomy_count"])
+
+# R65: negative 조립 로직이 한 벌이다.
+# 왜(Why) 이게 중요했나: build_negative 와 build_camera_negative 가 40줄을
+# 복붙하고 있었다. 같은 상수를 같은 순서로 넣는데 한쪽만 고치면 양쪽이
+# 어긋나 짝인 방어가 사라진다. 이미 실제로 한 번 어긋난 적이 있다
+# (character_sheet negative 가 한쪽에만 있던 시점).
+_src65 = open("camera_director.py", encoding="utf-8").read()
+check("R65: 공통 negative 조립기 존재", "def _assemble_negative(" in _src65)
+# 두 빌더가 각각 _NEGATIVE_BASE_COMMON 을 직접 쓰면 복붙이 남는다.
+check("R65: 두 빌더가 상수 나열을 직접 하지 않음 (공통 조립기 경유)",
+      _src65.count("neg = list(_NEGATIVE_BASE_COMMON)") == 1,
+      f"직접 사용 { _src65.count('neg = list(_NEGATIVE_BASE_COMMON)') }곳")
+check("R65: 두 빌더가 모두 공통 조립기를 호출",
+      "return _assemble_negative(" in _src65
+      and _src65.count("return _assemble_negative(") == 2)
+# 조각 순서가 보존됐는지 — 순서가 바뀌면 출력 문자열이 달라진다.
+_n_base = cd.build_negative(dict(cd.DEFAULTS), topic="a woman",
+                            image_count=1, image_labels=["1"])
+_n_cam = cd.build_camera_negative(dict(cd.DEFAULTS), topic="a woman",
+                                  image_count=1, image_labels=["1"])
+_shared = [s for s in (cd.NEGATIVE_ANATOMY_GUARD, cd.NEGATIVE_COLOR_CONTAMINATION_GUARD,
+                       cd.ANATOMY_DETAIL_NEGATIVE, cd.SCALE_COHERENCE_NEGATIVE)
+           if s in _n_base and s in _n_cam]
+check("R65: 공유 조각이 두 빌더에 모두 존재",
+      len(_shared) >= 3, f"{len(_shared)}/4")
+check("R65: noir 문구는 경로별로 다르다 (호출부가 준다)",
+      "unwanted color cast" in cd.build_camera_negative(
+          {**cd.DEFAULTS, "grade": "느와르 (noir)"}, topic="a woman")
+      and "color tint" in cd.build_negative(
+          {**cd.DEFAULTS, "grade": "느와르 (noir)"}, topic="a woman"))
+# 경로 전용 조각은 build_negative 에만 있다(중복이 아니라 전용).
+check("R65: 경로 전용 방어어는 build_negative 에만 있음",
+      cd.MIX_GUARD_NEGATIVE in cd.build_negative(
+          dict(cd.DEFAULTS), topic="a woman", mix_guard=True)
+      and cd.MIX_GUARD_NEGATIVE not in cd.build_camera_negative(
+          dict(cd.DEFAULTS), topic="a woman"))
+
+# R66: image_metrics 가 이미지를 한 번만 변환한다.
+# 왜(Why) 실측 비용: 예전엔 채널마다 `asarray` 를 따로 불렀다(3회). 4K 참조
+# 이미지는 채널마다 수 MB 라 변환 비용이 그대로 3배였다. 반환값은
+# 소수점 3자리로 반올림되므로 수치 결과는 바뀌지 않는다.
+import numpy as _npr66  # noqa: E402  (이 파일은 numpy 를 모듈 스코프로 안 쓴다)
+
+_src66 = open("camera_director.py", encoding="utf-8").read()
+_i66 = _src66[_src66.index("def image_metrics("):
+              _src66.index("def image_metrics(") + 1200]
+check("R66: image_metrics 가 asarray 를 한 번만 부름",
+      _i66.count("_np.asarray(") == 1, f"{_i66.count('_np.asarray(')}회")
+# 동작 동등성: 0~1 / 0~255 / 평탄 / 실패 — 네 경로 모두 살아 있어야 한다.
+_m_f = cd.image_metrics(_npr66.random.RandomState(7).rand(
+    1, 32, 32, 3).astype(_npr66.float32))
+_m_u8 = cd.image_metrics(
+    (_npr66.random.RandomState(7).rand(32, 32, 3) * 255).astype(_npr66.float32))
+_m_flat = cd.image_metrics(_npr66.full((1, 32, 32, 3), 0.9, dtype=_npr66.float32))
+check("R66: 0~1 / 0~255 / 평탄 / 실패 네 경로 모두 유지",
+      set(_m_f) == {"dark", "contrast_std", "vivid", "thirds_bias"}
+      and set(_m_u8) == set(_m_f) and set(_m_flat) == set(_m_f)
+      and cd.image_metrics(None) == {},
+      f"{sorted(_m_f)}")
+check("R66: 평탄 이미지는 대비 0 (반전 아님)",
+      _m_flat["contrast_std"] == 0.0, str(_m_flat))
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 

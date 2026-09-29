@@ -544,13 +544,15 @@ def image_metrics(image) -> dict:
     out = {}
     try:
         import torch as _t
+        import numpy as _np
         px = image[0] if isinstance(image, _t.Tensor) else image
         px = px.detach().cpu() if hasattr(px, "detach") else px
-        r, g, b = float(px[..., 0].mean()), float(px[..., 1].mean()), float(px[..., 2].mean())
-        import numpy as _np
-        lum = _np.asarray(px, dtype=_np.float32)[..., 0] * .299 \
-            + _np.asarray(px, dtype=_np.float32)[..., 1] * .587 \
-            + _np.asarray(px, dtype=_np.float32)[..., 2] * .114
+        # 한 번만 float32 배열로 바꾼다. 예전엔 채널마다 asarray 를 따로
+        # 불렀는데(3회) 같은 이미지를 세 번 변환했다. 4K 참조 이미지는
+        # 채널마다 수 MB 라 세 번 변환한 비용이 그대로 컸다.
+        arr = _np.asarray(px, dtype=_np.float32)
+        r, g, b = (float(arr[..., i].mean()) for i in range(3))
+        lum = arr[..., 0] * .299 + arr[..., 1] * .587 + arr[..., 2] * .114
     except Exception:
         return out
     try:
@@ -2238,15 +2240,21 @@ def preflight_warnings(topic: str, camera: dict, latent_mp=None,
     return msgs
 
 
-def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
-                          topic: str = "", image_count: int = 0,
-                          image_labels=None, pose_ref: bool = False,
-                          physics_neg: str = "", detail_def: bool = False,
-                          furniture: bool = False,
-                          remove_item: bool = False,
-                          anatomy_count: bool = False,
-                          character_sheet: bool = False) -> str:
-    """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
+def _assemble_negative(cam, topic, image_count, image_labels, flags,
+                       noir_phrase, extras=(), physics_neg="",
+                       pose_ref=False, prevent_duplicates=False) -> str:
+    """두 negative 빌더가 공유하는 조립 로직.
+
+    왜(Why) 하나인가(2026-09-29): `build_negative` 와
+    `build_camera_negative` 가 40줄을 복붙하고 있었다. 같은 상수를 같은
+    순서로 넣는데 한쪽만 고치면 **양쪽이 어긋나** 짝인 방어가 조용히
+    사라진다 — 실제로 `_camera_failure_modes` 로 일부를 이미 합친 뒤에도
+    시트·포즈·부위·가구 블록이 그대로 두 벌이었다.
+
+    유일한 차이가 `noir_phrase` 이었다("unwanted color cast" vs
+    "color tint"). 그 차이는 **호출부가 준다** — 함수 안에서 guessing 하지
+    않는다.
+    """
     neg = list(_NEGATIVE_BASE_COMMON)
     # topic 이 비면(판단 근거 없음) 사람 기본값을 쓴다. ComfyUI 사용의
     # 대부분이 인물이고, 비었을 때 가드를 빼는 쪽이 더 위험하다.
@@ -2255,12 +2263,14 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
         neg.append(NEGATIVE_COLOR_CONTAMINATION_GUARD)
     neg.extend(_camera_failure_modes(cam, topic))
     if cam.get("grade") == "느와르 (noir)":
-        neg.append("unwanted color cast")
+        neg.append(noir_phrase)
     if _is_human_subject(topic or ""):
         neg.append(ANATOMY_DETAIL_NEGATIVE)
-    if anatomy_count:
+    # positive(ANATOMY_COUNT_POSITIVE) 는 붙는데 negative 짝이 없으면
+    # "5개여야 한다" 는 지시가 방향 없는 한쪽_only 가 된다(2026-09-28 발견).
+    if flags.get("anatomy_count"):
         neg.append(ANATOMY_COUNT_NEGATIVE)
-    if character_sheet:
+    if flags.get("character_sheet"):
         neg.append(CHARACTER_SHEET_NEGATIVE)
         # 시트 뷰가 별개 인물로 세어지는 것까지 막는다 (신원 일관성이 목적이므로).
         if not _is_multi_person_sheet(topic):
@@ -2277,19 +2287,40 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
         neg.append(_pose_neg)
     if physics_neg:
         neg.append(physics_neg)
-    if detail_def:
+    if flags.get("detail_def"):
         neg.append(DETAIL_DEFINITION_NEGATIVE)
-    if furniture:
+    if flags.get("furniture"):
         neg.append(FURNITURE_DNA_NEGATIVE)
         neg.append(OBJECT_DRIFT_NEGATIVE)
-    if remove_item:
+    if flags.get("remove_item"):
         neg.append(_remove_item_guard(topic))
     if _needs_scale_guard(topic or "", cam):
         neg.append(SCALE_COHERENCE_NEGATIVE)
     if prevent_duplicates:
         neg.extend(["multiple people", "duplicate person", "cloned person",
                     "mirrored twin", "background person"])
+    for src in extras:
+        if src and src.strip():
+            neg.append(src.strip())
     return ", ".join(neg)
+
+
+def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
+                          topic: str = "", image_count: int = 0,
+                          image_labels=None, pose_ref: bool = False,
+                          physics_neg: str = "", detail_def: bool = False,
+                          furniture: bool = False,
+                          remove_item: bool = False,
+                          anatomy_count: bool = False,
+                          character_sheet: bool = False) -> str:
+    """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
+    return _assemble_negative(
+        cam, topic, image_count, image_labels,
+        {"anatomy_count": anatomy_count, "character_sheet": character_sheet,
+         "detail_def": detail_def, "furniture": furniture,
+         "remove_item": remove_item},
+        "unwanted color cast", physics_neg=physics_neg, pose_ref=pose_ref,
+        prevent_duplicates=prevent_duplicates)
 
 
 
@@ -3356,59 +3387,24 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
                    physics_neg: str = "", detail_def: bool = False,
                    furniture: bool = False, remove_item: bool = False,
                    anatomy_count: bool = False) -> str:
-    neg = list(_NEGATIVE_BASE_COMMON)
-    # topic 이 비면(판단 근거 없음) 사람 기본값을 쓴다. ComfyUI 사용의
-    # 대부분이 인물이고, 비었을 때 가드를 빼는 쪽이 더 위험하다.
-    if not (topic or "").strip() or _is_human_subject(topic):
-        neg.append(NEGATIVE_ANATOMY_GUARD)
-        neg.append(NEGATIVE_COLOR_CONTAMINATION_GUARD)
-    neg.extend(_camera_failure_modes(cam, topic))
-    if cam.get("grade") == "느와르 (noir)":
-        neg.append("color tint")
-    if _is_human_subject(topic or ""):
-        neg.append(ANATOMY_DETAIL_NEGATIVE)
-    # positive(ANATOMY_COUNT_POSITIVE) 는 붙는데 negative 짝이 없으면
-    # "5개여야 한다" 는 지시가 방향 없는 한쪽_only 가 된다(2026-09-28 발견).
-    if anatomy_count:
-        neg.append(ANATOMY_COUNT_NEGATIVE)
-    _, _eth_neg_sa = _ethnicity_guard(topic or "", image_count, image_labels)
-    if _eth_neg_sa:
-        neg.append(_eth_neg_sa)
-    if _is_animal_subject(topic or ""):
-        neg.append(ANIMAL_ANATOMY_NEGATIVE)
-    if _needs_scale_guard(topic or "", cam):
-        neg.append(SCALE_COHERENCE_NEGATIVE)
+    # 힌트·믹스·외양·발란스 방어는 base 경로 전용이라 조립기가 아니라
+    # 여기서 덧붙인다(중복이 아니라 경로별 전용).
+    tail = []
     if hint_defense:
-        neg.append(HINT_DEFENSE_NEGATIVE)
+        tail.append(HINT_DEFENSE_NEGATIVE)
     if mix_guard:
-        neg.append(MIX_GUARD_NEGATIVE)
+        tail.append(MIX_GUARD_NEGATIVE)
     if appearance_ref:
-        neg.append(APPEARANCE_REF_NEGATIVE)
+        tail.append(APPEARANCE_REF_NEGATIVE)
     if body_balance:
-        neg.append(BODY_BALANCE_NEGATIVE)
-    if character_sheet:
-        neg.append(CHARACTER_SHEET_NEGATIVE)
-        # 시트 뷰가 별개 인물로 세어지는 것까지 막는다 (신원 일관성이 목적이므로).
-        if not _is_multi_person_sheet(topic):
-            neg.append(CHARACTER_SHEET_PEOPLE_NEGATIVE)
-    # 형제 빌더(build_camera_negative)와 동일: 빈 조각을 넣지 않는다
-    _pose_neg = _pose_reference_negative(
-        _pose_role_slots(topic or "") & set(image_labels or [])) if pose_ref else ""
-    if _pose_neg:
-        neg.append(_pose_neg)
-    if physics_neg:
-        neg.append(physics_neg)
-    if detail_def:
-        neg.append(DETAIL_DEFINITION_NEGATIVE)
-    if furniture:
-        neg.append(FURNITURE_DNA_NEGATIVE)
-        neg.append(OBJECT_DRIFT_NEGATIVE)
-    if remove_item:
-        neg.append(_remove_item_guard(topic))
-    for src in (llm_extra, extra):
-        if src and src.strip():
-            neg.append(src.strip())
-    return ", ".join(neg)
+        tail.append(BODY_BALANCE_NEGATIVE)
+    return _assemble_negative(
+        cam, topic, image_count, image_labels,
+        {"anatomy_count": anatomy_count, "character_sheet": character_sheet,
+         "detail_def": detail_def, "furniture": furniture,
+         "remove_item": remove_item},
+        "color tint", extras=tuple(tail) + (llm_extra, extra),
+        physics_neg=physics_neg, pose_ref=pose_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -3503,6 +3499,103 @@ def scene_camera_mismatch(scene: str, camera: dict) -> str | None:
 # ---------------------------------------------------------------------------
 # 노드
 # ---------------------------------------------------------------------------
+
+def resolve_guard_plan(subject_text, camera, image_count, image_labels,
+                       image_items, primary_image, reference_images,
+                       tier="", llm_hint=""):
+    """한 실행의 가드 판정을 **한 곳에서** 모아서 돌려준다.
+
+    왜(Why) 이 함수를 만드는가(2026-09-29):
+    `run()` 과 `run_prompt()` 가 같은 가드 판정을 각자 반복하면서 결과를
+    `self._last_*` 속성으로 넘겨 받아 쓰고 있었다. 판정식이 두 벌이었고,
+    **한쪽만 갱신되면 positive/negative 짝이 어긋나** 짝인 방어가 조용히
+    사라졌다(2026-09-28 실측: 국가 표현형·동물 가드가 positive 에만 붙고
+    negative 에 사라짐). CLAUDE.md 에도 "둘을 손으로 동기화한다"고 적혀 있었다.
+
+    이제 판정은 여기 한 벌이고, 호출부는 이 dict 의 positive/negative 조각을
+    그대로 합치기만 한다. 갱신 누락이 구조적으로 불가능해진다.
+
+    반환 dict 의 조각은 모두 문자열이고, 빈 문자열은 "미적용"을 뜻한다.
+    로그는 이 함수가 아니라 호출부가 낸다 — 로그 문구는 경로마다 다르다.
+    """
+    text = subject_text or ""
+    is_human = _is_human_subject(text)
+    is_animal = _is_animal_subject(text)
+    labels = list(image_labels or [])
+
+    # 다중 참조(2장 이상)면 믹스 변형 가드를 양쪽에 자동 첨부.
+    mix_guard = image_count >= 2
+    # 인물 신체 발란스: 인물 주제면 참조 유무와 무관하게 상시.
+    body_balance = is_human
+    # 부위별 디테일 경계: 인물 + 참조 이미지 실행일 때만.
+    detail_def = is_human and image_count >= 1
+    # 부위 개수(손가락 5·발가락 5·양팔·양다리) 명시. 인물 주제면 항상.
+    anatomy_count = is_human
+    # llm_hint 방어어는 LLM 판정이 실제로 이뤄진 실행에만.
+    hint_defense = tier == "llm" and bool((llm_hint or "").strip())
+
+    # 포즈 참조: topic에 포즈 역할이 명시된 슬롯.
+    pose_slots = _pose_role_slots(text) & set(labels)
+    pose_pos = _pose_reference_guard(pose_slots)
+    # 물리·공간: topic의 접촉/동작 동사 → 이미지의 물리 상태.
+    phys_pos, phys_neg = physics_contact_guard(text)
+    # 픽셀 공간 측정: topic에 접촉 동사가 없어도 참조에서 거리를 읽는다.
+    # 거리 지사는 topic 동사가 있을 때 중복되므로 생략하고 negative 만 보강.
+    spacing_pos, spacing_neg = "", ""
+    spacing_measure = None
+    if image_count >= 2:
+        spacing_measure = subject_spacing(primary_image)
+        _sp_pos, _sp_neg = spacing_guard(spacing_measure, text)
+        if phys_pos == "" and _sp_pos:
+            spacing_pos = _sp_pos
+        if _sp_neg:
+            phys_neg = (phys_neg + ", " + _sp_neg) if phys_neg else _sp_neg
+    grounding = ""
+    if not phys_pos and is_human:
+        grounding = physics_grounding_guard(text)
+
+    # 캐릭터 시트: 텍스트 의도 또는 **픽셀 판별** 중 하나라도.
+    pixel_sheet = sheet_like_slots(image_items)
+    sheet_text = character_sheet_guard(
+        image_count, text, image_labels=labels, pixel_sheet_slots=pixel_sheet)
+
+    furniture_slots = _object_dna_slots(text, labels, image_count)
+    furniture_pos = _furniture_dna_guard(text, furniture_slots)
+    remove_item = _remove_item_guard(text)
+
+    pos = {
+        "mix_guard": MIX_GUARD_POSITIVE if mix_guard else "",
+        "appearance_hair": "",
+        "body_balance": BODY_BALANCE_POSITIVE if body_balance else "",
+        "detail_def": DETAIL_DEFINITION_POSITIVE if detail_def else "",
+        "anatomy_count": ANATOMY_COUNT_POSITIVE if anatomy_count else "",
+        "furniture": furniture_pos,
+        "character_sheet": sheet_text,
+        "pose": pose_pos,
+        "spacing": spacing_pos,
+        "physics": phys_pos or grounding,
+    }
+    return {
+        "positive": pos,
+        # negative 빌더는 플래그를 받는다. 문자열이 아니라 판정 결과.
+        "flags": {
+            "mix_guard": mix_guard,
+            "body_balance": body_balance,
+            "detail_def": detail_def,
+            "anatomy_count": anatomy_count,
+            "hint_defense": hint_defense,
+            "remove_item": bool(remove_item),
+            "furniture": bool(furniture_pos),
+            "character_sheet": bool(sheet_text),
+            "pose_ref": bool(pose_pos),
+        },
+        "physics_neg": phys_neg,
+        "pose_slots": sorted(pose_slots),
+        "pixel_sheet_slots": list(pixel_sheet),
+        "spacing_measure": spacing_measure,
+        "furniture_slots": furniture_slots,
+    }
+
 
 class CameraDirector:
     RETURN_TYPES = ("STRING", "STRING", "IMAGE")
@@ -3951,13 +4044,29 @@ class CameraDirector:
             _log(f"[Camera Director] 출발 점검 ⚠ {_warn}")
         positive = assemble(scene, camera, image_count=image_count, topic=topic,
                             image_labels=image_labels)
-        nudity_guard_text = nudity_anatomy_guard(topic or scene)
-        # 다중 참조(2장 이상)면 믹스 변형 가드를 positive/negative에 자동 첨부.
-        # 왜(Why): 얼굴+의상 등 참조를 섞는 실행에서 옷-피부 융합·신원 혼합이
-        # 잘 일어난다. 연결 이미지 개수는 픽셀 근거라 오검출이 낮다.
-        mix_guard = image_count >= 2
+        # 가드 판정은 resolve_guard_plan 한 곳에서. run() 과 run_prompt() 가
+        # 각자 반복하던 시대를 끝내고, 짝이 어긋날 수 없게 했다.
+        _plan = resolve_guard_plan(
+            (topic or "") + " " + (scene or ""), camera, image_count,
+            image_labels, image_items, primary_image, reference_images,
+            tier=tier, llm_hint=llm_hint)
+        _gpos = _plan["positive"]
+        _gflags = _plan["flags"]
+        nudity_guard_text = nudity_anatomy_guard((topic or "") + " " + (scene or ""))
+        mix_guard = _gflags["mix_guard"]
+        body_balance = _gflags["body_balance"]
+        detail_def = _gflags["detail_def"]
+        anatomy_count = _gflags["anatomy_count"]
+        hint_defense = _gflags["hint_defense"]
+        char_sheet = _gpos["character_sheet"]
+        _furn_text = _gpos["furniture"]
+        _rm_text = _gflags["remove_item"]
+        _pose_ref_text = _gpos["pose"]
+        _phys_pos = _gpos["physics"]
+        _phys_neg = _plan["physics_neg"]
+        _px_sheet = _plan["pixel_sheet_slots"]
         if mix_guard:
-            positive = positive.rstrip(". ") + ". " + MIX_GUARD_POSITIVE + "."
+            positive = positive.rstrip(". ") + ". " + _gpos["mix_guard"] + "."
             _log("[Camera Director] 다중 참조 믹스 가드 활성 (연결 이미지 "
                  f"{image_count}장 — 융합/신원 혼합 방어)")
             # 참조 간 조명 충돌 점검 (설정 불필요 — 픽셀 근거 자동).
@@ -3973,56 +4082,26 @@ class CameraDirector:
                  + "번 외양 참조 가드 활성 (외양 적용 + 컷 삽입 방어)")
             positive = positive.rstrip(". ") + ". " \
                 + APPEARANCE_HAIR_REALISM_POSITIVE + "."
-        # 인물 신체 발란스: 인물 주제면 참조 이미지 유무와 무관하게 상시 첨부.
-        body_balance = _is_human_subject(topic or scene)
         if body_balance:
-            positive = positive.rstrip(". ") + ". " + BODY_BALANCE_POSITIVE + "."
-        # 부위별 디테일 경계: 인물 + 참조 이미지 실행일 때만 첨부. 실측에서
-        # 참조 사용 실행에서 다리·팔·어깨가 뿌옇게 뭉개졌다. 참조 없는 txt2img는
-        # 붙이지 않는다(원본 픽셀을 지킬 대상이 없기 때문).
-        detail_def = _is_human_subject(topic or scene) and image_count >= 1
+            positive = positive.rstrip(". ") + ". " + _gpos["body_balance"] + "."
         if detail_def:
-            positive = positive.rstrip(". ") + ". " + DETAIL_DEFINITION_POSITIVE + "."
+            positive = positive.rstrip(". ") + ". " + _gpos["detail_def"] + "."
             _log("[Camera Director] 부위별 디테일 경계 가드 활성 "
                  "(다리·팔·어깨·손가락 뭉개짐 방어)")
-        # 부위 개수(손가락 5·발가락 5·양팔·양다리) 명시. 인물 주제면 항상 붙인다
-        # (텍스트 비용 한 줄). 참조 실행에서는 원본 손을 그대로 살리는 쪽
-        # (낮은 denoise)과 짝을 이룬다 — 텍스트는 개수를 강제하지 못하므로.
-        anatomy_count = _is_human_subject(topic or scene)
         if anatomy_count:
-            positive = positive.rstrip(". ") + ". " + ANATOMY_COUNT_POSITIVE + "."
-        # 가구·사물 DNA: 주 피사체·인물·포즈 슬롯을 제외한 **모든** 보조 슬롯에
-        # 기본 적용한다. topic에 "2번 침대 원본"을 안 써도 켜져야 한다(사용자
-        # 지적: 이런 건 topic 명시가 아니라 자동으로 걸어야 한다). 사물도
-        # 참조가 곧 DNA다 — "prop으로만 써라"만으로는 모델이 같은 종류의
-        # 다른 사물을 새로 그린다(침대 실측 사례).
-        _furn_slots = _object_dna_slots(topic or scene, image_labels, image_count)
-        _furn_text = _furniture_dna_guard(topic or scene, _furn_slots)
+            positive = positive.rstrip(". ") + ". " + _gpos["anatomy_count"] + "."
         if _furn_text:
             positive = positive.rstrip(". ") + ". " + _furn_text + "."
             _log("[Camera Director] 가구·사물 DNA 가드 활성 ("
-                 + "/".join(str(x) for x in sorted(_furn_slots))
+                 + "/".join(str(x) for x in sorted(_plan["furniture_slots"]))
                  + "번 — 형태·재질·색·비율 원본 유지)")
-        # 제거 사물 잔여물(찌꺼기): 인물 주제면 항상. 벗을지 말지의 판단은
-        # AI가 하는 게 맞고, "조각만 남기는 것"만 막으면 된다.
-        _rm_text = _remove_item_guard(topic or scene)
         if _rm_text:
             _log("[Camera Director] 반쪽 물체·찌꺼기 방어 활성 "
                  "(제거된 사물은 완전 제거 또는 그대로)")
-        # 캐릭터 시트 참조 — 시트 의도(topic 텍스트) 또는 **픽셀 판별** 중 하나라도.
-        #
-        # 왜(Why) 픽셀 판별이 필요한가(2026-09-28 실측): topic 이 비어 있으면
-        # 텍스트 조건이 거짓이라 가드가 아예 발동하지 않았다 → 1인 시트가
-        # 결과에서 **2명**으로 복제됐다. 6뷰 반복 구조는 눈에 보이는데 아무도
-        # 쓰지 않았다. 정보는 이미 픽셀에 있다.
-        _px_sheet = sheet_like_slots(image_items)
         if _px_sheet:
             _log(f"[Camera Director] 참조 이미지 {'/'.join(_px_sheet)}번에서 "
                  f"캐릭터 시트 패턴 감지 (여러 뷰가 반복 배치) — topic 문구와 "
                  f"무관하게 시트 지시를 적용합니다")
-        char_sheet = character_sheet_guard(
-            image_count, topic or scene,
-            image_labels=image_labels, pixel_sheet_slots=_px_sheet)
         # topic 이 비었는데 참조가 붙어 있으면 역할이 지정되지 않은 것이다.
         # 조용히 아무 지시도 안 나가는 것을 막기 위해 무엇을 쓸 수 있는지
         # 알려준다(2026-09-28 실측: 포즈 이미지에서 옷까지 복제됨).
@@ -4036,67 +4115,26 @@ class CameraDirector:
             positive = positive.rstrip(". ") + ". " + char_sheet + "."
             _log("[Camera Director] 캐릭터 시트 참조 가드 활성 "
                  "(신원 일관성 + 시트 레이아웃 복제 방어)")
-        # 포즈 참조: topic에 포즈 역할이 명시된 슬롯이 있을 때만 첨부.
-        # 왜(Why): 참조 이미지 전체가 latent로 들어가므로 자세만 빌려와도 그
-        # 사람의 얼굴·의상이 유입된다. 포즈 전용임을 positive/negative 양쪽에
-        # 명시하고, LLM 비전에서는 이미 제외했다(이미지 모델에는 픽셀로 전달됨).
-        _pose_ref_text = _pose_reference_guard(
-            _pose_role_slots(topic or "") & set(image_labels))
-        # 저장하지 않는다: run_prompt는 이 값을 getattr로 읽지 않고 같은 판정을
-        # 다시 한다(재계산이的正确성 보장이자 dead attribute를 피한다).
         if _pose_ref_text:
             positive = positive.rstrip(". ") + ". " + _pose_ref_text + "."
             _log("[Camera Director] 포즈 참조 가드 활성 ("
-                 + "/".join(str(x) for x in sorted(
-                     _pose_role_slots(topic or "") & set(image_labels)))
+                 + "/".join(str(x) for x in _plan["pose_slots"])
                  + "번 — 자세만 따르고 얼굴·의상·배경은 비전에서 제외)")
-        # 물리·공간 가드: topic의 접촉/동작 동사를 이미지의 물리 상태로 번역한다.
-        # 왜(Why): "벽에 밀어붙였다/던진다"가 아무 지시 없이 넘어가면 모델이
-        # "나란히 서 있는 두 사람"으로 수렴한다. 접촉·속도·접지를 명시한다.
-        _phys_pos, _phys_neg = physics_contact_guard(topic or scene)
-        # 픽셀 기반 공간 측정: topic에 접촉 동사를 안 써도 참조 이미지에서
-        # "얼마나 떨어져 있는가"를 읽어 거리 유지 문구를 붙인다.
-        # subject_spacing/spacing_guard가 내부에서 예외를 {}·("", "")로 흡수하므로
-        # 바깥 방어는 과잉이다(두 분기 중 한쪽에만 씌워져 소스만 다르게 읽혔다).
-        # 거리 지시는 topic 동사가 있을 때(더 구체적 문구가 붙을 때)는 중복되므로
-        # 생략하고 negative(떨어짐 유지)만 보강한다.
-        if image_count >= 2:
-            self._last_spacing_measure = subject_spacing(primary_image)
-            _sp_pos, _sp_neg = spacing_guard(self._last_spacing_measure,
-                                              topic or scene)
-            if _phys_pos == "" and _sp_pos:
-                positive = positive.rstrip(". ") + ". " + _sp_pos + "."
-                _log("[Camera Director] 픽셀 공간 측정 ("
-                     + (spacing_log_text(self._last_spacing_measure)
-                        or "판정 불가")
-                     + ") — topic에 동작 표현 없어도 거리 유지 지시 적용")
-            if _sp_neg:
-                _phys_neg = (_phys_neg + ", " + _sp_neg) if _phys_neg else _sp_neg
+        if _plan["positive"]["spacing"]:
+            positive = positive.rstrip(". ") + ". " \
+                + _plan["positive"]["spacing"] + "."
+            _log("[Camera Director] 픽셀 공간 측정 ("
+                 + (spacing_log_text(_plan["spacing_measure"]) or "판정 불가")
+                 + ") — topic에 동작 표현 없어도 거리 유지 지시 적용")
         if _phys_pos:
             positive = positive.rstrip(". ") + ". " + _phys_pos + "."
             _log("[Camera Director] 물리·공간 가드 활성 (접촉/동작 상태를 "
                  "이미지 조건으로 번역)")
-        elif _is_human_subject(topic or scene):
-            # 접촉 신호가 없는 정적 인물 장면에도 최소 물리(접지·무게중심)만 붙인다.
-            _ground = physics_grounding_guard(topic or scene)
-            if _ground:
-                positive = positive.rstrip(". ") + ". " + _ground + "."
-        # llm_hint 방어어는 LLM 판정이 실제로 이뤄진(llm 티어) 실행에만 붙인다.
-        # Skills run_prompt가 negative를 다시 만들 때도 같은 판정을 재사용한다.
-        hint_defense = tier == "llm" and bool((llm_hint or "").strip())
-        self._last_hint_defense = hint_defense
-        self._last_mix_guard = mix_guard
+        # hint_defense/mix_guard/body_balance 는 _last_guard_plan 안에 있다.
+        # 개별로 저장하면 plan 과 값이 어긋날 수 있고(그러면 짝인 negative 가
+        # 사라진다), 읽는 곳도 plan 이므로 중복이다.
+        self._last_guard_plan = _plan
         self._last_appearance_ref = appearance_ref
-        self._last_body_balance = body_balance
-        # 시트 문구 캐시를 별도 속성으로 들던 코드가 있었다(읽는 곳 0건).
-        # 시트 문구는 위에서 이미 positive 에 붙었고, Skills 쪽 negative
-        # 재생성은 boolean 플래그(`character_sheet=`)로 받으므로 문자열을
-        # 넘길 필요가 없다.
-        # Skills run_prompt 가 negative 를 다시 만들 때 **같은 소스**를
-        # 쓰게 한다. 왜(Why): 예전엔 run_prompt 가 (prompt_in + topic) 만
-        # 봤다. LLM 이 장면을 확장하면 그 내용은 **어디에도 없는데**
-        # positive 에는 들어 있었고, 짝인 negative 43조각(해부·피부·얼굴·
-        # 관절)이 통째로 사라졌다(2026-09-28 실측).
         self._last_subject_text = ((topic or "") + " " + (scene or ""))
         negative = build_negative(camera, extra=extra_negative or "",
                                   llm_extra=llm_extra,
@@ -4117,9 +4155,6 @@ class CameraDirector:
         self._last_llm_extra = llm_extra
         self._last_image_count = image_count
         self._last_image_labels = list(image_labels)
-        # 픽셀 시트 판별 결과 보관 — Skills run_prompt 가 다시 계산하지 않고
-        # 그대로 쓴다(전체 해상도 프로파일 계산이라 중복이 아깝다).
-        self._last_pixel_sheet_slots = list(_px_sheet)
 
         hint_text = (" | hints: " + "; ".join(hints)) if hints else ""
         _log(f"📷 Camera Director | tier={tier} preset={preset} source={cam_source} "
@@ -4535,51 +4570,34 @@ class CameraDirectorEncode(CameraDirector):
         _subject_pi = (getattr(self, "_last_subject_text", "") or "").strip()
         _eth_text_pi = " ".join(
             x for x in (external_prompt, topic, _subject_pi) if x)
-        _pose_text_pi = _eth_text_pi
-        _pose_pos_pi = _pose_reference_guard(
-            _pose_role_slots(_pose_text_pi) & set(last_labels or []))
-        # 물리·공간 가드도 base run과 동일 판정으로 prompt_in 경로에 합친다.
-        # (Korean 동작어는 위젯 topic 쪽에만 있을 수 있어 양쪽 다 본다)
-        # 왜(Why) 접촉 결과와 최종 결과를 분리하나: 아래 spacing 게이트는 base run
-        # 과 **동일**해야 한다. base 는 접촉 결과가 없을 때만 spacing 블록에
-        # 들어가고, grounding 은 그 **뒤의 elif** 로 붙는다. 예전엔 grounding 이
-        # _phys_pos_pi 를 먼저 채워서 `== ""` 이 영원히 거짓이 되었고, positive
-        # 문구는 우연히 살아 있는 반면 **짝인 negative 만 사라졌다**
-        # (지시가 한쪽_only 가 됨, 2026-09-28 실측).
-        _phys_contact_pi, _phys_neg_pi = physics_contact_guard(_pose_text_pi)
-        _phys_pos_pi = _phys_contact_pi
-        if not _phys_pos_pi and _is_human_subject(_pose_text_pi):
-            _phys_pos_pi = physics_grounding_guard(_pose_text_pi)
-        # 부위별 디테일 경계 / 가구 DNA / 제거 잔여물 — positive·negative가
-        # **같은 판정**을 써야 한다(하나만 갱신되면 짝인 방어가 사라진다).
-        _detail_def_pi = _is_human_subject(_pose_text_pi) and last_count >= 1
-        _anatomy_count_pi = _is_human_subject(_pose_text_pi)
-        # 캐릭터 시트 참조: base run과 **동일 판정**(그대로 재계산한다 —
-        # character_sheet_guard가 슬롯 정보를 쓰므로 last_labels가 필요하다).
-        # base run 과 **같은 픽셀 판별**을 쓴다. 안 하면 시트 참조를 넣고도
-        # Skills 경로에서는 인물이 복제된다(양쪽 판정이 어긋나면 조용히 실패).
-        _px_sheet_pi = getattr(self, "_last_pixel_sheet_slots", None)
-        if _px_sheet_pi is None:      # run() 없이 단독 호출된 경우
-            _px_sheet_pi = sheet_like_slots(image_items)
+        # 가드 판정은 base run() 이 resolve_guard_plan 으로 한 번만 한다.
+        # 예전엔 여기서 같은 판정을 다시 돌렸는데(포즈·물리·시트·가구·부위),
+        # **텍스트 소스가 달랐다** — 여기는 prompt_in 을 앞에 붙인
+        # _eth_text_pi 를 쓴다. 그래서 양쪽이 어긋나 짝인 negative 가
+        # 조용히 사라졌다(2026-09-28 실측: 지시가 한쪽_only 가 됨).
+        # 이제 plan 하나로 양쪽이 같은 판정을 쓴다.
+        _plan_pi = getattr(self, "_last_guard_plan", None)
+        if _plan_pi is None:
+            # run() 없이 단독 호출된 경우(테스트·재사용). 같은 함수로 판정한다.
+            _plan_pi = resolve_guard_plan(
+                _eth_text_pi, camera, last_count, last_labels, image_items,
+                (image_items[0][1] if image_items else None), [],
+                tier=getattr(self, "_last_tier", ""),
+                llm_hint=getattr(self, "_last_llm_hint", ""))
+        _gpos_pi = _plan_pi["positive"]
+        _gflags_pi = _plan_pi["flags"]
+        _px_sheet_pi = _plan_pi["pixel_sheet_slots"]
         if _px_sheet_pi:
             _log(f"[Camera Director] 참조 이미지 {'/'.join(_px_sheet_pi)}번에서 "
                  "캐릭터 시트 패턴 감지 (topic 문구와 무관)")
-        _cs_text_pi = character_sheet_guard(
-            last_count, _pose_text_pi, image_labels=last_labels,
-            pixel_sheet_slots=_px_sheet_pi)
-        # 사물 DNA도 base run과 같은 판정(모든 보조 슬롯 기본 적용)
-        _furn_slots_pi = _object_dna_slots(_pose_text_pi, last_labels, last_count)
-        _furn_pos_pi = _furniture_dna_guard(_pose_text_pi, _furn_slots_pi)
-        _remove_item_pi = bool(_remove_item_guard(_pose_text_pi))
-        # 픽셀 공간 측정도 prompt_in 경로에 병합한다 (base run과 동일 판정).
-        # topic에 동작 표현이 없을 때만 거리 유지 문구가 필요하다.
-        if _phys_contact_pi == "" and last_count >= 2 and image_items:
-            _sp_measure_pi = subject_spacing(image_items[0][1])
-            _sp_pos_pi, _sp_neg_pi = spacing_guard(_sp_measure_pi, _pose_text_pi)
-            if _sp_pos_pi:
-                _phys_pos_pi = _sp_pos_pi
-            if _sp_neg_pi:
-                _phys_neg_pi = (_phys_neg_pi + ", " + _sp_neg_pi) if _phys_neg_pi else _sp_neg_pi
+        _cs_text_pi = _gpos_pi["character_sheet"]
+        _furn_pos_pi = _gpos_pi["furniture"]
+        _remove_item_pi = _gflags_pi["remove_item"]
+        _detail_def_pi = _gflags_pi["detail_def"]
+        _anatomy_count_pi = _gflags_pi["anatomy_count"]
+        _pose_pos_pi = _gpos_pi["pose"]
+        _phys_pos_pi = _gpos_pi["physics"]
+        _phys_neg_pi = _plan_pi["physics_neg"]
         if external_prompt:
             identity_anchor = build_identity_anchor(
                 last_count, external_prompt, image_labels=last_labels)
@@ -4619,28 +4637,27 @@ class CameraDirectorEncode(CameraDirector):
             # 다중 참조 실행이면 믹스 가드도 Skills positive에 병합한다.
             # 왜(Why): base run()의 믹스 가드는 standalone assemble 결과에만 붙고,
             # prompt_in 경로는 앵커를 다시 조립하므로 유실되기 때문이다.
-            if getattr(self, "_last_mix_guard", False):
+            if _gflags_pi["mix_guard"]:
                 positive_text = self._combine_prompt_text(positive_text,
-                                                          MIX_GUARD_POSITIVE)
+                                                          _gpos_pi["mix_guard"])
             # 10번 외양 참조 실행이면 외양 가드도 Skills positive에 병합한다.
             if getattr(self, "_last_appearance_ref", False):
                 positive_text = self._combine_prompt_text(positive_text,
                                                           APPEARANCE_REF_POSITIVE)
                 positive_text = self._combine_prompt_text(
                     positive_text, APPEARANCE_HAIR_REALISM_POSITIVE)
-            # 인물 신체 발란스도 Skills positive에 병합한다 (base run과 동일 판정).
-            if getattr(self, "_last_body_balance", False):
-                positive_text = self._combine_prompt_text(positive_text,
-                                                          BODY_BALANCE_POSITIVE)
+            if _gflags_pi["body_balance"]:
+                positive_text = self._combine_prompt_text(
+                    positive_text, _gpos_pi["body_balance"])
             # 부위별 디테일 경계·가구 DNA도 Skills positive에 병합한다
             # (base run과 **동일 판정** — 하나만 갱신되면 positive/negative가
             #  어긋나 짝인 방어가 사라진다).
             if _detail_def_pi:
                 positive_text = self._combine_prompt_text(
-                    positive_text, DETAIL_DEFINITION_POSITIVE)
+                    positive_text, _gpos_pi["detail_def"])
             if _anatomy_count_pi:
                 positive_text = self._combine_prompt_text(
-                    positive_text, ANATOMY_COUNT_POSITIVE)
+                    positive_text, _gpos_pi["anatomy_count"])
             if _cs_text_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _cs_text_pi)
@@ -4697,11 +4714,11 @@ class CameraDirectorEncode(CameraDirector):
         # llm_hint 사용 실행이면 검열 방어어도 Skills negative에 병합한다.
         # 왜(Why): Skills 경로는 negative를 build_camera_negative로 다시 만들어
         # base run()의 방어어가 유실되기 때문이다.
-        if getattr(self, "_last_hint_defense", False):
+        if _gflags_pi["hint_defense"]:
             negative_text = (negative_text.rstrip("., ")
                              + ", " + HINT_DEFENSE_NEGATIVE)
         # 다중 참조 실행이면 믹스 가드 방어어도 Skills negative에 병합한다.
-        if getattr(self, "_last_mix_guard", False):
+        if _gflags_pi["mix_guard"]:
             negative_text = (negative_text.rstrip("., ")
                              + ", " + MIX_GUARD_NEGATIVE)
         # 10번 외양 참조 실행이면 컷 삽입 방어어도 Skills negative에 병합한다.
@@ -4709,7 +4726,7 @@ class CameraDirectorEncode(CameraDirector):
             negative_text = (negative_text.rstrip("., ")
                              + ", " + APPEARANCE_REF_NEGATIVE)
         # 인물 신체 발란스 방어어도 병합한다.
-        if getattr(self, "_last_body_balance", False):
+        if _gflags_pi["body_balance"]:
             negative_text = (negative_text.rstrip("., ")
                              + ", " + BODY_BALANCE_NEGATIVE)
         # (캐릭터 시트 negative 는 build_camera_negative(character_sheet=) 가
