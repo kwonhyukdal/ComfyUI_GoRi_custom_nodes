@@ -33,6 +33,7 @@ Type a one-line topic (Korean OK), attach optional images and optional positive/
   - The first criterion was "panels are evenly wide" and it was **wrong**: the real sheet's width ratio is 2.50, so it missed it. A full-body view and a head close-up are structurally different widths, so even widths are a coincidence rather than a property of a sheet. The detector now measures the actual definition — the same person repeated.
   - Detection is **independent of the image path**: the same file gives the same verdict whether it arrives as a ComfyUI tensor (BHWC) or a PIL image. Analysis downscaling targets 512, preserves aspect ratio, and matches the PIL path **pixel for pixel** — a single pixel of drift was enough to flip the verdict.
   - **Character sheets are excluded from the diffusion model and shown to the language model only.** Qwen-Image follows the *layout* of a reference image. Feeding a one-person 6-view sheet produced a **4-view sheet rendered verbatim**. The topic cannot fix this: writing "a single continuous photograph of one young woman" still produced 4 views, because the layout hint is pixel-level. So the sheet is shown to the LLM (for identity) and removed from the VAE reference. Re-verified with the same seed: **4 views → 1 person**.
+  - How to use a sheet and the problems people hit are covered in **[2c. Character sheet rules](#2c-character-sheet-rules)**.
 - The outfit-only guard is added only when `Image 2` is explicitly used as an outfit reference (e.g. outfit swap jobs). Merely mentioning `dress` or clothes in a scene description never triggers the outfit guard on cat/background/product scenes.
 - **Pose reference**: a slot named as a pose source in the topic (`2번 이미지의 포즈를 따라`, `이미지 3의 자세`, `use pose from image 4`) is used for posture only. **Any slot 1~10**, and several at once (`3번과 7번 이미지의 포즈`). That slot is excluded from identity/outfit/object roles and is **dropped from the LLM vision input** — it reaches the image model through the pixel path only. Pose is a pixel signal, so the LLM does not need to see it, and seeing it costs time and leaks that person's face and clothing into the subject. Positive says "take only the posture, never their face/clothing/background"; negative names exactly those leaks.
   - Two-person poses work: `1번 이미지 여성 신원, 2번 이미지 남성 신원, 3번 여성 포즈, 4번 남성 포즈` gives each person their own pose. The remaining 1·2 are held by the duo anchor as two identities, and the LLM sees only those two.
@@ -192,6 +193,59 @@ Running `AI 판단 (llm)` makes the `model` field **blink green while the LLM wo
 The `llm_hint` field near the bottom takes short composition·lighting·mood·scene instructions, applied top-priority to LLM judgment (e.g. `어두운 무드, 클로즈업 위주, 비 오는 장면`). Applies only to the **AI 판단 (llm)** tier; ignored on rule/manual tiers (console note). Empty = same as before.
 
 Runs using `llm_hint` get a censorship-artifact defense auto-added to negative (`censored, mosaic, bar censor, pixelated, modest`) — suppresses the image model's tendency to sanitize or mosaic expressions on its own. No hint = no defense.
+
+## 2c. Character sheet rules (character sheet / turnaround)
+
+A **character sheet** is one image that shows the *same* person from several angles — typically front and back full body, close-up head front and back, left and right profiles. This node detects sheets automatically and attaches an identity-consistency guard — **you do not need to write anything in the topic.**
+
+### Why it needs dedicated handling
+
+| Observed problem | What the node does |
+|---|---|
+| A 1-person sheet came back as **two people** | States that the repeated views are the *same* person + negative blocking "views counted as separate people" |
+| The sheet itself (grid, labels, panels) got rendered | Positive says "the output is ONE photograph" + negative names the *result form* (several angles side by side) |
+| Four views were drawn even with a scene in the topic | The sheet goes to the **language model only** and is excluded from the VAE reference path (see below) |
+
+> You cannot win this with prompt wording. Qwen-Image style models copy the **layout** of the reference latent, so the sheet slot is removed from the VAE path and passed only to vision (the language model). Without this, four views come out.
+
+### How to use it
+
+1. **Connect the sheet to any of `image_1`~`image_10`.** The slot number does not matter — it is found from pixels and named correctly.
+2. **The topic may stay empty.** Empty is the safest option (writing a scene description leaves room to misread it as "show me several angles"). Detection still works.
+3. You can connect other references (pose, background, props) alongside it. Sheet slots are separated out as the identity source, and pose/object slots keep their own roles.
+4. With several images connected, **all of them** may be detected as sheets. If you mix a plain identity photo with a sheet, putting the identity photo in slot 1 is the most predictable arrangement.
+
+Recognised topic phrases:
+`캐릭터 시트` · `캐릭터시트` · `턴어라운드` · `삼면도` · `다면도` · `다각도` · `정면후면` · `전신 다각도` · `시트 참고` · `character sheet` · `turnaround` · `multiple angles of the same` · `model sheet` · `reference sheet`
+
+### Two different things
+
+| Kind | Topic phrases | Meaning |
+|---|---|---|
+| **1-person sheet** (default) | `캐릭터 시트`, `턴어라운드`, `삼면도` … | Repeated views are **all the same one person** → identity lock |
+| **Multi-person sheet** | `여러 캐릭터`, `라인업`, `다캐릭터`, `인물 시트`, `cast sheet`, `ensemble sheet`, `오디션 시트` … | Each panel is a **different character** → handled separately |
+
+A multi-person sheet misread as 1-person gets an "all views are the same person" instruction, which makes the output wrong. If your image holds several *different* characters, write one of the multi-person phrases.
+
+### Pixel detection criteria (reference)
+
+Images are analysed even with an empty topic. All three must hold:
+- **3 or more** panel divisions
+- division spacing uniformity **≥ 0.45**
+- average cross-panel similarity **≥ 0.20** (real sheet ≈ 0.41, real photos ≤ 0.11)
+
+A sheet with **uneven** cut spacing may not be detected. Write `캐릭터 시트` in the topic in that case.
+
+### Common problems
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| More than one person in the result | Misread as a multi-person sheet | State `여러 캐릭터` or `캐릭터 시트` explicitly |
+| Output looks like a sheet (grid, several angles) | Qwen reference latent path | Handled automatically. If a photo was caught instead, state `캐릭터 시트` |
+| Sheet not detected automatically | Criteria not met (uneven spacing) | Write `캐릭터 시트` in the topic |
+| Wrong sheet slot named | — | Pixel detection names the slot; without detection the first slot is used |
+
+> **tip.** The sheet slot is passed to the language model (vision) but **excluded from the VAE reference**, so the image model never sees the sheet as pixels — identity arrives through the text path, and the sheet layout is not reproduced.
 
 ## 3. Usage (3 automation tiers)
 
