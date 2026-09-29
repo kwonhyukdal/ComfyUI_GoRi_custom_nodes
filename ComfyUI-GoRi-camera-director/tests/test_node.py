@@ -2629,7 +2629,7 @@ check("R38: 혼재 장면은 인물 가드 우선", "bad anatomy" not in _hum_an
 
 print("-- R39: 실행 후 VRAM 잔류 --")
 # 베이스 노드도 실행 후 VRAM을 반납해야 한다 (Skills에만 있던 것을 보완).
-_src_run = open("camera_director.py", encoding="utf-8").read()
+_src_run = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 _base_body = _src_run.split("def run(self, topic, preset, automation, shot, lens, angle, composition,")[1]
 _base_body = _base_body.split("    def run_prompt(self,")[0]
 check("R39: 베이스 run()이 _release_vram 호출", "_release_vram()" in _base_body)
@@ -2682,7 +2682,7 @@ check("R40: Custom+localhost 300초",
 check("R40: Custom+원격 45초",
       llm_client.effective_timeout("Custom (OpenAI 호환)",
                                    "https://api.example.com/v1") == 45)
-_src_llm = open("camera_director.py", encoding="utf-8").read()
+_src_llm = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 check("R40: 실패 로그에 provider/model/timeout 포함",
       "provider={provider" in _src_llm and "timeout={_to}s" in _src_llm)
 check("R40: vision_detail 하향 안내 포함", "vision_detail" in _src_llm)
@@ -2697,7 +2697,7 @@ check("R41: Custom+원격 비로컬",
       not llm_client.is_local_provider("Custom (OpenAI 호환)", "https://api.example.com"))
 # comfy.model_management가 없으면 조용히 실패해야 한다 (|ComfyUI 환경 밖 안전)
 check("R41: ComfyUI 없음에도 예외 전파 안 함", cd._free_gpu_for_local_llm() in (True, False))
-_src_llm2 = open("camera_director.py", encoding="utf-8").read()
+_src_llm2 = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 check("R41: 로컬 provider에서만 GPU 해제 호출",
       "is_local_provider(provider, custom_base_url)" in _src_llm2)
 check("R41: free_memory 호출 포함", "free_memory" in _src_llm2)
@@ -2997,15 +2997,15 @@ check("R47: 포즈 negative 빈 조각 미삽입",
       .endswith(","))
 # 죽은 속성 제거 확인
 check("R47: dead 속성 미잔존",
-      "_last_physics_pos" not in open("camera_director.py", encoding="utf-8").read())
+      "_last_physics_pos" not in open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read())
 check("R47: width_ratio 미계산",
-      "width_ratio" not in open("camera_director.py", encoding="utf-8").read())
+      "width_ratio" not in open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read())
 
 # R62: 죽은 코드 3종 제거 (2026-09-29 감사).
 # 왜(Why) 이걸 테스트로 박나: 죽은 코드는 조용히 남아 있다가 나중에
 # "쓸모 있어 보이니까" 되살아나면 그때는 이유를 모른다. 또 호출부가
 # `""` 를 받아 아무 효과가 없는 줄은 "기능이 있다"고 오해하게 만든다.
-_src62 = open("camera_director.py", encoding="utf-8").read()
+_src62 = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 check("R62: build_body_proportion_anchor 제거 (항상 '' 를 반환하던 no-op)",
       "build_body_proportion_anchor" not in _src62)
 check("R62: body_anchor 변수 제거 (빈 문자열을 _combine_prompt_text 에 실었음)",
@@ -3019,7 +3019,7 @@ check("R62: character_sheet_guard 는 여전히 문구를 만든다",
       isinstance(_cs, str), repr(_cs))
 
 print("-- R48: LLM 실패 진단 로그 --")
-_src_r48 = open("camera_director.py", encoding="utf-8").read()
+_src_r48 = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 _block48 = _src_r48.split("except llm_client.LLMError as e:")[1][:2600]
 check("R48: provider/model/timeout 항상 출력",
       "provider={provider" in _block48 and "model={resolved_model" in _block48)
@@ -3292,8 +3292,8 @@ finally:
     except Exception:
         pass
 
-_src52 = open("camera_director.py", encoding="utf-8").read()
-_src52b = open("llm_client.py", encoding="utf-8").read()
+_src52 = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
+_src52b = open(os.path.join(PKG, "llm_client.py"), encoding="utf-8").read()
 # 심볼릭 링크(custom_nodes/노드 → 개발폴더)에서 파일 못 찾는 문제
 check("R52: HERE는 realpath (심볼릭 링크 대응)",
       "os.path.realpath(__file__)" in _src52
@@ -3439,7 +3439,7 @@ check("R54: 사람/동물 혼재는 사람 가드 유지",
 
 # (4) character sheet 문구 중복 — 110단어어 positive 가 두 번 들어가면
 #     token/attention 을 중복 소비한다.
-_src54 = open("camera_director.py", encoding="utf-8").read()
+_src54 = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 check("R54: character sheet positive 재병합 제거",
       '_cs_text = getattr(self, "_last_character_sheet_text"' not in _src54)
 check("R54: character sheet negative 수동 병합 제거",
@@ -4020,8 +4020,14 @@ if os.environ.get("GORI_R63_CHILD"):
 else:
     _r63_env = dict(os.environ, PYTHONIOENCODING="cp949",
                     GORI_R63_CHILD="1")
-    _r63 = _sp.run([sys.executable, "tests/test_node.py"],
-                   capture_output=True, env=_r63_env)
+    # 절대경로로 준다. 상대경로("tests/test_node.py")는 현재 디렉터리에
+    # 의존하므로, 상위에서 실행하면(로컬에서 `python GoRi-Camera-Director/...`
+    # 처럼) 파일을 못 찾아 exit 2 로 죽는다. CI 는 저장소 루트에서
+    # `(cd "${node_dir}" && python tests/test_node.py)` 로 돌기 때문에 이
+    # 차이가 OS마다 달랐고, Windows 러너에서만 깨졌다(2026-09-29 실측).
+    # cwd 도 명시해 두는 편이 안전하다(어디서 호출돼도 같은 결과).
+    _r63 = _sp.run([sys.executable, os.path.join(HERE, "test_node.py")],
+                   capture_output=True, env=_r63_env, cwd=PKG)
     _r63_txt = (_r63.stdout or b"").decode("cp949", errors="replace")
     check("R63: cp949 인코딩으로 전체가 끝까지 실행됨 (UnicodeEncodeError 없음)",
           _r63.returncode == 0 and "UnicodeEncodeError" not in _r63_txt,
@@ -4042,7 +4048,7 @@ check("R63: stdlib print 보존 (재귀 방지)", _print is not _say)
 # 는 prompt_in 을 앞에 붙인 문자열로 판정해서, 양쪽이 어긋나면 짝인 negative
 # 가 조용히 사라졌다(2026-09-28 실측: 지시가 한쪽_only 가 됨).
 # CLAUDE.md 에 "둘을 손으로 동기화한다"고 적혀 있던 그 구조.
-_src64 = open("camera_director.py", encoding="utf-8").read()
+_src64 = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 check("R64: resolve_guard_plan 존재 (판정 단일 진입점)",
       "def resolve_guard_plan(" in _src64)
 check("R64: run_prompt 가 개별 판정을 다시 하지 않음",
@@ -4084,7 +4090,7 @@ check("R64: 인물 주제 → 발란스·부위 가드 ON, 비인물 → OFF",
 # 복붙하고 있었다. 같은 상수를 같은 순서로 넣는데 한쪽만 고치면 양쪽이
 # 어긋나 짝인 방어가 사라진다. 이미 실제로 한 번 어긋난 적이 있다
 # (character_sheet negative 가 한쪽에만 있던 시점).
-_src65 = open("camera_director.py", encoding="utf-8").read()
+_src65 = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 check("R65: 공통 negative 조립기 존재", "def _assemble_negative(" in _src65)
 # 두 빌더가 각각 _NEGATIVE_BASE_COMMON 을 직접 쓰면 복붙이 남는다.
 check("R65: 두 빌더가 상수 나열을 직접 하지 않음 (공통 조립기 경유)",
@@ -4121,7 +4127,7 @@ check("R65: 경로 전용 방어어는 build_negative 에만 있음",
 # 소수점 3자리로 반올림되므로 수치 결과는 바뀌지 않는다.
 import numpy as _npr66  # noqa: E402  (이 파일은 numpy 를 모듈 스코프로 안 쓴다)
 
-_src66 = open("camera_director.py", encoding="utf-8").read()
+_src66 = open(os.path.join(PKG, "camera_director.py"), encoding="utf-8").read()
 _i66 = _src66[_src66.index("def image_metrics("):
               _src66.index("def image_metrics(") + 1200]
 check("R66: image_metrics 가 asarray 를 한 번만 부름",
@@ -4139,6 +4145,23 @@ check("R66: 0~1 / 0~255 / 평탄 / 실패 네 경로 모두 유지",
       f"{sorted(_m_f)}")
 check("R66: 평탄 이미지는 대비 0 (반전 아님)",
       _m_flat["contrast_std"] == 0.0, str(_m_flat))
+
+# R67: 실행 디렉터리에 의존하지 않는다 (Windows CI 실패의 직접 원인).
+# 왜(Why) 필요했나: 테스트가 소스 파일을 cwd 의존 상대경로로 13곳에서 열었다.
+# 로컬에서는 `cd tests/.. && python tests/test_node.py` 로 실행해서 통과했는데
+# **Windows CI 러너에서만** 깨졌다(2026-09-29 실측: run#27, 6개 job 중
+# windows 2개만 failure). 경로 처리는 OS마다 다르므로 "내 PC에선 되니까"로
+# 넘기면 안 된다 — 배포 저장소 CI 매트릭스가 그걸 잡아줄 뿐이다.
+_src67 = open(os.path.abspath(__file__), encoding="utf-8").read()
+# 검사 문자열 자체가 검사 대상 문자열을 만들면 안 되므로 조립한다.
+_bad_open = 'open("' + "camera_director.py" + '"'
+_bad_open2 = 'open("' + "llm_client.py" + '"'
+check("R67: 소스 파일을 상대경로로 열지 않음 (cwd 독립)",
+      _bad_open not in _src67 and _bad_open2 not in _src67,
+      "open(os.path.join(PKG, ...)) 로 바꿔라")
+check("R67: 하위 프로세스가 절대경로 + cwd 지정",
+      "os.path.join(HERE, " + '"test_node.py"' + ")" in _src67
+      and "cwd=PKG" in _src67)
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
