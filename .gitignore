@@ -217,4 +217,11 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 LOCAL.md 
+# GoRi Switch Engine — 이 폴더는 이곳에 두면 안 됩니다.
+# 라이선스(GoRi 엔진 라이선스.txt)가 "다른 플랫폼에서의 재배포 금지"를 규정하므로
+# 공개 저장소(MIT)에 추적·복사하는 것 자체가 조건 위반입니다.
+# 2026-09-28에 별도 비공개 저장소로 분리했습니다:
+#   C:\Users\khd19\Documents\개발\ComfyUI\Private_Comfyui_GoRi_Wireless_Engine
+# 이전 이력은 9d28cd2(v1.1.0)에서 제거된 이력이 커밋 로그에 남아 있습니다.
+# 경고: 이 줄을 지우거나 `git add -f` 를 쓰지 마세요. 라이선스 위반입니다.
 GoRi-Wireless-Engine/ 
