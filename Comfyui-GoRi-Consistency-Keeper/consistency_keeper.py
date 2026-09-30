@@ -181,6 +181,12 @@ _MASK_FALLOFF_MAX = 0.75
 # 인체 마스크 이진화 임계. _MASK_FALLOFF 스윕과 같은 실측에서 같이 정했다.
 _MASK_MIN_WEIGHT = 0.35
 
+# 시트를 통째로 당겼을 때 강도를 얼마나 낮출까 (2단계).
+# 왜(Why) 0.5 인가: 시트의 여러 뷰를 한 장의 latent 로 읽으면 신원 신호가
+# **평균나고**, 그 평균은 카메라 노드가 텍스트로 못 막는 실패다. 그래도 절반은
+# 남긴다 — 시트의 여하 시점/각도 정보가 완전히 버려지는 것도 손실이기 때문.
+_SHEET_DAMP = 0.5
+
 # 관절 33점 모델 파일명. 이 노드와 함께 배포된다(Apache 2.0, Google MediaPipe).
 _POSE_MODEL_FILENAME = "pose_landmarker_lite.task"
 
@@ -231,7 +237,7 @@ def _pose_landmarker():
         # _part_detail_map 이 None 을 돌려주면서 그 아래 픽셀 공간 부위 분석
         # (detail_boost / _apply_region_strength) 이 통째로 죽었다. 단위
         # 테스트 223 건이 포즈 세션을 stub 으로 주입해서 이 경로를 검증하지
-        # 못한 탓이다. 정답은 深层 모듈 — landmarker 0.08초 생성, 33점
+        # 못한 탓이다. 정답은 저��� 모듈 — landmarker 0.08초 생성, 33점
         # 검출까지 확인했다.
         from mediapipe.tasks.python.core.base_options import BaseOptions
         options = _vision.PoseLandmarkerOptions(
@@ -1051,17 +1057,88 @@ def _pose_landmarks(img_arr):
         return None
 
 
-def analyze_reference_sheet(vae, ref_latent, sampled) -> dict:
+def _panel_reference_latent(vae, ref_latent, panel_n, cache=None):
+    """시트의 한 패널만 잘라 **진짜 latent** 로 돌려준다. 실패하면 None.
+
+    왜(Why) 다시 VAE 로 인코딩하나: 패널 좌표는 픽셀 배열에서 얻었으므로
+    여기서Ended 픽셀 텐서를 만들어 그대로 넘기고 싶지만, downstream 은 전부
+    latent 를 기대한다(`_part_detail_map` 은 VAE 디코드, drift MSE 와 전역 블렌드
+    도 latent 간 연산). 픽셀을 latent 자리에 넣으면 조용히 깨진다. 그래서
+    **진짜 latent** 로 되돌려야 아무도 안 깨진다. 비용은 시트를 물었을 때만
+    VAE encode 1회.
+    """
+    try:
+        import numpy as _np
+        import torch as _t
+        if vae is None or ref_latent is None or not panel_n:
+            return None
+        full = _decode_latent_rgb(vae, ref_latent, cache=cache)
+        if full is None:
+            return None
+        h, w = int(full.shape[0]), int(full.shape[1])
+        x0 = max(0, min(w - 2, int(float(panel_n[0]) * w)))
+        x1 = max(x0 + 1, min(w, int(float(panel_n[1]) * w)))
+        if x1 - x0 < 8:
+            return None
+        crop = full[:, x0:x1]
+        # 세로로 긴 패널은 정사각에 가깝게 잘라낸다 — VAE 물결에 덜 예민하다.
+        ch, cw = int(crop.shape[0]), int(crop.shape[1])
+        side = min(ch, cw)
+        y0 = max(0, (ch - side) // 2)
+        crop = crop[y0:y0 + side, :]
+        lat = vae.encode(_t.from_numpy(
+            _np.ascontiguousarray(crop))[None])
+        del crop, full
+        _release_vram()
+        return lat
+    except Exception as _e:
+        _note_pose_error('_panel_reference_latent', _e)
+        return None
+
+
+def _content_crop(arr, tol=0.06):
+    """균일한 배경을 잘라 내용만 남긴다. 실패하면 원본 그대로.
+
+    왜(Why) 필요한가 (2026-09-30 실측): 시트 패널은 세로로 흰 여백이 크다.
+    패널을 x 로만 자르면 185x1888 이 남는데, 그 흰 띠 때문에 33점 검출이
+    불안정해진다(실측: 4개 중 1개가 미검출). 여백을 잘라 185x711 로 만들면
+    전 패널이 검출되고 프레이밍 게이트도 통과한다(0.747).
+    """
+    try:
+        import numpy as _np
+        a = _np.asarray(arr, dtype=_np.float32)
+        if a.ndim != 3 or a.shape[0] < 4 or a.shape[1] < 4:
+            return arr
+        lum = a[..., 0] * .299 + a[..., 1] * .587 + a[..., 2] * .114
+        m = _np.abs(lum - float(_np.median(lum))) > float(tol)
+        rows = _np.nonzero(m.any(axis=1))[0]
+        cols = _np.nonzero(m.any(axis=0))[0]
+        if not len(rows) or not len(cols):
+            return arr
+        out = a[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
+        return out if out.size else arr
+    except Exception:
+        return arr
+
+
+def analyze_reference_sheet(vae, ref_latent, sampled, cache=None) -> dict:
     """원본 참조가 캐릭터 시트인지 확인하고, 결과와 가장 잘 맞는 패널을 고른다.
 
     반환: {"panels", "raw", "sheet", "best", "match", "framing", "gate",
            "box"}. 판정 불가 시 panels=0.
     """
     out = {"panels": 0, "raw": 0, "sheet": False, "best": None, "match": 0.0,
+           "panels_n": [],
            "framing": 0.0, "gate": False, "box": None, "wreg": 0.0, "greg": 0.0}
     try:
         ref_arr = _decode_small(vae, ref_latent, 0.5)
         if ref_arr is None:
+            # 없이(Why) 또 말하는가: 여기 론 마을 실패
+            # ("시트니다") 와 구부할 수 없을 딜다. _decode_small 이
+            # 예외를 실패하고 사인 일 사람이라서
+            # 상여가 보이면 사용자ꊔ "패널 0개" 를 보고
+            # 누 상여를 확인한다.
+            _note_pose_error('analyze_reference_sheet.decode', None)
             return out
         raw = detect_panels(ref_arr)
         out["raw"] = len(raw)
@@ -1097,11 +1174,34 @@ def analyze_reference_sheet(vae, ref_latent, sampled) -> dict:
                 best, best_score = idx, score
         out["best"] = best
         out["match"] = round(best_score, 3)
+        # 왜(Why) 정규화(0~1)로 주는가: 패널 좌표는 `_decode_small(0.5)` 즉
+        # 절반 크기 이미지 기준이라, 소비자가 그대로 픽셀로 쓰면 해상도에
+        # 종속된다. 비율로 주면 아무 해상도에서나 잘라낼 수 있다.
+        _sw = float(ref_arr.shape[1]) or 1.0
+        out["panels_n"] = [(a / _sw, b / _sw) for a, b in panels]
         # 2) 프레이밍 게이트: 고른 패널의 인물 비율이 결과와 맞는지
         if best is not None:
             x0, x1 = panels[best]
-            lm_ref = _pose_landmarks(ref_arr[:, x0:x1])
-            lm_s = _pose_landmarks(samp_arr)
+            # 왜(Why) 여기서만 원본 해��도로 다시 잡나 (2026-09-30 실측):
+            # `ref_arr` 은 0.5배 축소본이라 패널 폭이 216 -> 108 px 로 줄어
+            # 33점 검출이 실패한다. 그 결과 "인물 bbox 미검출" -> 프레이밍 게이트가
+            # 항상 False -> 2단계 (A) 경로로 영영 못 들어간다. 패널 검��·유사도
+            # 판정은 축소본으로 충분하니 **포즈만** 원본 크기로 본다.
+            _pose_src = ref_arr[:, x0:x1]
+            _full = _decode_latent_rgb(vae, ref_latent, cache=cache)
+            if _full is not None and _full.shape[1] > ref_arr.shape[1]:
+                _sx = float(_full.shape[1]) / float(ref_arr.shape[1])
+                _pose_src = _full[:, int(x0 * _sx):max(
+                    int(x0 * _sx) + 2, int(x1 * _sx))]
+            lm_ref = _pose_landmarks(_content_crop(_pose_src))
+            # 왜(Why) sampled 도 원본 해상도로 보나: 아래 `samp_arr` 은 판정용
+            # 0.25배 축소본이라 33점이 잡히지 않고, 그러면 box_s 가 None 이 되어
+            # framing_similarity 가 0.0(=게이트 차단)이 된다(2026-09-30 실측:
+            # 참조는 0.747 인데 결과는 0.00). 양쪽 해상도를 맞춰야 비교가 된다.
+            _samp_src = _decode_latent_rgb(vae, sampled, cache=cache)
+            if _samp_src is None:
+                _samp_src = samp_arr
+            lm_s = _pose_landmarks(_content_crop(_samp_src))
             box_ref = subject_bbox(lm_ref)
             box_s = subject_bbox(lm_s)
             out["box"] = box_ref
@@ -1301,6 +1401,37 @@ class GoRiConsistencyKeeper:
         if vae is not None and _mask is None and not _multi:
             _log("[GoRi Consistency Keeper] 인체 마스크 없음 — 전역 당김으로 "
                  "진행합니다 (포즈 미검출 또는 VAE 미연결)")
+        # 캐릭터 시트 참조 분석 (2단계: 판정을 강도에 반영한다).
+        # 왜(Why) 여기가 **부위별 맵보다 먼저**인가: 아래 판정으로 기준 원본이
+        # 패널로 바뀔 수 있다. 맵을 먼저 만들면 맵은 시트 전체를 보고 당김만
+        # 패널을 보게 되어 둘이 서로 다른 원본을 참조하게 된다.
+        if vae is not None and b and not _multi and _orig_ref is not None:
+            _sheet = analyze_reference_sheet(vae, _orig_ref, sampled, cache=_dcache)
+            _log_sheet_analysis(_sheet, "original")
+            if _sheet.get("sheet") and _sheet.get("best") is not None:
+                _pn = _sheet.get("panels_n") or []
+                if _sheet.get("gate") and 0 <= _sheet["best"] < len(_pn):
+                    # (A) 신원 신호가 섞이지 않게 **그 패널 하나만** 기준으로 쓴다
+                    _panel = _panel_reference_latent(
+                        vae, _orig_ref, _pn[_sheet["best"]], cache=_dcache)
+                    # 왜(Why) dict 로 감싸나: `_get_samples` 은 LATENT dict
+                    # 에서만 samples 를 꺼낸다. `vae.encode` 결과는 raw 텐서라
+                    # 그대로 넘기면 조용히 None 이 되어 패널 대체가 통하지 않는다.
+                    _p_ref = _get_samples({"samples": _panel})
+                    if _p_ref is not None:
+                        _orig_ref = _p_ref
+                        _log(f"[GoRi Consistency Keeper]   2단계: "
+                             f"{_sheet['best'] + 1}번 패널을 기준 원본으로 "
+                             f"사용합니다 (시트 전체 대신 단일 뷰)")
+                else:
+                    # (B) 게이트를 못 통과하면 패널 프레이밍이 결과물과 다르다.
+                    # 그래도 시트 전체를 강하게 당기면 신원 신호가 평균나므로
+                    # 강도를 낮춘다 — 버리는 것보다 나음.
+                    _old_b = b
+                    b = _safe_strength(b * _SHEET_DAMP, "strength_original")
+                    _log(f"[GoRi Consistency Keeper]   2단계: 프레이밍이 안 "
+                         f"맞아 패널을 쓰지 않습니다. 시트 전체의 신원 신호가 "
+                         f"섞이므로 강도를 낮춥니다 {_old_b:.2f}->{b:.2f}")
         # 부위별 디테일 손실 감지: 원본 latent는 1회만 디코딩해 재사용한다.
         # 왜(Why): sampled/original을 매번 디코딩하면 VAE 비용이 2배다.
         _pm = None
@@ -1309,20 +1440,18 @@ class GoRiConsistencyKeeper:
                 "sampled": sampled,
                 "original": _orig_ref,
             }, cache=_dcache)
-        # 캐릭터 시트 참조 분석 (1단계: 검출 + 프레이밍 게이트 + 로그만).
-        # 왜(Why) 여기를 넣는가: 사용자가 시트를 물리는 목적은 신원 일관성인데,
-        # 시트의 6개 뷰를 통째로 끌어오면 신원 신호가 평균나고 그것은 카메라
-        # 노드가 텍스트로 못 막는 실패다. 강도는 아직 바꾸지 않고 **판정만**
-        # 노출한다(실측 콘솔로 확인 후 2단계에서 반영).
-        if vae is not None and b and not _multi and _orig_ref is not None:
-            _log_sheet_analysis(analyze_reference_sheet(
-                vae, _orig_ref, sampled), "original")
-        for name, ref_latent, strength in (
-                ("camera", camera_latent, a),
-                ("original", original_latent, b)):
+        # 왜(Why) `original_latent` 이 아니라 `_orig_ref` 인가: 위 2단계가 기준
+        # 원본을 패널로 바꿀 수 있다. 옛 입력을 그대로 쓰면 분석만 패널을 보고
+        # 당김은 시트 전체를 당하게 되어 판정이 아무짝도 못 한다.
+        # 왜(Why) 루프 안에서 `_get_samples` 를 다시 부르지 않는가: `_cam_ref` /
+        # `_orig_ref` 는 위에서 이미 **텐서**로 뽑았다. `_get_samples` 은 LATENT
+        # dict 전용이라 텐서를 넣으면 조용히 None 이 되어 전부 건너뛴다
+        # (2026-09-30 실측으로 R55/R56/R59 가 전부 당김 0 이 됐다).
+        for name, ref, strength in (
+                ("camera", _cam_ref, a),
+                ("original", _orig_ref, b)):
             if not strength:
                 continue
-            ref = _get_samples(ref_latent)
             if ref is None:
                 _log(f"[GoRi Consistency Keeper] {name} 기준 없음 — 건너뜀")
                 continue

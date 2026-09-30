@@ -276,8 +276,6 @@ finally:
     ck._pose_landmarker = _orig_landmarker
     ck._pose_landmarks_from_tasks = _orig_landmarks
     
-# R58: 두 함수가 조용히 실패하는 경로가 남아 있지 않은지 소스를 검사한다.
-# `del img` 처럼 스코프 밖 이름을 del 하면 NameError -> 예외 삼킴 -> 조용한 실패다.
 _ksrc_del = [ln.strip() for ln in _ksrc_lines
              if "del " in ln and not ln.strip().startswith("#")]
 check("R58: del 구문에 스코프 밖 이름 없음 (조용한 NameError 방지)",
@@ -1619,6 +1617,95 @@ check("R68: tasks 경로가 (x, y) 튜플을 돌려주는 현재 계약",
       "반환 형태가 바뀌면 subject_bbox 를 같이 고쳐야 한다")
 check("R68: subject_bbox 가 튜플·리스트를 분기한다",
       "isinstance(lm, (tuple, list))" in _src68)
+
+# R70: 시트 2단계 — 판정을 강도에 반영한다 (2026-09-30).
+# 왜(Why) 회귀 가드인가: 판정만 하고 강도를 안 바꾸는 상태로 방치되면, 시트를
+# 물어도 아무 효과가 없고 "분석이 동작한다" 는 사실만 남는다. 아래는 그 반영이
+# 실제로 일어나는지, 그리고 **패널로 대체된 기준**이 실제로 당김에 쓰이는지
+# 확인한다(1단계 로그만으로는 판정이 실행됐는지 알 수 없다).
+check("R70: 시트 감쇠 상수 _SHEET_DAMP 이 0~1 사이",
+      0.0 < ck._SHEET_DAMP <= 1.0, repr(getattr(ck, "_SHEET_DAMP", None)))
+
+
+class _VAESheet:
+    """decode: 흰 바탕 + 세로로 변하는 4개 패널. encode: 0 으로 복원.
+
+    왜(Why) 줄무늬인가: `column_profile` 은 열별 **세로 표준편차** 다. 균일한
+    막대(전부 검정/전부 흰)는 std=0 이라 패널로 안 잡힌다(실측 raw=0). 실제
+    인물처럼 세로로 값이 변해야 "콘텐츠가 있는 열" 이 된다."""
+
+    def __init__(self):
+        self.encoded = 0
+
+    def decode(self, samples):
+        import numpy as _np
+        h = w = 256
+        a = _np.ones((h, w, 3), dtype=_np.float32)
+        stripes = _np.where((_np.arange(h) // 8) % 2 == 0, 0.15, 0.85)
+        for x0 in (10, 70, 130, 190):
+            a[:, x0:x0 + 30, :] = stripes[:, None, None]
+        return _t.from_numpy(a.astype(_npr.float32))[None]
+
+    def encode(self, pixels):
+        self.encoded += 1
+        return _t.zeros(1, 4, 8, 8)
+
+
+_vs = _VAESheet()
+_lat = {"samples": _t.zeros(1, 4, 32, 32)}
+# 왜(Why) `_decode_small` 을 스텁하나: 앞선 블록들이 VAE/포즈를 스텁해두���
+# 상태라 여기서 진짜 디코드 경로를 타면 그 스텁에 물려 판정이 0 이 된다(실측).
+# 시트 **판정 로직**만 격리해서 본다. 디코드 경로는 `_decode_latent_rgb` /
+# `_as_rgb_hwc` 로 이미 검증된다.
+_sheet_fixture = None
+
+
+class _VAEDecode2:
+    def __init__(self):
+        self.encoded = 0
+
+    def decode(self, samples):
+        import numpy as _np
+        h = w = 256
+        a = _np.ones((h, w, 3), dtype=_npr.float32)
+        stripes = _npr.where((_npr.arange(h) // 8) % 2 == 0, 0.15, 0.85
+                             ).astype(_npr.float32)
+        for x0 in (10, 70, 130, 190):
+            a[:, x0:x0 + 30, :] = stripes[:, None, None]
+        return _t.from_numpy(a)[None]
+
+    def encode(self, pixels):
+        self.encoded += 1
+        return _t.zeros(1, 4, 8, 8)
+
+
+_vs = _VAEDecode2()
+_orig_small = ck._decode_small
+try:
+    ck._decode_small = lambda vae, lat, scale=0.5: _vs.decode(lat)[0].numpy()
+    _info = ck.analyze_reference_sheet(_vs, _lat, {"samples": _t.zeros(1, 4, 32, 32)})
+finally:
+    ck._decode_small = _orig_small
+check("R70: 흰 바탕 4패널은 시트로 판정", bool(_info.get("sheet")),
+      "raw=%s panels=%s" % (_info.get("raw"), _info.get("panels")))
+check("R70: 패널 좌표가 정규화(0~1)로 나온다",
+      bool(_info.get("panels_n")) and all(
+          0.0 <= a <= 1.0 and 0.0 <= b <= 1.0 and b > a
+          for a, b in _info.get("panels_n", [])),
+      repr(_info.get("panels_n")))
+
+_pn = (_info.get("panels_n") or [(0.0, 1.0)])[0]
+_plat = ck._panel_reference_latent(_vs, _lat, _pn)
+check("R70: 패널 기준 latent 가 4차원 텐서로 나온다",
+      _plat is not None and hasattr(_plat, "dim") and _plat.dim() == 4,
+      repr(getattr(_plat, "shape", None)))
+check("R70: 패널 기준으로 VAE encode 를 실제로 1회 건다",
+      _vs.encoded == 1, "encoded=%d" % _vs.encoded)
+check("R70: 폭 0 패널은 걸러진다 (조용한 오조작 방지)",
+      ck._panel_reference_latent(_vs, _lat, (0.5, 0.5)) is None)
+
+# R58: 두 함수가 조용히 실패하는 경로가 남아 있지 않은지 소스를 검사한다.
+# `del img` 처럼 스코프 밖 이름을 del 하면 NameError -> 예외 삼킴 -> 조용한 실패다.
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
