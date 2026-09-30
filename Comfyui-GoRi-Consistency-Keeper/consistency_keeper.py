@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import importlib as _importlib
+
 
 def _get_samples(latent) -> object:
     """LATENT dict → samples 텐서. 없으면 None."""
@@ -128,6 +130,34 @@ def _as_rgb_hwc(arr):
         return None
 
 
+def _decode_capped(vae, latent):
+    """VAE 디코드 — 픽셀 수가 상한을 넘으면 latent 를 먼저 줄인다.
+
+    카메라 노드와 같은 규율(`QWEN_REF_MAX_PIXELS`). latent 축은 줄이되 종횡비는
+    유지한다(면적 보간이라 비율이 어느 축이든 유지된다). 실패하면 원본 그대로
+    디코드한다 — 상한은 최적화이지 동작 조건이 아니다.
+    """
+    try:
+        import torch.nn.functional as _f
+        import torch as _t
+        h = int(latent.shape[-2])
+        w = int(latent.shape[-1])
+        # VAE 는 8배 확대하므로 latent 격자 1칸 = 이미지 8x8 픽셀
+        px = float(max(1, h) * max(1, w) * 64)
+        if px <= _DECODE_MAX_PIXELS:
+            return vae.decode(latent)
+        scale = (_DECODE_MAX_PIXELS / px) ** 0.5
+        nh = max(8, int(h * scale))
+        nw = max(8, int(w * scale))
+        small = _f.interpolate(latent.float(), size=(nh, nw), mode="area")
+        img = vae.decode(small)
+        del small
+        _release_vram()
+        return img
+    except Exception:
+        return vae.decode(latent)
+
+
 def _decode_latent_rgb(vae, latent, cache=None):
     """latent -> RGB numpy 배열(H,W,3). 실행당 캐시로 중복 디코딩을 없앤다.
 
@@ -146,7 +176,7 @@ def _decode_latent_rgb(vae, latent, cache=None):
         if cache is not None and key in cache:
             return cache[key]
         with _t.no_grad():
-            img = vae.decode(latent)
+            img = _decode_capped(vae, latent)
         if hasattr(img, "detach"):
             img = img.detach().cpu()
         arr = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
@@ -180,6 +210,14 @@ _MASK_FALLOFF_MAX = 0.75
 
 # 인체 마스크 이진화 임계. _MASK_FALLOFF 스윕과 같은 실측에서 같이 정했다.
 _MASK_MIN_WEIGHT = 0.35
+
+# VAE 디코드 해상도 상한(픽셀). 카메라 노드의 QWEN_REF_MAX_PIXELS 와 같은 숫자를
+# 쓴다 — 두 노드가 한 규칙을 공유해야 나중에 한쪽만 올려도 헷갈리지 않는다.
+# 왜(Why) 필요한가 (2026-10-01 실측): RTX 3080 10GB 에 QwenImage21 이 6.9GB 로
+# 올라간 상태에서 1056x1888(2MP) latent 를 통째로 디코드하니 멈췄다. 디코드는
+# 픽셀 수에 비례해 활성 메모리를 먹는다. **해상도만** 줄이고 비율은 유지하므로
+# 마스크(람간 해상도로 보간)·에지 맵(16x16)·부위 판정은 semantics 가 그대로다.
+_DECODE_MAX_PIXELS = 1024 * 1024
 
 # 시트를 통째로 당겼을 때 강도를 얼마나 낮출까 (2단계).
 # 왜(Why) 0.5 인가: 시트의 여러 뷰를 한 장의 latent 로 읽으면 신원 신호가
@@ -219,6 +257,29 @@ def _pose_model_path():
                           _POSE_MODEL_FILENAME)
 
 
+def _find_base_options():
+    """mediapipe 의 BaseOptions 를 어디서든 찾아온다. 없으면 None.
+
+    왜(Why) 탐색하나 (2026-10-01 실측): `BaseOptions` 의 위치가 버전마다
+    다르다. 0.10.33 은 `mediapipe.tasks.python.core.base_options` 에만 있고,
+    `mediapipe.tasks` 와 `mediapipe.tasks.python.vision` 에는 **없다**. 경로를
+    하나 박아두면 다른 버전 사용자에게서 포즈가 조용히 통째로 꺼진다 — 그게
+    실제로 일어난 바이다(ImportError → landmarker 미생성 → 픽셀 분석 전체 사망).
+    순서대로 시도하고, 없으면 None 을 돌려 호출부가 로그를 남긴다.
+    """
+    for _path in ("mediapipe.tasks.python.core.base_options",
+                  "mediapipe.tasks.python.vision.core.base_options",
+                  "mediapipe.tasks.core.base_options"):
+        try:
+            _mod = _importlib.import_module(_path)
+            _bo = getattr(_mod, "BaseOptions", None)
+            if _bo is not None:
+                return _bo
+        except Exception:
+            continue
+    return None
+
+
 def _pose_landmarker():
     """mediapipe tasks PoseLandmarker 세션. 실패하면 None.
 
@@ -237,11 +298,11 @@ def _pose_landmarker():
         # _part_detail_map 이 None 을 돌려주면서 그 아래 픽셀 공간 부위 분석
         # (detail_boost / _apply_region_strength) 이 통째로 죽었다. 단위
         # 테스트 223 건이 포즈 세션을 stub 으로 주입해서 이 경로를 검증하지
-        # 못한 탓이다. 정답은 저��� 모듈 — landmarker 0.08초 생성, 33점
+        # 못한 탓이다. 정답은深层이 아니라 그 안의 모듈 — landmarker 0.08초 생성, 33점
         # 검출까지 확인했다.
-        from mediapipe.tasks.python.core.base_options import BaseOptions
+        _BaseOptions = _find_base_options()
         options = _vision.PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=model),
+            base_options=_BaseOptions(model_asset_path=model),
             running_mode=_vision.RunningMode.IMAGE,
             num_poses=1,
             min_pose_detection_confidence=0.5,
@@ -249,7 +310,7 @@ def _pose_landmarker():
             # mediapipe 0.10.33 가 내부 ROI 마스크를 만들다가 **네이티브
             # SIGABRT** 로 죽는다(image_frame.cc "Check failed: 1 ==
             # ChannelSize()"). SIGABRT 는 try/except 로 못 잡아 ComfyUI 서버
-            # 전체가 죽는다. 입��으로 막는 시도 3가지는 전부 실패했다(입력
+            # 전체가 죽는다. 입력으로 막는 시도 3가지는 전부 실패했다(입력
             # 홀짝 판정 / 512px 축소 / 정사각 패딩). 인체 마스크는 이 세션이
             # 아니라 33점 포즈에서 직접 만든다(`_person_mask_from_rgb`).
             output_segmentation_masks=False)
@@ -274,6 +335,12 @@ def _even_rgb(u8):
     try:
         import numpy as _np
         arr = _np.asarray(u8)
+        # 왜(Why) 2 미만은 여기서 막나 (2026-10-01 무결성 실측): 0x0 과 1x1 은
+        # "짝수면 통과" 조건을 만족해 mediapipe 까지 들어가고, 거기서 네이티브로
+        # RET_CHECK 실패(roi->width > 0 && roi->height > 0)를 낸다. 프로세스는
+        # 안 죽지만 어떤 환경에선 치명적이다. mediapipe 를 부르기 **전**에 끊는다.
+        if arr.ndim < 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+            return None
         if (arr.shape[0] % 2) or (arr.shape[1] % 2):
             arr = arr[:arr.shape[0] - (arr.shape[0] % 2),
                      :arr.shape[1] - (arr.shape[1] % 2)]

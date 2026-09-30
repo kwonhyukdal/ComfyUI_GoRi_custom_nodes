@@ -1425,7 +1425,7 @@ check("R66: 환경변수가 동봉본보다 우선",
 # "조용한 실패" 가 되지 않는다).
 import re as _re66
 _body66 = _src66[_src66.index("def _pose_model_path():"):
-                 _src66.index("def _pose_landmarker():")]
+                 _src66.index("\ndef ", _src66.index("def _pose_model_path():") + 1)]
 check("R66: 파일시스템을 탐색하지 않는다 (R61)",
       not _re66.search(r"os\.path\.(exists|isfile|isdir|listdir|walk)|glob\.|os\.scandir",
                        _body66), _body66[:120])
@@ -1706,6 +1706,99 @@ check("R70: 폭 0 패널은 걸러진다 (조용한 오조작 방지)",
 
 # R58: 두 함수가 조용히 실패하는 경로가 남아 있지 않은지 소스를 검사한다.
 # `del img` 처럼 스코프 밖 이름을 del 하면 NameError -> 예외 삼킴 -> 조용한 실패다.
+
+
+# R71: 환경 무결성 (2026-10-01). 실사용은 각기 다른 환경이라 실패 경로가 곧
+# 버그다. 여기서는 "다른 환경에서 어떻게 죽을 수 있나" 를 못 박는다.
+import importlib as _il71
+
+
+def _np71():
+    import numpy
+    return numpy
+
+
+_n71 = _np71()
+
+# --- 레이아웃 정규화: VAE 마다 decode 축 순서/채널 수가 다르다 ---
+check("R71: (B,C,H,W) 3채널 -> (H,W,3)",
+      ck._as_rgb_hwc(_n71.zeros((8, 3, 16, 16), _n71.float32)).shape == (16, 16, 3))
+check("R71: (B,H,W,C) 4채널 -> (H,W,3)",
+      ck._as_rgb_hwc(_n71.zeros((8, 16, 16, 4), _n71.float32)).shape == (16, 16, 3))
+check("R71: 그레이스케일 2D 는 None (mediapipe 에 넘기지 않는다)",
+      ck._as_rgb_hwc(_n71.zeros((16, 16), _n71.float32)) is None)
+check("R71: 2채널( mediapipe 가 못 받음) 는 None",
+      ck._as_rgb_hwc(_n71.zeros((8, 16, 16, 2), _n71.float32)) is None)
+
+# --- 최소 치수: 0x0 / 1x1 은 mediapipe 네이티브 RET_CHECK 를 낸다 ---
+check("R71: 0x0 이미지는 mediapipe 전에 차단",
+      ck._even_rgb(_n71.zeros((0, 0, 3), _n71.uint8)) is None)
+check("R71: 1x1 이미지도 차단",
+      ck._even_rgb(_n71.zeros((1, 1, 3), _n71.uint8)) is None)
+check("R71: 홀수 크기는 짝수로 잘린다",
+      ck._even_rgb(_n71.zeros((5, 7, 3), _n71.uint8)).shape[:2] == (4, 6))
+
+# --- BaseOptions 위치가 버전마다 다르다 ---
+_bo71 = ck._find_base_options()
+if _il71.util.find_spec("mediapipe") is None:
+    check("R71: mediapipe 미설치 — BaseOptions 탐색은 None (선택 의존성)", True)
+else:
+    check("R71: 실제 mediapipe 에서 BaseOptions 를 찾는다",
+          _bo71 is not None, "찾은 경로가 없으면 포즈가 통째로 꺼진다")
+    _lm71 = ck._pose_landmarker()
+    check("R71: landmarker 세션이 실제로 열린다", _lm71 is not None)
+    if _lm71 is not None:
+        try:
+            _lm71.close()
+        except Exception:
+            pass
+
+# --- 강도/게이트 산술은 어떤 입력에도 죽지 않아야 한다 ---
+check("R71: nan 강도는 0 (노출 전 차단)",
+      ck._safe_strength(float("nan"), "t") == 0.0)
+check("R71: inf 강도는 0", ck._safe_strength(float("inf"), "t") == 0.0)
+check("R71: 문자열 강도는 0 (버전 아님)",
+      ck._safe_strength("abc", "t") == 0.0)
+check("R71: 1e9 강도는 1.0 으로 클램프", ck._safe_strength(1e9, "t") == 1.0)
+check("R71: nan drift 감쇠는 0", ck._damp_factor(float("nan")) == 0.0)
+
+
+# R72: VRAM 해상도 상한 (2026-10-01). 카메라 노드의 QWEN_REF_MAX_PIXELS 규율을
+# 공유한다. **판정이 바뀌면 안 된다** — 해상도만 줄이고 종횡비와 의미를 유지한다.
+class _CapVAE72:
+    def __init__(self):
+        self.shapes = []
+
+    def decode(self, samples):
+        self.shapes.append(tuple(samples.shape))
+        h, w = int(samples.shape[-2]), int(samples.shape[-1])
+        return _t.rand(1, 1, h * 8, w * 8).repeat(1, 4, 1, 1)
+
+
+_cap72 = _CapVAE72()
+ck._decode_capped(_cap72, _t.rand(1, 4, 236, 132))       # 1056x1888 = 2MP
+_got72 = _cap72.shapes[-1]
+_px72 = _got72[-2] * _got72[-1] * 64
+check("R72: 2MP 입력은 1MP 상한으로 축소된다",
+      _px72 <= ck._DECODE_MAX_PIXELS, "%.2fMP" % (_px72 / 1e6))
+check("R72: 축소 후에도 종횡비가 유지된다(의미 보존)",
+      abs((236 / 132) - (_got72[-2] / _got72[-1])) / (236 / 132) < 0.05,
+      "%.3f -> %.3f" % (236 / 132, _got72[-2] / _got72[-1]))
+
+_cap72b = _CapVAE72()
+ck._decode_capped(_cap72b, _t.rand(1, 4, 64, 64))        # 512x512 = 0.26MP
+check("R72: 상한 미만은 축소하지 않는다 (무의미한 해상도 손실 방지)",
+      _cap72b.shapes[-1][-2:] == (64, 64), str(_cap72b.shapes[-1][-2:]))
+
+_cap72c = _CapVAE72()
+try:
+    ck._decode_capped(_cap72c, _t.rand(1, 4, 4))          # 3D 로 깨진 입력
+    check("R72: 깨진 축 크기도 예외 없이 처리된다", True)
+except Exception as _e72:
+    check("R72: 깨진 축 크기도 예외 없이 처리된다", False, str(_e72))
+
+check("R72: 상한은 카메라 노드와 같은 1MP 규칙",
+      ck._DECODE_MAX_PIXELS == 1024 * 1024, str(ck._DECODE_MAX_PIXELS))
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
