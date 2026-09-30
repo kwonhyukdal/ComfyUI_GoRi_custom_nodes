@@ -2186,6 +2186,135 @@ _out_r26 = _enc_r26.run(topic="창가 고양이", preset=cd.AUTO, automation="�
 check("R26: 실행 후 기록 키 제거", _p_exec_r26["7"]["inputs"]["api_key"] == "")
 check("R26: 실행 결과 정상 (제거와 무관)", isinstance(_out_r26, tuple) and len(_out_r26) == 3)
 
+print("-- R26b: 사진 PNG 메타데이터 scrub (extra_pnginfo 경로) --")
+# 왜(Why) 이 블록이 필요한가(2026-09-30 실측): SaveImage 는 `extra_pnginfo`
+# 를 PNG 청크에 통째로 박는데, 그 안의 `workflow` 은 프론트가 보낸 위젯
+# 원본이라 prompt 기록과 **별개 dict**다. prompt 만 지우면 저장된 사진에
+# 키가 남았다(당일 저장 이미지 전부가 이 경로로 키를 담고 있었다).
+
+
+def _png_r26b(uid, key, other="other-key"):
+    """실측 구조 재현: nodes 는 list, id 는 unique_id 와 같은 문자열."""
+    return {"workflow": {"nodes": [
+        {"id": str(uid), "type": "GoRi_CameraDirectorEncodeSkills",
+         "widgets_values": ["topic", "sk-model", key, "https://x"],
+         "widgets_values_named": {"topic": "topic", "model": "sk-model",
+                                  "api_key": key,
+                                  "custom_base_url": "https://x"}},
+        {"id": "99", "type": "GoRi_CameraDirectorEncodeSkills",
+         "widgets_values": ["t2", other],
+         "widgets_values_named": {"topic": "t2", "api_key": other}},
+    ]}}
+
+
+check("R26b: hidden에 extra_pnginfo 선언",
+      cd.CameraDirector.INPUT_TYPES().get("hidden", {}).get("extra_pnginfo")
+      == "EXTRA_PNGINFO",
+      str(cd.CameraDirector.INPUT_TYPES().get("hidden", {})))
+check("R26b: Skills hidden에도 extra_pnginfo 유지",
+      cd.CameraDirectorEncode.INPUT_TYPES().get("hidden", {}).get("extra_pnginfo")
+      == "EXTRA_PNGINFO")
+check("R26b: run/run_prompt가 extra_pnginfo 인자 수신",
+      "extra_pnginfo" in _inspect_r26.signature(cd.CameraDirector.run).parameters
+      and "extra_pnginfo" in _inspect_r26.signature(
+          cd.CameraDirectorEncode.run_prompt).parameters)
+
+_e_r26b = _png_r26b(7, "sk-png")
+check("R26b: 자기 entry 키 제거", cd._scrub_api_key_from_extra_pnginfo(_e_r26b, 7, "sk-png") is True)
+check("R26b: widgets_values 빈칸",
+      _e_r26b["workflow"]["nodes"][0]["widgets_values"][2] == "")
+check("R26b: widgets_values_named 빈칸",
+      _e_r26b["workflow"]["nodes"][0]["widgets_values_named"]["api_key"] == "")
+check("R26b: 같은 문자열 다른 인덱스는 보존",
+      _e_r26b["workflow"]["nodes"][0]["widgets_values"][1] == "sk-model")
+check("R26b: 타 노드 키 보존",
+      _e_r26b["workflow"]["nodes"][1]["widgets_values_named"]["api_key"] == "other-key")
+check("R26b: 제거 후 키 미잔존 확인",
+      cd._api_key_left_in_png(_e_r26b, 7, "sk-png") is False)
+check("R26b: 문자열 unique_id도 동작",
+      cd._scrub_api_key_from_extra_pnginfo(_png_r26b(7, "sk-png"), "7", "sk-png") is True)
+check("R26b: nodes 가 dict 여도 동작",
+      cd._scrub_api_key_from_extra_pnginfo(
+          {"workflow": {"nodes": {"7": {"id": "7", "widgets_values": ["sk-d"],
+                                        "widgets_values_named": {"api_key": "sk-d"}}}}},
+          7, "sk-d") is True)
+check("R26b: named 없이 widgets_values 만 있어도 제거",
+      cd._scrub_api_key_from_extra_pnginfo(
+          {"workflow": {"nodes": [{"id": "7", "widgets_values": ["sk-v"]}]}},
+          7, "sk-v") is True)
+check("R26b: extra_pnginfo None이면 False",
+      cd._scrub_api_key_from_extra_pnginfo(None, 7, "sk-png") is False)
+check("R26b: 비dict면 False",
+      cd._scrub_api_key_from_extra_pnginfo("x", 7, "sk-png") is False)
+check("R26b: unique_id None이면 False",
+      cd._scrub_api_key_from_extra_pnginfo(_png_r26b(7, "sk-png"), None, "sk-png") is False)
+check("R26b: 빈 키면 False",
+      cd._scrub_api_key_from_extra_pnginfo(_png_r26b(7, ""), 7, "") is False)
+check("R26b: 없는 id면 False",
+      cd._scrub_api_key_from_extra_pnginfo(_png_r26b(7, "sk-png"), 1234, "sk-png") is False)
+check("R26b: workflow 없으면 False",
+      cd._scrub_api_key_from_extra_pnginfo({"x": 1}, 7, "sk-png") is False)
+check("R26b: 좌변조 확인 — 키가 실제로 없으면 False",
+      cd._scrub_api_key_from_extra_pnginfo(_png_r26b(7, ""), 7, "sk-png") is False)
+check("R26b: 경고 판정 — 키 잔존 시 True",
+      cd._api_key_left_in_png(_png_r26b(7, "sk-png"), 7, "sk-png") is True)
+check("R26b: 경고 판정 — 빈칸이면 False(오탐 방지)",
+      cd._api_key_left_in_png(_png_r26b(7, ""), 7, "sk-png") is False)
+
+# 실측 스냅샷 그대로: PNG 청크에 들어갈 dict 에 키가 없어야 한다.
+_snap_r26b = _png_r26b(285, "sk-or-v1-" + "a" * 64)
+cd._scrub_api_key_from_extra_pnginfo(_snap_r26b, 285, "sk-or-v1-" + "a" * 64)
+import json as _json_r26b
+check("R26b: 직렬화한 전체 스냅샷에 키 문자열 없음",
+      ("sk-or-v1-" + "a" * 64) not in
+      _json_r26b.dumps(_snap_r26b, ensure_ascii=False))
+
+# run() 경유: 실제로 두 표면이 함께 정리되는지
+_enc_r26b = cd.CameraDirector()
+_pr_r26b = _prompt_r26(7, "sk-exec-both")
+_pg_r26b = _png_r26b(7, "sk-exec-both")
+_enc_r26b.run(topic="창가 고양이", preset=cd.AUTO, automation="규칙 (auto)",
+              shot=cd.AUTO, lens=cd.AUTO, angle=cd.AUTO,
+              composition=cd.AUTO, lighting=cd.AUTO, grade=cd.AUTO,
+              motion=cd.AUTO, speed=cd.AUTO, amplitude=cd.AUTO,
+              api_key="sk-exec-both", unique_id=7, prompt=_pr_r26b,
+              extra_pnginfo=_pg_r26b)
+check("R26b: run() 후 실행 기록 키 제거",
+      _pr_r26b["7"]["inputs"]["api_key"] == "")
+check("R26b: run() 후 워크플로 스냅샷 키 제거",
+      _pg_r26b["workflow"]["nodes"][0]["widgets_values_named"]["api_key"] == "")
+
+# 조용한 실패 방지: 못 지우면 경고가 1회 나가야 한다.
+_cap_r26b = []
+_orig_log_r26b = cd._log
+cd._log = lambda m: _cap_r26b.append(m)
+try:
+    cd._SCRUB_WARNED.clear()
+    _stuck_r26b = _png_r26b(7, "sk-stuck")
+    cd._warn_scrub_unavailable("sk-stuck", _prompt_r26(7, "sk-stuck"), 7,
+                               _stuck_r26b, False)
+    check("R26b: PNG 키 잔존 시 경고 1회",
+          len(_cap_r26b) == 1 and "지우지 못했" in _cap_r26b[0],
+          str(_cap_r26b[:1]))
+    cd._warn_scrub_unavailable("sk-stuck", _prompt_r26(7, "sk-stuck"), 7,
+                               _stuck_r26b, False)
+    check("R26b: 같은 사유는 재차 경고 안 함(로그 안 더러워짐)", len(_cap_r26b) == 1)
+    cd._SCRUB_WARNED.clear()
+    _cap_r26b.clear()
+    _ok_r26b = _png_r26b(7, "sk-ok")
+    cd._scrub_api_key_from_extra_pnginfo(_ok_r26b, 7, "sk-ok")
+    cd._warn_scrub_unavailable("sk-ok", _prompt_r26(7, "sk-ok"), 7, _ok_r26b, True)
+    check("R26b: 정상 경로면 경고 없음(오탐 금지)", not _cap_r26b, str(_cap_r26b[:1]))
+    cd._SCRUB_WARNED.clear()
+    _cap_r26b.clear()
+    cd._warn_scrub_unavailable("sk-ok", _prompt_r26(7, "sk-ok"), 7,
+                               _png_r26b(7, ""), False)
+    check("R26b: 프론트가 이미 빈칸이면 경고 없음(오탐 금지)", not _cap_r26b,
+          str(_cap_r26b[:1]))
+finally:
+    cd._log = _orig_log_r26b
+    cd._SCRUB_WARNED.clear()
+
 print("-- R27: 루트 .env 키 파일 (표준 방식) --")
 import tempfile as _tf_r27
 _tmpd_r27 = _tf_r27.mkdtemp()
@@ -3378,7 +3507,8 @@ check("R53: hidden unique_id/prompt 선언 유지",
       '"hidden"' in _src52 and "UNIQUE_ID" in _src52
       and "PROMPT" in _src52)
 check("R53: run()이 scrub 실패 시 경고 경로를 탄다",
-      "_warn_scrub_unavailable(api_key, prompt, unique_id)" in _src52)
+      "_warn_scrub_unavailable(" in _src52
+      and "extra_pnginfo, png_scrubbed" in _src52)
 
 print("-- R54: 정밀검토 회귀 (2026-09-28, 재발 방지) --")
 # 왜(Why) 이 블록이 필요한가: 아래 항목들은 전부 **조용히** 실패했다.

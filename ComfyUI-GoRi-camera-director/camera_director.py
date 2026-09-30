@@ -370,39 +370,131 @@ def _scrub_api_key_from_prompt(prompt, unique_id) -> bool:
         return False
 
 
+def _self_workflow_node(extra_pnginfo, unique_id):
+    """extra_pnginfo.workflow.nodes 에서 이 노드 entry를 찾아 돌려준다.
+
+    왜(Why) id로 찾는가: `nodes` 는 프론트 스키마에 따라 list일 수도 dict일
+    수도 있고, `widgets_values` 의 api_key 위치도 바뀐다. 하지만 항목의
+    `id` 는 서버가 주입한 `unique_id` 와 같다(2026-09-30 실측) — 이 대응만
+    믿으면 위젯 인덱스 매핑에 얽매이지 않는다.
+    """
+    try:
+        if unique_id is None or not isinstance(extra_pnginfo, dict):
+            return None
+        workflow = extra_pnginfo.get("workflow")
+        if not isinstance(workflow, dict):
+            return None
+        nodes = workflow.get("nodes")
+        seq = list(nodes.values()) if isinstance(nodes, dict) else nodes
+        if not isinstance(seq, (list, tuple)):
+            return None
+        target = str(unique_id)
+        for node in seq:
+            if isinstance(node, dict) and str(node.get("id")) == target:
+                return node
+        return None
+    except Exception:
+        return None
+
+
+def _scrub_api_key_from_extra_pnginfo(extra_pnginfo, unique_id, api_key) -> bool:
+    """PNG 로 나가는 워크플로 스냅샷에서 이 노드 api_key만 지운다.
+
+    왜(Why) 필요한가: SaveImage/PreviewImage 는 `extra_pnginfo` 를 PNG 텍스트
+    청크에 통째로 박는다(`nodes.py`). 그 안의 `workflow` 은 프론트가 보낸
+    위젯 원본이라 `_scrub_api_key_from_prompt` 이 지우는 실행 기록과 **별개
+    dict**다. 그래서 실행 기록만 지우면 저장된 사진에 키가 그대로 남는다
+    (2026-09-30 실측: 당일 저장 이미지 전부가 이 경로로 키를 담고 있었다).
+    """
+    try:
+        key = (api_key or "").strip()
+        node = _self_workflow_node(extra_pnginfo, unique_id)
+        if not key or node is None:
+            return False
+        hit = False
+        named = node.get("widgets_values_named")
+        if isinstance(named, dict) and named.get("api_key") == key:
+            named["api_key"] = ""
+            hit = True
+        values = node.get("widgets_values")
+        if isinstance(values, list):
+            for i, v in enumerate(values):
+                if isinstance(v, str) and v == key:
+                    values[i] = ""
+                    hit = True
+        return hit
+    except Exception:
+        return False
+
+
+def _api_key_left_in_png(extra_pnginfo, unique_id, api_key) -> bool:
+    """이 노드 entry에 api_key 값이 아직 남아 있는지 (경고 판단용).
+
+    왜(Why) scrub의 반환값으로 판단하지 않는가: 프론트가 이미 빈칸인 경우에도
+    scrub는 False다. 그건 유출이 아니다. 실제로 값이 남아 있는지만 본다.
+    """
+    try:
+        key = (api_key or "").strip()
+        node = _self_workflow_node(extra_pnginfo, unique_id)
+        if not key or node is None:
+            return False
+        named = node.get("widgets_values_named")
+        if isinstance(named, dict) and named.get("api_key") == key:
+            return True
+        values = node.get("widgets_values")
+        if isinstance(values, list):
+            return any(isinstance(v, str) and v == key for v in values)
+        return False
+    except Exception:
+        return False
+
+
 # 사진 메타데이터 scrub 실패 경고는 **프로세스당 1회**만 (매 실행마다 찍으면
 # 로그가 지저분해져 경고가 눈에 띄지 않는다 → 경고의 목적을 잃는다).
 _SCRUB_WARNED = set()
 
 
-def _warn_scrub_unavailable(api_key, prompt, unique_id) -> None:
-    """api_key가 실행 기록에 남을 수 있는데 지워지지 않았을 때 1회 경고.
+def _warn_scrub_unavailable(api_key, prompt, unique_id,
+                             extra_pnginfo=None, png_scrubbed=False) -> None:
+    """api_key가 실행 기록이나 사진에 남을 수 있는데 지워지지 않았을 때 1회 경고.
 
-    왜(Why) 이게 조용한 실패인가: 이 scrub는 **hidden 입력 주입**에 의존한다
-    (ComfyUI가 `unique_id`/`prompt`를 hidden으로 넘겨줘야 한다). 코어가
-    주입 방식을 바꾸면 노드는 **에러 없이 정상 실행**되고, 대신 사진 PNG의
-    메타데이터에 API 키가 그대로 남는다. 사용자가 알 수 있는 단서는 이것뿐이므로,
+    왜(Why) 이게 조용한 실패인가: 두 scrub 모두 **hidden 입력 주입**에 의존한다
+    (ComfyUI가 `unique_id`/`prompt`/`extra_pnginfo`를 hidden으로 넘겨줘야 한다).
+    코어가 주입 방식을 바꾸면 노드는 **에러 없이 정상 실행**되고, 대신 저장된
+    PNG 메타데이터에 API 키가 그대로 남는다. 사용자가 알 수 있는 단서는 이것뿐이므로,
     못 지웠으면 반드시 말해야 한다.
     """
     try:
         if not (api_key or "").strip():
             return                      # 키가 없으면 남을 것도 없다
-        if unique_id is not None and isinstance(prompt, dict):
-            return                      # 정상 경로(스크럽 성공/키 없음)는 경고 안 함
-        _tag = f"uid={'none' if unique_id is None else type(unique_id).__name__}"
-        if _tag in _SCRUB_WARNED:
+        if unique_id is None:
+            _scrub_warn_once(
+                "no-uid", "hidden 입력으로 unique_id가 주입되지 않음")
             return
-        _SCRUB_WARNED.add(_tag)
-        _reason = ("hidden 입력으로 unique_id가 주입되지 않음"
-                   if unique_id is None else
-                   f"hidden prompt 입력 형식이 예상과 다름 ({type(prompt).__name__})")
-        _log(f"⚠ [GoRi Camera Director] 사진 메타데이터에서 API 키를 지우지 "
-             f"못했습니다 ({_reason}). ComfyUI 버전 변경으로 hidden 주입 방식이 "
-             f"바뀐 것일 수 있습니다. 저장된 이미지(PNG)는 공유하기 전에 "
-             f"메타데이터에서 키를 확인해 주세요. 공유용으로는 노드 우클릭 "
-             f"→ 'api_key 지우기(공유용)' 을 사용하세요.")
+        if not isinstance(prompt, dict):
+            _scrub_warn_once(
+                "bad-prompt",
+                f"hidden prompt 입력 형식이 예상과 다름 ({type(prompt).__name__})")
+            return
+        if isinstance(extra_pnginfo, dict) and not png_scrubbed and \
+                _api_key_left_in_png(extra_pnginfo, unique_id, api_key):
+            _scrub_warn_once(
+                "png-left",
+                "extra_pnginfo.workflow 의 자기 entry에서 api_key를 "
+                "지우지 못함")
     except Exception:
         pass
+
+
+def _scrub_warn_once(tag, reason) -> None:
+    if tag in _SCRUB_WARNED:
+        return
+    _SCRUB_WARNED.add(tag)
+    _log(f"⚠ [GoRi Camera Director] 사진 메타데이터에서 API 키를 지우지 "
+         f"못했습니다 ({reason}). ComfyUI 버전 변경으로 hidden 주입 방식이나 "
+         f"워크플로 스키마가 바뀐 것일 수 있습니다. 저장된 이미지(PNG)는 "
+         f"공유하기 전에 메타데이터에서 키를 확인해 주세요. 공유용으로는 노드 "
+         f"우클릭 → 'api_key 지우기(공유용)' 을 사용하세요.")
 
 
 def _write_env_file_key(env_name: str, key: str) -> bool:
@@ -3666,9 +3758,12 @@ class CameraDirector:
             },
             # unique_id는 이 서버에서 hidden 입력으로만 주입된다(함수 시그니처
             # 자동 주입 없음) — LLM 상태 표시등이 노드를 식별하는 데 필요.
-            # prompt는 서버 실행 기록 원본 — 사진 메타데이터에 박히기 전
-            # 이 노드의 api_key만 제거한다(_scrub_api_key_from_prompt).
-            "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
+            # prompt는 서버 실행 기록 원본, extra_pnginfo는 PNG에 박히는
+            # 워크플로 스냅샷 — 둘 다 사진 메타데이터에 api_key를 남기므로
+            # 이 노드의 키만 지운다(_scrub_api_key_from_prompt /
+            # _scrub_api_key_from_extra_pnginfo).
+            "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT",
+                       "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     # ----- 값 정규화 -------------------------------------------------------
@@ -3712,17 +3807,22 @@ class CameraDirector:
             prompt_in=None, provider="OpenAI", model="gpt-4o-mini", api_key="",
             custom_base_url="", extra_negative="", image=None,
             image_list=None, image_items=None, llm_hint="", unique_id=None,
-            prompt=None, vision_detail=VISION_DETAIL_DEFAULT,
+            prompt=None, extra_pnginfo=None,
+            vision_detail=VISION_DETAIL_DEFAULT,
             pf_steps=0, pf_cfg=0.0, pf_denoise=0.0):
-        # 실행 기록에서 자기 api_key를 먼저 제거한다. api_key 인자는 이미
-        # 바인딩되어 실행에 쓰이므로 기록 제거와 무관하게 정상 동작한다.
+        # 실행 기록과 사진 메타데이터에서 자기 api_key를 먼저 지운다. 두 인자는
+        # 이미 바인딩되어 실행에 쓰이므로 기록 제거와 무관하게 정상 동작한다.
+        png_scrubbed = False
         if _scrub_api_key_from_prompt(prompt, unique_id):
             _log("사진 메타데이터 안전: 실행 기록의 api_key 제거")
-        else:
-            # 왜(Why) 여기를 봐야 하는가: scrub가 조용히 실패하면 사진에 키가
-            # 남는데 아무 신호가 없다. hidden 주입이 안 됐는지(=ComfyUI 버전
-            # 변경 가능성) 사용자에게 알려야 원인을 찾을 수 있다.
-            _warn_scrub_unavailable(api_key, prompt, unique_id)
+        if _scrub_api_key_from_extra_pnginfo(extra_pnginfo, unique_id, api_key):
+            png_scrubbed = True
+            _log("사진 메타데이터 안전: 워크플로 스냅샷의 api_key 제거")
+        # 왜(Why) 여기를 봐야 하는가: scrub가 조용히 실패하면 사진에 키가
+        # 남는데 아무 신호가 없다. hidden 주입이 안 됐는지(=ComfyUI 버전
+        # 변경 가능성) 사용자에게 알려야 원인을 찾을 수 있다.
+        _warn_scrub_unavailable(api_key, prompt, unique_id,
+                                 extra_pnginfo, png_scrubbed)
         # 프롬프트 진입점: 선 연결(prompt_in)이 있으면 우선, 없으면 topic 칸
         external = (prompt_in or "").strip()
         if external:
@@ -4525,7 +4625,8 @@ class CameraDirectorEncode(CameraDirector):
                    image_1=None, image_2=None, image_3=None, image_4=None,
                    image_5=None, image_6=None, image_7=None, image_8=None,
                    image_9=None, image_10=None, llm_hint="", unique_id=None,
-                   prompt=None, vision_detail=VISION_DETAIL_DEFAULT,
+                   prompt=None, extra_pnginfo=None,
+                   vision_detail=VISION_DETAIL_DEFAULT,
                    pf_steps=0, pf_cfg=0.0, pf_denoise=0.0):
         image_items = [
             (1, image_1), (2, image_2), (3, image_3), (4, image_4), (5, image_5),
@@ -4540,7 +4641,8 @@ class CameraDirectorEncode(CameraDirector):
             provider=provider, model=model, api_key=api_key,
             custom_base_url=custom_base_url,
             image_items=image_items, llm_hint=llm_hint, unique_id=unique_id,
-            prompt=prompt, vision_detail=vision_detail,
+            prompt=prompt, extra_pnginfo=extra_pnginfo,
+            vision_detail=vision_detail,
             pf_steps=pf_steps, pf_cfg=pf_cfg, pf_denoise=pf_denoise)
         camera = getattr(self, "_last_camera", dict(DEFAULTS))
         camera_text = build_camera_conditioning(camera)
