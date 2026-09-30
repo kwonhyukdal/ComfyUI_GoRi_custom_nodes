@@ -130,7 +130,7 @@ def _as_rgb_hwc(arr):
         return None
 
 
-def _decode_capped(vae, latent):
+def _decode_capped(vae, latent, max_pixels=None):
     """VAE 디코드 — 픽셀 수가 상한을 넘으면 latent 를 먼저 줄인다.
 
     카메라 노드와 같은 규율(`QWEN_REF_MAX_PIXELS`). latent 축은 줄이되 종횡비는
@@ -144,9 +144,10 @@ def _decode_capped(vae, latent):
         w = int(latent.shape[-1])
         # VAE 는 8배 확대하므로 latent 격자 1칸 = 이미지 8x8 픽셀
         px = float(max(1, h) * max(1, w) * 64)
-        if px <= _DECODE_MAX_PIXELS:
+        cap = _DECODE_MAX_PIXELS if max_pixels is None else int(max_pixels)
+        if px <= cap:
             return vae.decode(latent)
-        scale = (_DECODE_MAX_PIXELS / px) ** 0.5
+        scale = (cap / px) ** 0.5
         nh = max(8, int(h * scale))
         nw = max(8, int(w * scale))
         small = _f.interpolate(latent.float(), size=(nh, nw), mode="area")
@@ -184,6 +185,28 @@ def _decode_latent_rgb(vae, latent, cache=None):
         arr = _as_rgb_hwc(arr)
         if arr is None:
             return None
+        # 상한 때문에 포즈를 놓쳤으면 한 번만 크게 다시 디코드한다 (2026-10-01 실측).
+        # 74MP 캐릭터 시트를 1MP 로 줄이면 패널 안 사람이 너무 작아 33점을 못 찾는데,
+        # 6MP 로 올리면 다른 시트가 실패한다 — 상한값에 단조가 없어 숫자로 못 잡는다.
+        # 그래서 '보통은 싼 값, 못 잡았을 때만 큰 값' 으로 판정을 직접 지킨다.
+        try:
+            _lh = int(latent.shape[-2])
+            _lw = int(latent.shape[-1])
+            if _lh * _lw * 64 > _DECODE_MAX_PIXELS:
+                u8 = (_np.clip(arr, 0.0, 1.0) * 255.0).astype(_np.uint8)
+                if not _pose_landmarks_from_tasks(u8):
+                    _release_vram()
+                    with _t.no_grad():
+                        img = _decode_capped(vae, latent,
+                                             max_pixels=_DECODE_RETRY_PIXELS)
+                    if hasattr(img, "detach"):
+                        img = img.detach().cpu()
+                    arr2 = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
+                    arr2 = _as_rgb_hwc(_np.asarray(arr2, dtype=_np.float32))
+                    if arr2 is not None:
+                        arr = arr2
+        except Exception as _e:
+            _note_retry_error(_e)
         if cache is not None:
             cache[key] = arr
         return arr
@@ -218,6 +241,14 @@ _MASK_MIN_WEIGHT = 0.35
 # 픽셀 수에 비례해 활성 메모리를 먹는다. **해상도만** 줄이고 비율은 유지하므로
 # 마스크(람간 해상도로 보간)·에지 맵(16x16)·부위 판정은 semantics 가 그대로다.
 _DECODE_MAX_PIXELS = 1024 * 1024
+
+# 포즈 검출이 상한 때문에 실패했을 때만 올려 재시도하는 해상도 (2026-10-01 실측).
+# 왜(Why) 상한값 하나로 안 되는가: 74MP 캐릭터 시트를 1MP 로 줄이면 패널 안의
+# 사람이 너무 작아져 mediapipe 가 33점을 통째로 못 찾는다(13장 중 1장 포즈 소실).
+# 반대로 6MP 로 올리면 다른 시트가 다시 실패한다 — 상한값에 단조성이 없다.
+# 그래서 판정을 직접 지키는 쪽이 낫다: 보통은 1MP 로 싼 디코드로 끝내고,
+# **포즈가 안 잡혔을 때만** 한 번 더 크게 디코드한다.
+_DECODE_RETRY_PIXELS = 4 * 1024 * 1024
 
 # 시트를 통째로 당겼을 때 강도를 얼마나 낮출까 (2단계).
 # 왜(Why) 0.5 인가: 시트의 여러 뷰를 한 장의 latent 로 읽으면 신원 신호가
@@ -374,6 +405,24 @@ def _pose_landmarks_from_tasks(u8):
 
 
 _POSE_ERR_NOTED = False
+
+
+_DECODE_RETRY_NOTED = False
+
+
+def _note_retry_error(exc):
+    """상한 재시도 디코드가 실패한 이유를 한 번만 알린다 (조용한 실패 금지).
+
+    재시도는 '있으면 더 좋고 없어도 동작하는' 개선이라 실패해도 상한본으로
+    진행한다. 하지만 조용히 삼키면 포즈를 못 잡은 이유를 사용자가 알 수 없다.
+    """
+    global _DECODE_RETRY_NOTED
+    if _DECODE_RETRY_NOTED:
+        return
+    _DECODE_RETRY_NOTED = True
+    _log("[GoRi Consistency Keeper] 포즈가 안 잡혀 상한을 올려 다시 디코드했지만 "
+         "실패했다. 해상도를 낮춘 상태로 진행한다: "
+         + type(exc).__name__ + ": " + str(exc))
 
 
 def _note_pose_error(where, exc):

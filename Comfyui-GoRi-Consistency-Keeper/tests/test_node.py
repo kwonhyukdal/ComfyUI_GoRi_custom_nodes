@@ -1800,5 +1800,65 @@ except Exception as _e72:
 check("R72: 상한은 카메라 노드와 같은 1MP 규칙",
       ck._DECODE_MAX_PIXELS == 1024 * 1024, str(ck._DECODE_MAX_PIXELS))
 
+
+# R73: 포즈 검출 실패 시에만 상한을 올려 한 번 더 디코드한다 (2026-10-01 실측).
+# 상한값 하나로 못 잡는 이유: 1MP 는 74MP 캐릭터 시트의 패널 사람을 놓치고,
+# 6MP 는 다른 시트를 놓친다 — 해상도에 단조가 없다. 판정을 직접 지킨다.
+class _VAE73:
+    def __init__(self):
+        self.px = []
+
+    def decode(self, samples):
+        h, w = int(samples.shape[-2]), int(samples.shape[-1])
+        self.px.append(h * w * 64)
+        return _t.rand(1, 1, h * 8, w * 8).repeat(1, 4, 1, 1)
+
+
+_real_pose73 = ck._pose_landmarks_from_tasks
+_pc73 = [0]
+
+
+def _pose_stub73(_u8):
+    _pc73[0] += 1
+    return None if _pc73[0] == 1 else [(0.5, 0.5)] * 33
+
+
+try:
+    _lat73 = _t.rand(1, 4, 200, 120)          # 1600x960 = 1.54MP > 1MP
+    _v73 = _VAE73()
+    _pc73[0] = 0
+    ck._pose_landmarks_from_tasks = _pose_stub73
+    _r73 = ck._decode_latent_rgb(_v73, _lat73)
+    check("R73: 포즈 실패 시 한 번만 크게 재디코드된다",
+          len(_v73.px) == 2, "%d회 %s" % (len(_v73.px),
+                                          ["%.2fMP" % (q / 1e6) for q in _v73.px]))
+    check("R73: 재시도본이 상한본보다 크다",
+          len(_v73.px) == 2 and _v73.px[1] > _v73.px[0],
+          "%.2fMP -> %.2fMP" % (_v73.px[0] / 1e6, _v73.px[-1] / 1e6))
+    check("R73: 재시도 후에도 유효한 배열", _r73 is not None)
+
+    _v73b = _VAE73()
+    _pc73[0] = 0
+    ck._pose_landmarks_from_tasks = lambda _u: [(0.5, 0.5)] * 33
+    ck._decode_latent_rgb(_v73b, _lat73)
+    check("R73: 포즈가 바로 잡히면 재디코드하지 않는다 (VRAM 낭비 방지)",
+          len(_v73b.px) == 1, "%d회" % len(_v73b.px))
+
+    _v73c = _VAE73()
+    ck._pose_landmarks_from_tasks = lambda _u: None
+    ck._decode_latent_rgb(_v73c, _t.rand(1, 4, 64, 64))     # 0.26MP < 상한
+    check("R73: 상한 미만은 포즈 실패해도 재시도 경로에 들어가지 않는다",
+          len(_v73c.px) == 1, "%d회" % len(_v73c.px))
+
+    check("R73: 재시도 상한이 기본 상한보다 크다",
+          ck._DECODE_RETRY_PIXELS > ck._DECODE_MAX_PIXELS,
+          "%.1fMP > %.1fMP" % (ck._DECODE_RETRY_PIXELS / 1e6,
+                               ck._DECODE_MAX_PIXELS / 1e6))
+    check("R73: 재시도 상한은 카메라 1MP 규칙의 정수배 이내",
+          ck._DECODE_RETRY_PIXELS <= 4 * ck._DECODE_MAX_PIXELS,
+          "%.1fMP" % (ck._DECODE_RETRY_PIXELS / 1e6))
+finally:
+    ck._pose_landmarks_from_tasks = _real_pose73
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
