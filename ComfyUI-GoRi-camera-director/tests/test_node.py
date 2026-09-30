@@ -4296,6 +4296,63 @@ check("R67: 하위 프로세스가 절대경로 + cwd 지정",
       "os.path.join(HERE, " + '"test_node.py"' + ")" in _src67
       and "cwd=PKG" in _src67)
 
+# R68: 프론트엔드 api_key 보호를 **실제로 실행**해서 검증한다.
+# 왜(Why) 이게 필요했나: 유출 방지는 대개 서버(Python) 쪽만 검증되고, 화면
+# 가림·저장 직렬화·페이로드 가드는 **JS 에만** 있었다. 그 JS 에는 테스트가
+# 하나도 없어서 보호가 "있어 보인다"만 하고 실제로 도는지 아무도 확인하지
+# 못했다(2026-09-30 실측). 게다가 문자열 검사(_src 에 "api_key" 가 있나)로
+# 는 이 종류를 못 잡는다 — 로직이 뒤집혀도 문자열은 그대로 있기 때문이다.
+# 그래서 node 로 진짜 소스를 로드해 돌린다.
+#
+# node 가 없는 환경에서 이 파일을 만들게 하지는 않는다(의존성 강제 금지).
+# 그래서 **건너뛰되 조용히 실패하지 않게** "미실행" 을 명시한다 — 없는 걸
+# 통과로 기록하면 오히려 회귀를 놓친다.
+import shutil as _sh68
+import subprocess as _sp68  # noqa: E402  (이미 위에서 import 했지만 명시)
+
+_NODE68 = _sh68.which("node")
+_FRONTEND68 = os.path.join(HERE, "test_frontend.js")
+_WEBSRC68 = os.path.join(PKG, "web", "progressive_image_inputs.js")
+
+check("R68: 프론트 테스트 파일 존재", os.path.isfile(_FRONTEND68),
+      _FRONTEND68)
+if _NODE68 is None:
+    # 환경 문제다. 결론은 PASS 가 아니라 "미실행" 으로 남긴다.
+    check("R68: node 없음 — 프론트 보호 검증 미실행 (환경 문제, 회귀 아님)",
+          True, "node 를 설치하면 자동 실행된다")
+    _say("  (참고) node 가 없어 프론트 테스트를 건너뛰었습니다")
+else:
+    _fe68 = _sp68.run([_NODE68, _FRONTEND68, _WEBSRC68],
+                      capture_output=True, cwd=PKG)
+    _fe68_out = (_fe68.stdout or b"").decode("utf-8", errors="replace")
+    _fe68_err = (_fe68.stderr or b"").decode("utf-8", errors="replace")
+    _fe68_line = next((l for l in _fe68_out.splitlines() if "PASS=" in l), "")
+    check("R68: 프론트 보호 테스트 전부 통과 (마스킹·저장제외·페이로드가드)",
+          _fe68.returncode == 0 and "FAIL=0" in _fe68_line,
+          f"exit={_fe68.returncode} {_fe68_line.strip()} "
+          + next((l for l in _fe68_err.splitlines() if l.strip()), ""))
+    _fe68_fails = [l.strip() for l in _fe68_out.splitlines()
+                   if l.strip().startswith("FAIL")]
+    # 세 가지 공유 경로가 JS 에서 실제로 막히는지 소스에 존재하는지 확인.
+    # (실행 테스트가 green 이어도 대상 로직이 통째로 사라지면 깨진다)
+    _web68 = open(_WEBSRC68, encoding="utf-8").read()
+    check("R68: 화면 가림 경로 존재 (_displayValue 재정의)",
+          "Object.defineProperty(w, \"_displayValue\"" in _web68
+          and "API_KEY_MASK" in _web68)
+    check("R68: 저장 직렬화 제외 경로 존재 (워크플로우 파일 공유)",
+          "hookSerializeBlankApiKey" in _web68
+          and 'widgets_values_named, "api_key"' in _web68)
+    check("R68: 실행 페이로드 가드 존재 (방치 노드 키 미전송)",
+          "hookApiKeyPayloadGuard" in _web68
+          and "serializeValue" in _web68)
+    check("R68: 편집 입력창 password 전환 존재 (입력 중 노출 방지)",
+          'input.type = "password"' in _web68)
+    check("R68: 공유용 수동 지우기 메뉴 존재",
+          "api_key 지우기 (공유용)" in _web68)
+    # 임시 산출물이 저장소에 남으면 안 된다.
+    check("R68: 테스트가 임시 산출물을 남기지 않음",
+          not os.path.exists(os.path.join(HERE, ".gori_frontend_under_test.mjs")))
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)

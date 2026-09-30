@@ -1069,5 +1069,216 @@ else:
           str({k: next((l for l in v[1].splitlines() if "PASS=" in l), "")
                for k, v in _r63_res.items()}))
 
+# R64: 포즈 로더 계약 (조용한 실패 방지의 핵심).
+# 왜(Why) 이 블록이 필요한가: 앞의 포즈 테스트는 `_pose_model_path` /
+# `_pose_landmarks_from_tasks` / `_segmentation_from_tasks` 를 **전부 스텁으로
+# 대체**한다. 그래서 소비자가 가짜 관절점으로 도는 것만 확인하고, **로더가
+# 실제로 어떻게 실패하는지는 한 번도 실행된 적이 없다.** 그런데 이 노드가
+# 배포판에서 조용히 죽었던 지점이 정확히 그 자리였다(구 `mediapipe.solutions`
+# 부재 → 조용히 None → 인체 마스크/부위별 강도/프레이밍이 사라짐).
+# 계약은 세 가지다: (1) 실패해도 예외가 아니라 None, (2) **한 번만** 알린다
+# (매 프레임 로그면 콘솔이 floods), (3) 세션은 한 번만 만들어 재사용한다
+# (모델 로드는 수 초 걸려 매 프레임 만들면 노드가 멈춘다).
+import types as _ty64  # noqa: E402
+
+_pose_logs = []
+_orig_log64 = ck._log
+ck._log = lambda m: _pose_logs.append(str(m))
+_orig_env64 = os.environ.pop("GORI_POSE_MODEL", None)
+_orig_landmarker64 = ck._TASKS_LANDMARKER
+_orig_err_noted64 = ck._POSE_ERR_NOTED
+_orig_noted64 = ck._POSE_NOTED
+
+
+def _reset_pose_state():
+    ck._TASKS_LANDMARKER = []
+    ck._POSE_ERR_NOTED = False
+    ck._POSE_NOTED = False
+    _pose_logs.clear()
+
+
+try:
+    # --- 경로 계약: 파일시스템을 건드리지 않는다 (R61) ---
+    _reset_pose_state()
+    check("R64: 모델 미설정이면 경로 None", ck._pose_model_path() is None)
+    os.environ["GORI_POSE_MODEL"] = ""
+    check("R64: 빈 문자열은 미설정으로 취급", ck._pose_model_path() is None)
+    os.environ["GORI_POSE_MODEL"] = "C:/nope/does_not_exist.task"
+    check("R64: 없는 경로를 그대로 돌려줌 (파일시스템을 확인하지 않음)",
+          ck._pose_model_path() == "C:/nope/does_not_exist.task",
+          str(ck._pose_model_path()))
+
+    # --- 미설정 시 조용히 None, 예외 없음 ---
+    _reset_pose_state()
+    os.environ.pop("GORI_POSE_MODEL", None)
+    check("R64: 모델 미설정 시 로더가 예외 대신 None",
+          ck._pose_landmarker() is None)
+    check("R64: 미설정은 오류 로그 대상이 아님 (unavailable 경로)",
+          not _pose_logs, str(_pose_logs[:1]))
+
+    # --- 실패해도 죽지 않고 한 번만 말한다 ---
+    _reset_pose_state()
+    os.environ["GORI_POSE_MODEL"] = "C:/nope/bad.task"
+
+    def _install_fake_mp(vision_mod):
+        """`from mediapipe.tasks.python import vision` 가 실제로 성립하게 계층을
+        만든다. import 문은 sys.modules 항목뿐 아니라 **부모 모듈의 속성**도
+        본다 — 한쪽만 넣으면 from-import 가 조용히 ImportError 가 된다."""
+        mp = _ty64.ModuleType("mediapipe")
+        tasks = _ty64.ModuleType("mediapipe.tasks")
+        py = _ty64.ModuleType("mediapipe.tasks.python")
+        mp.tasks = tasks
+        tasks.BaseOptions = lambda **kw: object()
+        mp.Image = lambda **kw: object()
+        mp.ImageFormat = _ty64.SimpleNamespace(SRGB="SRGB")
+        py.vision = vision_mod
+        for _n, _m in (("mediapipe", mp), ("mediapipe.tasks", tasks),
+                       ("mediapipe.tasks.python", py),
+                       ("mediapipe.tasks.python.vision", vision_mod)):
+            sys.modules[_n] = _m
+
+    _bad_vision = _ty64.ModuleType("mediapipe.tasks.python.vision")
+    _bad_vision.PoseLandmarkerOptions = lambda **kw: object()
+    _bad_vision.RunningMode = _ty64.SimpleNamespace(IMAGE="IMAGE")
+
+    def _boom_create(_options):
+        raise RuntimeError("model load failed")
+
+    _bad_vision.PoseLandmarker = _ty64.SimpleNamespace(
+        create_from_options=staticmethod(_boom_create))
+    _install_fake_mp(_bad_vision)
+    _saved = {k: v for k, v in sys.modules.items()
+              if k == "mediapipe" or k.startswith("mediapipe.tasks")}
+    for _ in range(5):
+        check_res = ck._pose_landmarker()
+    check("R64: 모델 로드 실패 시 예외 없이 None", check_res is None)
+    check("R64: 실패를 정확히 한 번만 알림 (5회 호출)",
+          len(_pose_logs) == 1, f"{len(_pose_logs)}건: {_pose_logs[:1]}")
+    check("R64: 실패 로그에 원인이 남음 (무엇이 죽었는지)",
+          _pose_logs and "RuntimeError" in _pose_logs[0]
+          and "model load failed" in _pose_logs[0], str(_pose_logs[:1]))
+
+    # --- 성공하면 세션을 재사용한다 (매 프레임 재로드 방지) ---
+    _reset_pose_state()
+    os.environ["GORI_POSE_MODEL"] = "C:/fake/pose.task"
+    _built = []
+
+    class _FakeSession:
+        def __init__(self):
+            _built.append(self)
+
+    _good_vision = _ty64.ModuleType("mediapipe.tasks.python.vision")
+    _good_vision.PoseLandmarkerOptions = lambda **kw: object()
+    _good_vision.RunningMode = _ty64.SimpleNamespace(IMAGE="IMAGE")
+    _good_vision.PoseLandmarker = _ty64.SimpleNamespace(
+        create_from_options=staticmethod(lambda o: _FakeSession()))
+    _install_fake_mp(_good_vision)
+    _s1 = ck._pose_landmarker()
+    _s2 = ck._pose_landmarker()
+    _s3 = ck._pose_landmarker()
+    check("R64: 정상 경로에서 세션이 만들어짐", _s1 is not None)
+    # 같은 객체만으로는 재작성 을 못 잡는다(생성기가 매번 같은 걸 돌려주면
+    # 통과해버린다). **생성 횟수** 로 판정해야 캐시가 실제로 살아 있는지 된다.
+    check("R64: 세션은 3회 호출에도 한 번만 생성 (재로드 없음)",
+          len(_built) == 1, f"{len(_built)}회 생성됨")
+    check("R64: 호출마다 같은 세션을 돌려준다", _s1 is _s2 is _s3)
+    check("R64: 성공 경로에서는 오류 로그 없음", not _pose_logs,
+          str(_pose_logs[:1]))
+
+    # --- 33점 계약: 모자라면 조용히 None ---
+    _reset_pose_state()
+    os.environ["GORI_POSE_MODEL"] = "C:/fake/pose.task"
+
+    class _Pts:
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    def _mk_detector(n_pts):
+        class _LM:
+            def detect(self, _img):
+                return _ty64.SimpleNamespace(
+                    pose_landmarks=[[_Pts(i / 100.0, 0.5) for i in range(n_pts)]],
+                    segmentation_masks=None)
+        return _LM()
+
+    ck._TASKS_LANDMARKER = [_mk_detector(33)]
+    _l33 = ck._pose_landmarks_from_tasks(_u8_early := _npr.zeros((8, 8, 3),
+                                                                 dtype=_npr.uint8))
+    check("R64: 33점이면 그대로 통과 (관절점 33개)",
+          _l33 is not None and len(_l33) == 33,
+          str(len(_l33) if _l33 else None))
+    ck._TASKS_LANDMARKER = [_mk_detector(32)]
+    check("R64: 32점이면 None (모자란 관절점을 조용히 쓰지 않음)",
+          ck._pose_landmarks_from_tasks(_u8_early) is None)
+    ck._TASKS_LANDMARKER = [_ty64.SimpleNamespace(detect=lambda _i: _ty64.SimpleNamespace(
+        pose_landmarks=None, segmentation_masks=None))]
+    check("R64: 검출 결과가 비면 None",
+          ck._pose_landmarks_from_tasks(_u8_early) is None)
+
+    # --- 기능 없음 안내도 1회만 ---
+    _reset_pose_state()
+    for _ in range(4):
+        ck._note_pose_unavailable()
+    check("R64: 기능 꺼짐 안내도 1회만 (4회 호출)",
+          len(_pose_logs) == 1, f"{len(_pose_logs)}건")
+
+    # --- 소비자는 로더가 None 이면 조용히 통과 ---
+    _reset_pose_state()
+    ck._TASKS_LANDMARKER = []
+    os.environ.pop("GORI_POSE_MODEL", None)
+    check("R64: 관절점 추출은 로더 없으면 None",
+          ck._pose_landmarks_from_tasks(
+              _npr.zeros((8, 8, 3), dtype=_npr.uint8)) is None)
+    check("R64: 세그멘테이션도 로더 없으면 None",
+          ck._segmentation_from_tasks(
+              _npr.zeros((8, 8, 3), dtype=_npr.uint8)) is None)
+
+    # --- detect() 가 터져도 예외가 새지 않는다 ---
+    _reset_pose_state()
+    os.environ["GORI_POSE_MODEL"] = "C:/fake/pose.task"
+
+    class _BoomLM:
+        def detect(self, _img):
+            raise ValueError("detect failed")
+
+    ck._TASKS_LANDMARKER = [_BoomLM()]
+    _u8 = _npr.zeros((8, 8, 3), dtype=_npr.uint8)
+    check("R64: detect 실패해도 관절점은 None (예외 전파 안 됨)",
+          ck._pose_landmarks_from_tasks(_u8) is None)
+    check("R64: detect 실패해도 세그멘테이션은 None",
+          ck._segmentation_from_tasks(_u8) is None)
+    check("R64: detect 실패 원인이 1회 로그로 남음",
+          len(_pose_logs) == 1 and "detect failed" in _pose_logs[0],
+          str(_pose_logs[:1]))
+finally:
+    ck._log = _orig_log64
+    ck._TASKS_LANDMARKER = _orig_landmarker64
+    ck._POSE_ERR_NOTED = _orig_err_noted64
+    ck._POSE_NOTED = _orig_noted64
+    if _orig_env64 is None:
+        os.environ.pop("GORI_POSE_MODEL", None)
+    else:
+        os.environ["GORI_POSE_MODEL"] = _orig_env64
+    for _k in ("mediapipe", "mediapipe.tasks", "mediapipe.tasks.python",
+               "mediapipe.tasks.python.vision"):
+        if _k in _saved:
+            sys.modules[_k] = _saved[_k]
+        else:
+            sys.modules.pop(_k, None)
+
+# R65: "조용히 None" 을 허용하는 자리는 반드시 1회 로그로 막는다.
+# 왜(Why) 이것도 회귀 가드인가: 포즈 로더는 예외를 삼키고 None 을 돌려주는 것이
+# 설계다(프레임마다 죽이면 노드가 못 쓴다). 그래서 안전망은 오직 로그다. 이게
+# 실수로 빠지면 회귀를 아무도 모른다 — 33점 기능이 그냥 사라진다.
+_src65 = open(os.path.join(PKG, "consistency_keeper.py"), encoding="utf-8").read()
+check("R65: 포즈 실패 로그가 1회 가드(_POSE_ERR_NOTED)를 쓴다",
+      "_POSE_ERR_NOTED" in _src65 and "if _POSE_ERR_NOTED" in _src65)
+check("R65: 기능 없음 안내도 1회 가드(_POSE_NOTED)를 쓴다",
+      "_POSE_NOTED" in _src65 and "if _POSE_NOTED" in _src65)
+check("R65: 모델 경로는 환경변수만 읽는다 (파일시스템 접근 없음)",
+      'os.environ.get("GORI_POSE_MODEL")' in _src65
+      and "os.path.exists" not in _src65.split("def _pose_landmarker")[0])
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
