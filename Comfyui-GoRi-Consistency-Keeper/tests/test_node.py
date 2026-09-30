@@ -964,9 +964,22 @@ _n = _node
 
 
 def _decodes(**kw):
-    v = _CountVAE()
-    _n.run({"samples": t.zeros(1, 4, 32, 32)}, vae=v, **kw)
-    return v.sizes
+    # 왜(Why) 포즈 세션을 여기서 끄나: 이 블록은 "전역 블렌드 경로가 VAE 를
+    # 몇 번 필요로 하는가" 를 잰다. 1.9.5 부터는 .task 가 노드에 동봉되어
+    # **포즈가 켜져 있는 게 기본**이 되고, 켜지면 인물 마스크와 부위별 맵이
+    # 각자 디코딩을 한다(정상 동작). 그럼 이 블록은 설치 환경(모델 파일이
+    # 있는지, mediapipe 가 있는지, 경로가 한글이냐)에 따라 결과가 달라진다 —
+    # 환경 의존 테스트는 CI 에서 조용히 깨진다(2026-09-30 실측: Windows 3.12
+    # 에서만 실패). 그래서 포즈를 명시적으로 끄고 **디코딩 없는 쪽만** 잰다.
+    # "포즈가 켜졌을 때 디코딩 수"는 R67 이 따로 확인한다.
+    _o = ck._pose_landmarker
+    ck._pose_landmarker = lambda: None
+    try:
+        v = _CountVAE()
+        _n.run({"samples": t.zeros(1, 4, 32, 32)}, vae=v, **kw)
+        return v.sizes
+    finally:
+        ck._pose_landmarker = _o
 
 
 _ones = {"samples": t.ones(1, 4, 32, 32)}
@@ -1143,19 +1156,12 @@ try:
     # (이전의 "경로 미설정 → None" 기대는 1.9.5 에서 사라졌다. 이제 경로가
     #  없어도 동봉본이 있으므로 None 이 아니다. "모델을 못 읽으면 None + 1회
     # 로그" 계약은 아래 실패 케이스가 대신 잡는다.)
-
-    # --- 미설정 시 조용히 None, 예외 없음 ---
-    _reset_pose_state()
-    os.environ.pop("GORI_POSE_MODEL", None)
-    check("R64: 모델 미설정 시 로더가 예외 대신 None",
-          ck._pose_landmarker() is None)
-    check("R64: 세션 못 열면 None 이고 로그는 1회만 (그 이후 조용)",
-          ck._pose_landmarker() is None and len(_pose_logs) == 1,
-          f"{len(_pose_logs)}건: {_pose_logs[:1]}")
+    # 여기서 **주위에 기대면 안 된다**: 이 PC 는 설치 경로가 한글이라 모델을
+    # 못 열고, CI 는 영문이라 모델이 열린다. "모델이 열리는가" 를 환경에 맡기면
+    # 그 자체로 flaky 테스트가 된다(2026-09-30 실측: 로컬 PASS / CI FAIL).
+    # 그래서 성공·실패를 모두 명시적으로 만든다.
 
     # --- 실패해도 죽지 않고 한 번만 말한다 ---
-    _reset_pose_state()
-    os.environ["GORI_POSE_MODEL"] = "C:/nope/bad.task"
 
     def _install_fake_mp(vision_mod):
         """`from mediapipe.tasks.python import vision` 가 실제로 성립하게 계층을
@@ -1186,14 +1192,21 @@ try:
     _install_fake_mp(_bad_vision)
     _saved = {k: v for k, v in sys.modules.items()
               if k == "mediapipe" or k.startswith("mediapipe.tasks")}
-    for _ in range(5):
-        check_res = ck._pose_landmarker()
-    check("R64: 모델 로드 실패 시 예외 없이 None", check_res is None)
-    check("R64: 실패를 정확히 한 번만 알림 (5회 호출)",
-          len(_pose_logs) == 1, f"{len(_pose_logs)}건: {_pose_logs[:1]}")
+    # 세션이 열리지 않는 상황을 **명시적으로** 만든다. 주위에 기대지 않는
+    # 방법: 1.9.5 부턴 동봉 모델이 있어서 "경로 없음" 으로는 실패를 재현할
+    # 수 없다. 깨진 경로(영문) + 가짜 mediapipe 로 일부러 실패시킨다.
+    _reset_pose_state()
+    os.environ["GORI_POSE_MODEL"] = "C:/nope/broken.task"
+    _install_fake_mp(_bad_vision)
+    check("R64: 모델 로드 실패 시 예외 없이 None",
+          ck._pose_landmarker() is None)
     check("R64: 실패 로그에 원인이 남음 (무엇이 죽었는지)",
           _pose_logs and "RuntimeError" in _pose_logs[0]
           and "model load failed" in _pose_logs[0], str(_pose_logs[:1]))
+    for _ in range(4):
+        ck._pose_landmarker()
+    check("R64: 실패를 정확히 한 번만 알림 (5회 호출)",
+          len(_pose_logs) == 1, f"{len(_pose_logs)}건: {_pose_logs[:1]}")
 
     # --- 성공하면 세션을 재사용한다 (매 프레임 재로드 방지) ---
     _reset_pose_state()
