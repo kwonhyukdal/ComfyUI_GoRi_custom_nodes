@@ -189,37 +189,35 @@ else:
           ck._person_mask_for_latent(None, base) is None)
 
 
-class _FakePose:
-    def __init__(self, *a, **k):
-        pass
-
-    def process(self, img):
-        import numpy as _np
-        h, w = img.shape[0], img.shape[1]
-        seg = _np.zeros((h, w), dtype=_np.float32)
-        seg[h // 4:3 * h // 4, w // 4:3 * w // 4] = 0.9
-
-        class _R:
-            segmentation_mask = seg
-            pose_landmarks = True
-        return _R()
-
-    def close(self):
-        pass
+# (왜) 노드는 이제 `mediapipe.solutions` 대신 tasks API + .task 모델을 쓴다
+# (2026-09-30). Windows 배포판에 구 API 가 없어서다. 그래서 세션/모델을 직접
+# 만들지 않고, 모델 경로 확인과 두 추출 함수만 주입한다.
+_orig_model_path = ck._pose_model_path
+_orig_landmarks = ck._pose_landmarks_from_tasks
+_orig_segmentation = ck._segmentation_from_tasks
+_orig_noted = ck._note_pose_unavailable
 
 
-import types as _types_m
-_mp = _types_m.ModuleType("mediapipe")
-_sol = _types_m.ModuleType("mediapipe.solutions")
-_ps = _types_m.ModuleType("mediapipe.solutions.pose")
-_ps.Pose = _FakePose
-_sol.pose = _ps
-_mp.solutions = _sol
-_orig_mp = {k: sys.modules.get(k) for k in
-            ("mediapipe", "mediapipe.solutions", "mediapipe.solutions.pose")}
-sys.modules["mediapipe"] = _mp
-sys.modules["mediapipe.solutions"] = _sol
-sys.modules["mediapipe.solutions.pose"] = _ps
+def _fake_model_path():
+    return "fake/pose_landmarker_lite.task"
+
+
+def _fake_landmarks(u8):
+    h, w = u8.shape[0], u8.shape[1]
+    return [(0.5, 0.5)] * 33
+
+
+def _fake_segmentation(u8):
+    import numpy as _np
+    h, w = u8.shape[0], u8.shape[1]
+    seg = _np.zeros((h, w), dtype=_np.float32)
+    seg[h // 4:3 * h // 4, w // 4:3 * w // 4] = 0.9
+    return seg
+
+
+ck._pose_model_path = _fake_model_path
+ck._pose_landmarks_from_tasks = _fake_landmarks
+ck._segmentation_from_tasks = _fake_segmentation
 
 
 class _FakeVAE:
@@ -249,11 +247,9 @@ try:
     check("R58: 마스크 경로가 조용히 실패하지 않음",
           _r58_mask is not None, "del 블록이 예외를 삼켰다면 마스크가 None")
 finally:
-    for _k, _v in _orig_mp.items():
-        if _v is None:
-            sys.modules.pop(_k, None)
-        else:
-            sys.modules[_k] = _v
+    ck._pose_model_path = _orig_model_path
+    ck._pose_landmarks_from_tasks = _orig_landmarks
+    ck._segmentation_from_tasks = _orig_segmentation
 
 # R58: 두 함수가 조용히 실패하는 경로가 남아 있지 않은지 소스를 검사한다.
 # `del img` 처럼 스코프 밖 이름을 del 하면 NameError -> 예외 삼킴 -> 조용한 실패다.

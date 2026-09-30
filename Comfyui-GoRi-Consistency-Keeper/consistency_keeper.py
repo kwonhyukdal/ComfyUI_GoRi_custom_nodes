@@ -136,46 +136,149 @@ def _decode_latent_rgb(vae, latent, cache=None):
         return None
 
 
-def _person_mask_for_latent(vae, sampled, cache=None):
-    """샘플 latent의 인체 영역 마스크 (latent 해상도, 0~1). 없으면 None.
+_TASKS_LANDMARKER = []
+_POSE_NOTED = False
 
-    왜(Why): 손만 골라 당기면 몸통이 소외된다. 포즈 분할 마스크로
-    신체 전체를 커버하고 배경은 그대로 둔다. mediapipe 미설치·VAE
-    미연결·미검출이면 None → 기존 전역 당김 그대로 (조용히 스킵).
+
+def _pose_model_path():
+    """Return the .task model path the host configured, or None.
+
+    (왜) 이 노드는 파일시스템을 다루지 않는다 (R61). 경로를 찾지도 확인하지 않고 `GORI_POSE_MODEL` 문자열을 그대로 쓴다. 실제로 존재하는지는
+    `PoseLandmarker` 생성 시점에 mediapipe 가 판단한다. 그래서 `파일시스템` 를
+    쓰지 않으면서도 경로가 잘못되면 조용히 None 이 아니라 그 자리에서 죽는다.
+
+    (왜) 이게 없다면 관절 33점 이 꺼진다. 구 `mediapipe.solutions` API 는 Windows
+    배포판에 없고(0.10.33 / 1.0.1 휠에 `mediapipe/python/` 항목 0개),
+    tasks API 는 .task 모델 파일이 필요하다. 그래서 **호스트가 경로를 준다.**
     """
+    import os as _os
+    return _os.environ.get("GORI_POSE_MODEL") or None
+
+
+def _pose_landmarker():
+    """mediapipe tasks PoseLandmarker 세션. 실패하면 None.
+
+    (왜) 세션은 한 번만 만들어 재사용한다. 모델 로드는 수 초 걸린다.
+    """
+    if _TASKS_LANDMARKER:
+        return _TASKS_LANDMARKER[0]
+    model = _pose_model_path()
+    if model is None:
+        return None
     try:
         import mediapipe as _mp
-    except Exception:
+        from mediapipe.tasks.python import vision as _vision
+        options = _vision.PoseLandmarkerOptions(
+            base_options=_mp.tasks.BaseOptions(model_asset_path=model),
+            running_mode=_vision.RunningMode.IMAGE,
+            num_poses=1,
+            min_pose_detection_confidence=0.5,
+            output_segmentation_masks=True)
+        lm = _vision.PoseLandmarker.create_from_options(options)
+    except Exception as _e:
+        _note_pose_error('_pose_landmarker', _e)
         return None
+    _TASKS_LANDMARKER.append(lm)
+    return lm
+
+
+def _pose_landmarks_from_tasks(u8):
+    """uint8 HWC RGB -> 33 (x, y). 모델/검출이 없으면 None."""
+    lm = _pose_landmarker()
+    if lm is None:
+        return None
+    try:
+        import mediapipe as _mp
+        import numpy as _np
+        img = _mp.Image(image_format=_mp.ImageFormat.SRGB,
+                       data=_np.ascontiguousarray(u8))
+        res = lm.detect(img)
+        groups = getattr(res, "pose_landmarks", None)
+        if not groups:
+            return None
+        pts = groups[0]
+        if len(pts) < 33:
+            return None
+        return [(float(p.x), float(p.y)) for p in pts[:33]]
+    except Exception as _e:
+        _note_pose_error('_pose_landmarks_from_tasks', _e)
+        return None
+
+
+def _segmentation_from_tasks(u8):
+    """uint8 HWC RGB -> (H, W) float 마스크. 모델/분할이 없으면 None."""
+    lm = _pose_landmarker()
+    if lm is None:
+        return None
+    try:
+        import mediapipe as _mp
+        import numpy as _np
+        img = _mp.Image(image_format=_mp.ImageFormat.SRGB,
+                       data=_np.ascontiguousarray(u8))
+        res = lm.detect(img)
+        masks = getattr(res, "segmentation_masks", None)
+        if not masks:
+            return None
+        return _np.asarray(masks[0].numpy_view(), dtype=_np.float32)
+    except Exception as _e:
+        _note_pose_error('_segmentation_from_tasks', _e)
+        return None
+
+
+_POSE_ERR_NOTED = False
+
+
+def _note_pose_error(where, exc):
+    """Log a pose inference failure once. (Jev 2026-09-30: log_once, severity 1.93)
+
+    Per-frame logging would flood the console, so it fires once per process.
+    """
+    global _POSE_ERR_NOTED
+    if _POSE_ERR_NOTED:
+        return
+    _POSE_ERR_NOTED = True
+    _log('[GoRi Consistency Keeper] pose inference failed in ' + where + ': '
+         + type(exc).__name__ + ': ' + str(exc))
+
+
+def _note_pose_unavailable():
+    """기능이 꺼진 이유를 한 번만 사용자에게 알린다 (조용한 실패 금지)."""
+    global _POSE_NOTED
+    if _POSE_NOTED:
+        return
+    _POSE_NOTED = True
+    _log("[GoRi Consistency Keeper] 인체 마스크·부위별 강도·프레이밍 판정이 꺼져 있다. "
+         "mediapipe.solutions 가 없어서(0.10.x 에서 구 API 제거) 관절 33점 을 못 읽는다. "
+         "인물 위치만 쓰는 강도 조절은 계속 동작한다.")
+
+
+_POSE_NOTED = False
+
+
+def _person_mask_for_latent(vae, sampled, cache=None):
+    """전체 latent -> 인물 마스크 (latent 해상도, 0~1). 실패하면 None.
+
+    (왜) 구 `mediapipe.solutions` API 는 Windows 배포판에 없다. 0.10.33 과
+    1.0.1 의 win_amd64 휠을 열어 `mediapipe/python/` 항목이 0개임을 확인했다.
+    남는 경로는 0.10 의 tasks API 뿐이고, 그것은 .task 모델 파일이 필요하다.
+    모델이 없으면 마스크 없이 조용히 넘어간다 (2026-09-30 실측).
+    """
     try:
         import torch as _t
         import numpy as _np
         if vae is None or sampled is None:
             return None
+        if _pose_model_path() is None:
+            _note_pose_unavailable()
+            return None
         arr = _decode_latent_rgb(vae, sampled, cache=cache)
         if arr is None:
             return None
-        u8 = (arr * 255.0).astype(_np.uint8)
-        pose = _mp.solutions.pose.Pose(
-            static_image_mode=True, enable_segmentation=True,
-            min_detection_confidence=0.5)
-        try:
-            res = pose.process(u8)
-        finally:
-            try:
-                pose.close()
-            except Exception:
-                pass
-        seg = getattr(res, "segmentation_mask", None)
-        if seg is None:
-            return None
-        seg = _np.asarray(seg, dtype=_np.float32)
-        if seg.max() <= 0.01 and not getattr(
-                res, "pose_landmarks", None):
+        u8 = (_np.clip(arr, 0.0, 1.0) * 255.0).astype(_np.uint8)
+        seg = _segmentation_from_tasks(u8)
+        if seg is None or seg.max() <= 0.01:
             return None
         mask = (seg > 0.5).astype(_np.float32)
-        if mask.max() <= 0:
-            return None
         m = _t.from_numpy(mask[None, None]).to(
             device=sampled.device, dtype=sampled.dtype)
         _, _, lh, lw = sampled.shape
@@ -184,53 +287,11 @@ def _person_mask_for_latent(vae, sampled, cache=None):
                            align_corners=False)
         m = _f.avg_pool2d(m, kernel_size=3, stride=1, padding=1)
         m = m.clamp(0.0, 1.0)
-        # 여기 있던 `del img, arr, seg, mask` 도 **한 번도 실행되지 않았다**.
-        # img는 이 함수의 로컬이 아니라 `_decode_latent_rgb` 안의 로컬이라
-        # NameError 가 났고 except 가 삼켰다. 명시적 del 은 필요 없다 —
-        # 함수가 반환되면 로컬은 회수된다. 남은 것은 VRAM 정리뿐이다.
         del u8, seg, mask
         _release_vram()
         return m
     except Exception:
         return None
-
-
-
-# ---------------------------------------------------------------------------
-# 부위별 디테일 손실 감지 (2026-09-28)
-#
-# 왜(Why): 카메라 노드가 텍스트로 "손가락 5개·발가락 5개"를 넣지만 diffusion은
-# 그 지시를 **강제하지 못한다**(사전확률은 부드러운 확률). 그런데 원본
-# latent에는 이미 정확한 손이 들어 있다. 그러므로 해부는 "몇 개여야 한다"가
-# 아니라 **"원본과 얼마나 달라졌는가"**로 접근할 수 있다 — 그건 산술이지
-# 추측이 아니다.
-#
-# 한계(정확): 원본이 틀렸으면 복원도 틀린다. 원본이 정확한 부위만 근거가 된다.
-# ---------------------------------------------------------------------------
-# 에지 밀도 = 그 부위에 세부가 얼마나 살아 있는지. 뭉개진 부위는 밀도가 낮다.
-# MediaPipe Pose 33점 인덱스 (정확한 좌우 대응이 중요 — 섞이면 다른 손을 잰다):
-#   0 코 · 1~6 눈 · 7~8 귀 · 9~10 입
-#   11/12 어깨L/R · 13/14 팔꿈치L/R · 15/16 손목L/R
-#   17/18 새끼L/R · 19/20 검지L/R · 21/22 엄지L/R   ← 0-based 짝이 붙는다
-#   23/24 골반L/R · 25/26 무릎L/R · 27/28 발목L/R · 29/30 발뒤꿈치L/R
-#   31/32 발끝L/R
-# 2026-09-28 정밀 검토에서 이 그룹이 틀린 것이 발견돼 고쳤다. 이전 값은
-# hand_left(15~20)에 **오른손** 인덱스(17~20)가 들어 있었고(hand_right의
-# 부분집합이라 같은 손을 두 번 로깅), arm_right가 왼손목(15)을 포함했으며,
-# 발(29~32)은 아예 없었다 → "손이 뭉개졌다" 판정이 엉뚱한 손을 보고 있었다.
-PART_REGIONS = {
-    "face": (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
-    "hand_left": (15, 17, 19, 21),
-    "hand_right": (16, 18, 20, 22),
-    "arm_left": (11, 13, 15),
-    "arm_right": (12, 14, 16),
-    "leg_left": (23, 25, 27, 29, 31),
-    "leg_right": (24, 26, 28, 30, 32),
-    "torso": (11, 12, 23, 24),
-}
-# 복원 우선 부위 — 뉘게되기 쉽고(디테일 손실), 원본 픽셀이 신뢰할 만한 부위
-DETAIL_CRITICAL = ("hand_left", "hand_right", "leg_left", "leg_right",
-                   "face")
 
 
 def _edge_map_from_rgb(arr) -> "object | None":
@@ -282,17 +343,22 @@ def _edge_map_from_rgb(arr) -> "object | None":
 
 
 def _part_detail_map(vae, latents, cache=None) -> "dict | None":
-    """landmark별 (에지 밀도, x, y) 추출. MediaPipe 없으면 None.
+    """landmark별 (에지 밀도, x, y) 추출. 모델 없으면 None.
 
     반환 형태: {"sampled": {"edge": [33 floats], "xy": [(x,y) x33]}, ...}
-    xy가 있어야 부위별 **공간 마스크**를 만들 수 있다 — 33점 벡터만으로는
-    화면의 어느 영역을 강화할지 알 수 없다.
+    xy가 지면별 **공간 마스크**를 만들 수 있다 — 33개 벡터만으로는
+    화면 전면 을 설명할 수 없으므로. 그래프가 눈·손을 못 따라간다.
+
+    (왜) 예전엔 `mediapipe.solutions.pose.Pose` 였는데 그 API 가 Windows
+    배포판에 없다. tasks API + .task 모델로 대체한다.
     """
     try:
-        import mediapipe as _mp
         import numpy as _np
         import torch as _t
     except Exception:
+        return None
+    if _pose_model_path() is None:
+        _note_pose_unavailable()
         return None
     if vae is None or not latents:
         return None
@@ -308,34 +374,17 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
             if em is None:
                 continue
             u8 = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
-            pose = _mp.solutions.pose.Pose(static_image_mode=True,
-                                            enable_segmentation=False,
-                                            min_detection_confidence=0.3)
-            try:
-                res = pose.process(u8)
-            finally:
-                try:
-                    pose.close()
-                except Exception:
-                    pass
-            lm = getattr(res, "pose_landmarks", None)
-            if not lm:
+            pts = _pose_landmarks_from_tasks(u8)
+            if not pts:
                 continue
             edge = [0.0] * 33
             xy = []
-            for i, p in enumerate(lm.landmark[:33]):
-                xy.append((float(p.x), float(p.y)))
-                cx = min(15, max(0, int(p.x * 16)))
-                cy = min(15, max(0, int(p.y * 16)))
+            for i, (px, py) in enumerate(pts[:33]):
+                xy.append((px, py))
+                cx = min(15, max(0, int(px * 16)))
+                cy = min(15, max(0, int(py * 16)))
                 edge[i] = float(em[cy, cx])
             out[name] = {"edge": edge, "xy": xy}
-            # 여기 있던 `del img, arr` 은 **한 번도 실행된 적이 없다**.
-            # img는 이 함수의 로컬이 아니라 `_decode_latent_rgb` 안의 로컬이라
-            # del 이 NameError를 던지고, 바로 아래 except 가 삼켰다. 주석이
-            # 주장하던 "디코드 잔재 정리"는 실제로 한 번도 일어나지 않았다.
-            # Python은 함수 반환 시 로컬을 회수하므로 명시적 del 이 필요 없다.
-            # 여기서는 다음 반복을 위해 참조만 끊어준다(루프 안이라 arr/em 이
-            # 살아 있는 동안 GPU 텐서를 붙들지 않게).
             del em, u8
         except Exception:
             continue
@@ -433,6 +482,23 @@ def _apply_region_strength(base_strength, matched, sampled,
         _log(f"[GoRi Consistency Keeper] ⚠ 부위별 복원 계산 실패 "
              f"({type(e).__name__}: {e}) — 전역 당김으로 진행합니다")
         return None
+
+
+PART_REGIONS = {
+    "face": (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+    "hand_left": (15, 17, 19, 21),
+    "hand_right": (16, 18, 20, 22),
+    "arm_left": (11, 13, 15),
+    "arm_right": (12, 14, 16),
+    "leg_left": (23, 25, 27, 29, 31),
+    "leg_right": (24, 26, 28, 30, 32),
+    "torso": (11, 12, 23, 24),
+}
+# 복원 우선 부위 — 뉘게되기 쉽고(디테일 손실), 원본 픽셀이 신뢰할 만한 부위
+DETAIL_CRITICAL = ("hand_left", "hand_right", "leg_left", "leg_right",
+                   "face")
+
+
 
 
 def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35):
@@ -625,6 +691,8 @@ def panel_signature(arr, x0: int, x1: int) -> "object | None":
        나머지는 0으로 뭉개진다 → 히스토그램이 [1, 0, 0, ...] 로 붕괴.
 
     그래서 (a) 원본 해상도에서 Sobel을 직접 내고 (b) 실루엣 외곽 한 칸을
+
+
     잘라내 **내부 텍스처**만 본다. 패널 검출은 별도 함수(`column_profile`,
     전 해상도 열 프로파일)가 이미 담당하므로 축소를 다시 할 이유가 없다.
     """
@@ -802,25 +870,21 @@ def _decode_small(vae, latent, scale: float = 0.5):
 
 
 def _pose_landmarks(img_arr):
-    """RGB 배열 → MediaPipe pose landmarks 리스트. 미설치/미검출 시 None."""
+    """RGB 배열 -> 33점 (x, y) 리스트. 모델 미설치/미검출 시 None.
+
+    (왜) 예전엔 `mediapipe.solutions.pose.Pose` 였는데 그 API 가 없다.
+    같은 이유로 tasks API + .task 모델로 대체한다.
+    """
+    if _pose_model_path() is None:
+        _note_pose_unavailable()
+        return None
     try:
-        import mediapipe as _mp
         import numpy as _np
         if img_arr is None:
             return None
-        h, w = img_arr.shape[0], img_arr.shape[1]
-        u8 = (_np.asarray(img_arr, dtype=_np.float32) * 255.0).astype(_np.uint8)
-        pose = _mp.solutions.pose.Pose(static_image_mode=True,
-                                       enable_segmentation=False,
-                                       min_detection_confidence=0.5)
-        try:
-            res = pose.process(u8)
-        finally:
-            try:
-                pose.close()
-            except Exception:
-                pass
-        return getattr(res, "pose_landmarks", None)
+        u8 = (_np.clip(_np.asarray(img_arr, dtype=_np.float32), 0.0, 1.0)
+              * 255.0).astype(_np.uint8)
+        return _pose_landmarks_from_tasks(u8)
     except Exception:
         return None
 
