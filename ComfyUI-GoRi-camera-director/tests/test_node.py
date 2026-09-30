@@ -2384,6 +2384,34 @@ finally:
     llm_client._ENV_FILE_OVERRIDE = _orig_env_override
     llm_client.clear_cache()
 
+# R27b: .env **루트 탐색** 자체를 검사한다. R27 은 _ENV_FILE_OVERRIDE 로
+# 경로를 주입했으므로 탐색 로직을 아예 건드리지 않았다. 그 공백 때문에
+# "정확히 2단계" 규칙이 Registry 팩(깊이 2)에서 조용히 깨져 있었다 —
+# 실제 ComfyUI 기동 로그에서 `.env에 API 키를 저장할 수 없습니다` 로
+# 드러났다(2026-09-30). 배포 형태 두 가지를 모두 확인한다.
+_orig_file_r27b = llm_client.__file__
+try:
+    for _depth_r27b, _label_r27b in ((1, "단독 설치"), (2, "Registry 팩")):
+        _root_r27b = os.path.join(_tmpd_r27, "root%d" % _depth_r27b)
+        _node_r27b = _root_r27b
+        for _i in range(_depth_r27b):
+            _node_r27b = os.path.join(_node_r27b, "n%d" % _i)
+        os.makedirs(_node_r27b, exist_ok=True)
+        with open(os.path.join(_root_r27b, "main.py"), "w", encoding="utf-8") as _f:
+            _f.write("# fake ComfyUI root\n")
+        llm_client.__file__ = os.path.join(_node_r27b, "llm_client.py")
+        _got_r27b = llm_client._env_file_path()
+        check("R27b: .env 루트 탐색 (%s, 깊이 %d)" % (_label_r27b, _depth_r27b),
+              _got_r27b == os.path.join(_root_r27b, ".env"), str(_got_r27b))
+    # 루트에 main.py 가 없으면 조용히 실패하지 않고 None 을 돌려줘야 한다
+    _bare_r27b = os.path.join(_tmpd_r27, "bare", "n0")
+    os.makedirs(_bare_r27b, exist_ok=True)
+    llm_client.__file__ = os.path.join(_bare_r27b, "llm_client.py")
+    check("R27b: 루트 미발견 시 None (조용한 실패 아님)",
+          llm_client._env_file_path() is None, str(llm_client._env_file_path()))
+finally:
+    llm_client.__file__ = _orig_file_r27b
+
 print("-- R28: 정밀 검토 후속 수정 7건 --")
 _cam_r28 = dict(cd.DEFAULTS)
 check("R28: Skills negative 노출 분기",

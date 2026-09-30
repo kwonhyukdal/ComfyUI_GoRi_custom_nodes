@@ -49,22 +49,34 @@ _CACHE_MAX = 256  # LLM 응답 캐시 상한 (장시간 세션의 무제한 성�
 _ENV_FILE_OVERRIDE = None  # 테스트 주입용 (None이면 자동 탐색)
 
 
+# ComfyUI 루트를 몇 단계까지 위로 찾을지. 예전엔 **정확히 2단계**로 고정했는데,
+# Registry 배포는 `custom_nodes/<팩>/<노드>/llm_client.py` 로 한 단계 더 깊다.
+# 2단계로는 `custom_nodes` 까지만 올라가서 .env 를 못 찾고, 키 저장·조회가
+# 조용히 죽었다(2026-09-30 실측). 깊이를 세는 대신 main.py 를 찾는다.
+_ENV_ROOT_SEARCH_DEPTH = 6
+
+
 def _env_file_path():
     """ComfyUI 루트의 .env 경로. 못 찾으면 None (조용히 미사용).
 
     왜(Why) realpath인가: macOS/Linux 개발에서는 `custom_nodes/노드폴더`를
     개발 폴더로 **심볼릭 링크**하는 것이 흔하다. abspath는 링크 경로를 그대로
-    쓰기 때문에 ComfyUI 루트를 2단계 위로 잘못 올라가 .env를 못 찾는다 →
+    쓰기 때문에 ComfyUI 루트를 잘못 올라가 .env를 못 찾는다 →
     사용자는 "키가 저장 안 된다"는 메시지만 보고 원인을 알 수 없다.
     realpath는 링크를 따라가 실제 위치를 준다.
+
+    왜(Why) 깊이를 세지 않는가: 노드 폴더 깊이는 배포 형태에 따라 달라진다
+    (단독 설치 = 1단계, Registry 팩 = 2단계). 고정 깊이는 형태가 바뀔 때마다
+    조용히 깨진다. **main.py 를 처음 만나는 폴더**가 루트라는 성질로 바꿨다.
     """
     if _ENV_FILE_OVERRIDE is not None:
         return _ENV_FILE_OVERRIDE
     try:
-        here = os.path.dirname(os.path.realpath(__file__))
-        root = os.path.dirname(os.path.dirname(here))
-        if os.path.isfile(os.path.join(root, "main.py")):
-            return os.path.join(root, ".env")
+        root = os.path.dirname(os.path.realpath(__file__))
+        for _ in range(_ENV_ROOT_SEARCH_DEPTH):
+            root = os.path.dirname(root)
+            if os.path.isfile(os.path.join(root, "main.py")):
+                return os.path.join(root, ".env")
         # 압축(portable) 설치는 ComfyUI 루트에 main.py가 없을 수 있다.
         # 조용히 실패하면 "설정이 안 먹힌 것처럼" 보이므로 이유를 남긴다.
         _warn_env_root_once(root)
