@@ -85,7 +85,10 @@ check("optional 위젯 존재",
 check("출력 3개 (positive/negative/image_out)",
       cd.CameraDirector.RETURN_TYPES == ("STRING", "STRING", "IMAGE")
       and cd.CameraDirector.RETURN_NAMES == ("positive", "negative", "image_out"))
-check("카테고리 등록", cd.CameraDirector.CATEGORY == "HF Skills/Camera")
+# 왜(Why) GoRi/Camera 인가: 파생 팩의 템플릿 잔재였던 "HF Skills/Camera" 는 같은
+# 배포팩의 Keeper("GoRi/Refine")와 카테고리가 어긋나 노드 메뉴가 두 갈래로 갈라졌다.
+# 표시 이름은 (GoRi) 라 검색은 문제없었지만, 메뉴 묶음은|publisher 한 곳이어야 한다.
+check("카테고리 등록", cd.CameraDirector.CATEGORY == "GoRi/Camera")
 
 bad = [(n, k, v) for n, pc in cd.PRESETS.items() for k, v in pc.items()
        if v not in cd._TABLES.get(k, {})]
@@ -231,7 +234,10 @@ check("Skills RETURN_NAMES",
 enc_its = cd.CameraDirectorEncode.INPUT_TYPES()
 check("Skills conditioning 디렉터 입력 계약",
       enc_its["required"].get("clip") == ("CLIP",)
-      and enc_its["required"].get("vae") == ("VAE",)
+      # vae 는 reference conditioning 캐시용이라 선택 입력이다. required 로
+      # 두면 VAE 없이 쓰는 프롬프트 전용 경로가 UI 에서 막힌다.
+      and "vae" not in enc_its["required"]
+      and enc_its["optional"].get("vae") == ("VAE",)
       and enc_its["optional"].get("latent_image") == ("LATENT", {"optional": True})
       and enc_its["optional"].get("positive") == ("CONDITIONING",)
       and enc_its["optional"].get("negative") == ("CONDITIONING",)

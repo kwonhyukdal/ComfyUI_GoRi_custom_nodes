@@ -4,6 +4,13 @@ description = "GoRi ComfyUI custom nodes — Camera Director (camera-aware promp
 version = "1.9.6"
 license = {text = "MIT"}
 dependencies = []
+# 인체 마스크·포즈는 선택 의존성이라 기본 설치에 넣지 않는다. 없으면 그 기능들만
+# 조용히 꺼지고 나머지는 그대로 돈다(macOS Apple Silicon 에는 휠이 없다). 설치:
+#     pip install "comfyui-gori-custom-nodes[pose]"
+# bundled pose_landmarker_lite.task 는 mediapipe **tasks** API 용이다
+# (구 mediapipe.solutions 는 0.10.33 에서 제거됐다).
+[project.optional-dependencies]
+pose = ["mediapipe>=0.10.14"]
 # 세 OS 모두에서 CI로 검증된다(ubuntu/windows/macos × Python 3.10/3.12).
 classifiers = [
     "Operating System :: Microsoft :: Windows",

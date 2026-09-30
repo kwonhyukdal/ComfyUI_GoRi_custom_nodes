@@ -24,6 +24,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # 왜(Why) 이게 없나: 카메라 노드의 tests/test_frontend.js 는 node 로
+      # web/progressive_image_inputs.js 를 **실제로 로드해 돌리고**, api_key 화면
+      # 가림·워크플로 저장 직렬화 제외·페이로드 가드를 검증한다. node 가 없으면
+      # test_node.py 가 "환경 문제, 회귀 아님" 으로 PASS 처리하므로 그 JS 보호가
+      # CI 에서 한 번도 실행 검증되지 않았다(2026-09-30 실측).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
       - name: Install test dependencies
         run: |
           pip install numpy pillow

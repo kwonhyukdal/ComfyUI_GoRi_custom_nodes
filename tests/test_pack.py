@@ -115,6 +115,52 @@ if _wd:
           os.path.isfile(os.path.join(PKG, _wd, "progressive_image_inputs.js")),
           str(os.listdir(os.path.join(PKG, _wd)) if os.path.isdir(os.path.join(PKG, _wd)) else "없음"))
 
+# 회귀(2026-09-30): 하위 모듈 로드 실패 로그는 `except` 안에서 나온다. 그 로그가
+# 가드 없는 print 면, cp1252 콘솔에서 print 자체가 UnicodeEncodeError 를 던져
+# load 실패를 덮어쓴다 → **팩 전체가 조용히 로드되지 않는다**(노드 0개). 실측했다.
+# 그래서 정적 문자열 검사 대신, 실제로 깨진 하위 모듈을 붙여 cp1252 로 돌려본다.
+# 로딩 방식은 ComfyUI 의 load_custom_node 와 같은 spec_from_file_location +
+# submodule_search_locations 다(python <디렉터리> 로는 __main__ 이 없다고 실패한다).
+import shutil as _sh
+import subprocess as _sp
+import tempfile as _tf
+
+_DRIVE = """import importlib.util, sys
+d = sys.argv[1].rstrip("\\\\/")
+spec = importlib.util.spec_from_file_location(
+    "gori_pack_probe", d + "/__init__.py", submodule_search_locations=[d])
+m = importlib.util.module_from_spec(spec)
+sys.modules["gori_pack_probe"] = m
+spec.loader.exec_module(m)
+print("NODES=" + ",".join(sorted(m.NODE_CLASS_MAPPINGS)))
+"""
+
+_td = _tf.mkdtemp(prefix="gori_pack_")
+try:
+    _sh.copyfile(os.path.join(PKG, "__init__.py"), os.path.join(_td, "__init__.py"))
+    # AAbroken 이 ZZgood 보다 정렬상 먼저 온다. 즉 실패가 먼저 나도 뒤 패키지가
+    # 등록돼야 한다 — "하위 모듈 로더가 한 곳에서 멈추지 않는다" 의 진짜 증거.
+    for _name, _body in (("AAbroken", "raise RuntimeError('intentional failure')\n"),
+                         ("ZZgood", "NODE_CLASS_MAPPINGS = {'GoRi_Probe_Ok': object}\n")):
+        _d = os.path.join(_td, _name)
+        os.makedirs(_d)
+        with open(os.path.join(_d, "__init__.py"), "w", encoding="utf-8") as _fh:
+            _fh.write(_body)
+    _drive = os.path.join(_td, "_drive.py")
+    with open(_drive, "w", encoding="utf-8") as _fh:
+        _fh.write(_DRIVE)
+    _env = dict(os.environ, PYTHONIOENCODING="cp1252")
+    _cp = _sp.run([sys.executable, _drive, _td], capture_output=True, env=_env)
+    _txt = ((_cp.stdout or b"").decode("cp1252", errors="replace")
+            + ( _cp.stderr or b"").decode("cp1252", errors="replace"))
+    check("cp1252 콘솔에서 실패 로그가 죽지 않는다 (팩 무음 로드 방지)",
+          _cp.returncode == 0 and "AAbroken" in _txt,
+          f"exit={_cp.returncode} " + _txt.strip()[-160:])
+    check("깨진 하위 모듈 뒤에도 나머지 노드가 등록된다",
+          "GoRi_Probe_Ok" in _txt, _txt.strip()[-160:])
+finally:
+    _sh.rmtree(_td, ignore_errors=True)
+
 # 상대 임포트가 실제로 동작하는지 — 하위 __init__.py 가
 # `from .consistency_keeper import ...` 를 쓰기 때문이다.
 # 폴더명을 하드코딩하지 않는다: 로컬은 `GoRi-*`, Registry 배포본은

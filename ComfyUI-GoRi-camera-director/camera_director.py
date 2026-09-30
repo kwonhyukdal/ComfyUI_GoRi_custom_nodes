@@ -3693,7 +3693,7 @@ class CameraDirector:
     RETURN_TYPES = ("STRING", "STRING", "IMAGE")
     RETURN_NAMES = ("positive", "negative", "image_out")
     FUNCTION = "run"
-    CATEGORY = "HF Skills/Camera"
+    CATEGORY = "GoRi/Camera"
     DESCRIPTION = ("주제 한 줄(한글 OK) + 프리셋/자동화 → 카메라 조항이 포함된 "
                    "영문 positive/negative 2줄. CLIPTextEncode.text에 연결하세요. "
                    "prompt_in 단자에 선을 연결하면 topic 칸 대신 그 프롬프트를 씁니다. "
@@ -4453,7 +4453,7 @@ class CameraDirectorEncode(CameraDirector):
     RETURN_NAMES = ("positive_out", "negative_out", "prompt_out", "image_out",
                     "reference_latent_out")
     FUNCTION = "run_prompt"
-    CATEGORY = "HF Skills/Camera"
+    CATEGORY = "GoRi/Camera"
     DESCRIPTION = ("주제와 1~10장의 레퍼런스 이미지로 카메라 연출을 구성한 영문 프롬프트를 "
                    "positive/negative conditioning과 prompt_out으로 출력합니다. "
                    "positive_out/negative_out은 KSampler에, prompt_out은 확인용으로 사용하세요.")
@@ -4463,10 +4463,15 @@ class CameraDirectorEncode(CameraDirector):
         base = CameraDirector.INPUT_TYPES()
         required = dict(base["required"])
         required["clip"] = ("CLIP",)
-        required["vae"] = ("VAE",)
         optional = dict(base.get("optional", {}))
         optional.pop("image", None)
         optional.pop("extra_negative", None)
+        # 왜(Why) vae 가 required 가 아니나: reference conditioning 캐시용이라
+        # 선택이다 — run_prompt 도 vae=None 을 기본값으로 받고, _prepare_qwen_
+        # image_data 도 vae=None 이면 latent 변환을 건너뛴다. required 로 두면
+        # VAE 없이 쓰는 프롬프트 전용 경로(README 가 권장하는 KREA 2 ·
+        # MiniMax H3 용도)가 UI 에서 아예 막힌다.
+        optional["vae"] = ("VAE",)
         optional["latent_image"] = ("LATENT", {"optional": True})
         optional["positive"] = ("CONDITIONING",)
         optional["negative"] = ("CONDITIONING",)
