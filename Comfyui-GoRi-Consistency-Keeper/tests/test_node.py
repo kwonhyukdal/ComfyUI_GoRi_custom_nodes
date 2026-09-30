@@ -193,6 +193,7 @@ else:
 # (2026-09-30). Windows 배포판에 구 API 가 없어서다. 그래서 세션/모델을 직접
 # 만들지 않고, 모델 경로 확인과 두 추출 함수만 주입한다.
 _orig_model_path = ck._pose_model_path
+_orig_landmarker = ck._pose_landmarker
 _orig_landmarks = ck._pose_landmarks_from_tasks
 _orig_segmentation = ck._segmentation_from_tasks
 _orig_noted = ck._note_pose_unavailable
@@ -216,6 +217,10 @@ def _fake_segmentation(u8):
 
 
 ck._pose_model_path = _fake_model_path
+# 1.9.5 부터 게이트가 "세션" 이다 (경로가 아니라). 세션까지 스텁해야
+# 디코딩 앞 게이트를 통과한다. 이걸 빠뜨리면 이 블록이 조용히 실패하고
+# "마스크가 안 만들어졌다" 는 잘못된 결론을 낸다.
+ck._pose_landmarker = lambda: object()
 ck._pose_landmarks_from_tasks = _fake_landmarks
 ck._segmentation_from_tasks = _fake_segmentation
 
@@ -248,6 +253,7 @@ try:
           _r58_mask is not None, "del 블록이 예외를 삼켰다면 마스크가 None")
 finally:
     ck._pose_model_path = _orig_model_path
+    ck._pose_landmarker = _orig_landmarker
     ck._pose_landmarks_from_tasks = _orig_landmarks
     ck._segmentation_from_tasks = _orig_segmentation
 
@@ -525,8 +531,14 @@ for _bad, _why in (("os.startfile", "Windows 전용"),
                    ("/tmp/", "POSIX 전용 경로"),
                    ("C:\\\\", "드라이브 하드코딩")):
     check(f"OS 전용 미사용 — {_why} ({_bad})", _bad not in _ksrc)
-check("파일시스템 경로 조립 없음 (Keeper는 latent만 다룬다)",
-      "os.path" not in _ksrc and chr(34) + "/" + chr(34) not in _ksrc)
+# 이 노드는 latent 와 배열만 다룬다. 경로 **탐색**은 하지 않는다(R61) —
+# 동봉 모델 경로 하나를 __file__ 기준으로 조립할 뿐이다. 절대경로 문자열이나
+# 슬래시 결합으로 경로를 만들면 (구) 설치 위치에 묶인다.
+check("탐색 없는 경로 조립만 (동봉 모델 __file__ 기준)",
+      "os.path.join(_os.path.dirname(_os.path.realpath(__file__))" in _ksrc
+      and not re.search(r"os\.path\.(exists|isfile|isdir|listdir|walk)|"
+                        r"os\.scandir|glob\.glob|os\.walk", _ksrc)
+      and chr(34) + "/" + chr(34) not in _ksrc)
 # 의미 있는 불변식: `open()` 을 쓴다면 **전부** encoding을 명시해야 한다.
 # (Keeper는 원래 파일을 하나도 읽지 않아 0건이다. 개수 조건을 걸면
 #  "항상 참"인 무의미한 검증이 되므로, 조건 자체를 의미를 있게 잡는다.)
@@ -558,8 +570,19 @@ _init_src = open(os.path.join(PKG, "__init__.py"), encoding="utf-8").read()
 check("R61: README 가 없는 os.path 주장을 하지 않음",
       "os.path" not in _readme_ko and "os.path" not in _readme_en,
       "README 에 os.path 언급이 있으면 코드와 어긋난다")
-check("R61: 코드도 실제로 os.path 를 쓰지 않음 (문서와 일치)",
-      "os.path" not in _ksrc)
+# 1.9.5 부터는 동봉 모델 경로 조립에 os.path 를 쓴다(__file__ 기준). 그래서
+# "os.path 0건" 이라는 이전 불변식은 더 이상 사실이 아니다 — 지우면 코드가
+# 문서와 어긋나게 되니까 **구체적으로 다시 잡는다**:
+#   허용  __file__ 기준 1곳 경로 조립 (동봉 모델)
+#   금지  시스템 여러 곳을 뒤지는 탐색 (os.path.exists/listdir/walk/glob)
+check("R61: os.path 는 동봉 모델 경로 조립에만 쓰인다",
+      _ksrc.count("os.path") <= 3
+      and "os.path.join(_os.path.dirname(_os.path.realpath(__file__))" in _ksrc,
+      f"os.path {_ksrc.count('os.path')}건 (별칭 _os 사용 가능)")
+check("R61: 파일시스템 탐색은 여전히 없다 (R61 취지)",
+      not re.search(r"os\.path\.(exists|isfile|isdir|listdir|walk)|"
+                    r"os\.scandir|glob\.glob|os\.walk", _ksrc),
+      "탐색이 다시 들어왔다")
 check("R61: __init__ 이 '외부 pip 없음' 으로 거짓말하지 않음",
       "외부 pip 패키지 없음" not in _init_src
       and "mediapipe" in _init_src,
@@ -1098,23 +1121,37 @@ def _reset_pose_state():
 
 
 try:
-    # --- 경로 계약: 파일시스템을 건드리지 않는다 (R61) ---
+    # --- 경로 계약: 자기 옆 동봉 파일, 탐색 없음 (R61) ---
+    # (왜) 여기서 "미설정이면 None" 을 기대하면 안 된다: 1.9.5 부터는 노드가
+    # .task 를 함께 배포한다. 미설정 = "사용자가 안 골랐다" 이지 "모델 없음" 이
+    # 아니다. 동봉본을 주는 게 R66 의 계약이고, 여기는 그 계약이 1.9.4 와
+    # 달라졌다는 걸 못 박는 자리다.
     _reset_pose_state()
-    check("R64: 모델 미설정이면 경로 None", ck._pose_model_path() is None)
+    _bundled = os.path.join(PKG, "pose_landmarker_lite.task")
+    check("R64: 모델 미설정(환경변수 없음)이면 동봉본 경로",
+          ck._pose_model_path() == _bundled, str(ck._pose_model_path()))
+    check("R64: 동봉 경로가 __file__ 옆이다 (cwd 무관)",
+          os.path.dirname(os.path.realpath(ck._pose_model_path()))
+          == os.path.realpath(PKG))
     os.environ["GORI_POSE_MODEL"] = ""
-    check("R64: 빈 문자열은 미설정으로 취급", ck._pose_model_path() is None)
+    check("R64: 빈 문자열은 미설정으로 취급하고 동봉본으로",
+          ck._pose_model_path() == _bundled, str(ck._pose_model_path()))
     os.environ["GORI_POSE_MODEL"] = "C:/nope/does_not_exist.task"
-    check("R64: 없는 경로를 그대로 돌려줌 (파일시스템을 확인하지 않음)",
+    check("R64: 명시된 경로는 그대로 돌려줌 (파일시스템을 확인하지 않음)",
           ck._pose_model_path() == "C:/nope/does_not_exist.task",
           str(ck._pose_model_path()))
+    # (이전의 "경로 미설정 → None" 기대는 1.9.5 에서 사라졌다. 이제 경로가
+    #  없어도 동봉본이 있으므로 None 이 아니다. "모델을 못 읽으면 None + 1회
+    # 로그" 계약은 아래 실패 케이스가 대신 잡는다.)
 
     # --- 미설정 시 조용히 None, 예외 없음 ---
     _reset_pose_state()
     os.environ.pop("GORI_POSE_MODEL", None)
     check("R64: 모델 미설정 시 로더가 예외 대신 None",
           ck._pose_landmarker() is None)
-    check("R64: 미설정은 오류 로그 대상이 아님 (unavailable 경로)",
-          not _pose_logs, str(_pose_logs[:1]))
+    check("R64: 세션 못 열면 None 이고 로그는 1회만 (그 이후 조용)",
+          ck._pose_landmarker() is None and len(_pose_logs) == 1,
+          f"{len(_pose_logs)}건: {_pose_logs[:1]}")
 
     # --- 실패해도 죽지 않고 한 번만 말한다 ---
     _reset_pose_state()
@@ -1224,15 +1261,21 @@ try:
           len(_pose_logs) == 1, f"{len(_pose_logs)}건")
 
     # --- 소비자는 로더가 None 이면 조용히 통과 ---
+    # (왜) 로더를 스텁으로 None 을 만든다: 1.9.5 부터는 경로가 없으면 대신
+    # 동봉본을 주므로 "환경변수 비우기" 로는 None 이 되지 않는다. 여기 검증하는
+    # 것은 **로더가 None 일 때 소비자가 예외 없이 통과하는가** 라서 로더를
+    # 직접 None 으로 만든다.
     _reset_pose_state()
-    ck._TASKS_LANDMARKER = []
-    os.environ.pop("GORI_POSE_MODEL", None)
-    check("R64: 관절점 추출은 로더 없으면 None",
-          ck._pose_landmarks_from_tasks(
-              _npr.zeros((8, 8, 3), dtype=_npr.uint8)) is None)
-    check("R64: 세그멘테이션도 로더 없으면 None",
-          ck._segmentation_from_tasks(
-              _npr.zeros((8, 8, 3), dtype=_npr.uint8)) is None)
+    _orig_pl66 = ck._pose_landmarker
+    ck._pose_landmarker = lambda: None
+    try:
+        _u8_zero = _npr.zeros((8, 8, 3), dtype=_npr.uint8)
+        check("R64: 관절점 추출은 로더 없으면 None",
+              ck._pose_landmarks_from_tasks(_u8_zero) is None)
+        check("R64: 세그멘테이션도 로더 없으면 None",
+              ck._segmentation_from_tasks(_u8_zero) is None)
+    finally:
+        ck._pose_landmarker = _orig_pl66
 
     # --- detect() 가 터져도 예외가 새지 않는다 ---
     _reset_pose_state()
@@ -1279,6 +1322,164 @@ check("R65: 기능 없음 안내도 1회 가드(_POSE_NOTED)를 쓴다",
 check("R65: 모델 경로는 환경변수만 읽는다 (파일시스템 접근 없음)",
       'os.environ.get("GORI_POSE_MODEL")' in _src65
       and "os.path.exists" not in _src65.split("def _pose_landmarker")[0])
+
+# R66: 동봉 모델은 "설치하면 따라와야 한다".
+# 왜(Why) 이게 별도 블록인가: 1.9.4 까지는 경로를 환경변수로만 받았고, 그
+# 결과 33점 기능이 **설치해도 꺼진 채**였다(사용자가 환경변수를 모르면 계속
+# 꺼짐). 이건 배포본의 핵심 로직인데 정작 배포로 따라오지 않았다. 이제
+# 노드 폴더에 파일을 함께 넣고 __file__ 기준으로 찾는다.
+# 검증할 것: (1) 기본값이 자기 옆 파일이다 (2) 환경변수가 우선한다
+# (3) 탐색하지 않는다 — 경로 하나만 만든다 (4) 파일이 실제로 동봉돼 있다.
+_src66 = open(os.path.join(PKG, "consistency_keeper.py"), encoding="utf-8").read()
+_MODEL_NAME = "pose_landmarker_lite.task"
+
+check("R66: 동봉 모델 파일명이 상수로 모여 있다",
+      "_POSE_MODEL_FILENAME = \"" + _MODEL_NAME + "\"" in _src66)
+check("R66: 기본 경로는 __file__ 기준 (설치 위치와 무관하게 따라온다)",
+      "os.path.realpath(__file__)" in _src66
+      and "_POSE_MODEL_FILENAME)" in _src66)
+check("R66: 환경변수가 동봉본보다 우선",
+      _src66.index('if env:') < _src66.index("realpath(__file__)"))
+
+# 탐색 금지: os.path.exists / listdir / glob 같은 파일시스템 조회가 없다.
+# 존재 확인은 PoseLandmarker 생성에 맡긴다(경로가 틀리면 그 자리에서 죽어야
+# "조용한 실패" 가 되지 않는다).
+import re as _re66
+_body66 = _src66[_src66.index("def _pose_model_path():"):
+                 _src66.index("def _pose_landmarker():")]
+check("R66: 파일시스템을 탐색하지 않는다 (R61)",
+      not _re66.search(r"os\.path\.(exists|isfile|isdir|listdir|walk)|glob\.|os\.scandir",
+                       _body66), _body66[:120])
+check("R66: 반환값은 경로 하나뿐 (탐색 결과 리스트 아님)",
+      _body66.count("return") == 2)
+
+# 실제로 동봉돼 있는가 — 없으면 이 테스트는 통과해도 배포본이 고장 난다
+_model_path66 = os.path.join(PKG, _MODEL_NAME)
+check("R66: 모델 파일이 노드 폴더에 실제로 동봉돼 있다",
+      os.path.isfile(_model_path66),
+      "%s (%s)" % (_model_path66,
+                   os.path.getsize(_model_path66) if os.path.isfile(_model_path66)
+                   else "없음"))
+if os.path.isfile(_model_path66):
+    import hashlib as _hl66
+    _sz66 = os.path.getsize(_model_path66)
+    with open(_model_path66, "rb") as _f66:
+        _sha66 = _hl66.sha256(_f66.read()).hexdigest()
+    check("R66: 공식 sha256 과 일치 (다른 파일 아님)",
+          _sha66 == "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a",
+          _sha66)
+    check("R66: 크기가 공식 배포본과 같음 (5,777,746 bytes)", _sz66 == 5777746, str(_sz66))
+    # .task 는 ZIP 컨테이너다 — 앞에 2바이트가 붙고 PK 가 온다(앞 16바이트를
+    # 실제로 보면 00 00 PK 03 04 이다). 잘못된 파일이 끼면 로드 시점에 죽는다.
+    with open(_model_path66, "rb") as _f66:
+        _magic66 = _f66.read(6)
+    check("R66: .task 컨테이너 시그니처 (PK\\x03\\x04)",
+          _magic66[2:6] == b"PK\x03\x04", repr(_magic66))
+    # 재사용 라이선스 고지 — Apache 2.0 Section 4 는 라이선스 사본 동봉을 요구한다
+    _lic66 = os.path.join(PKG, "POSE_MODEL_LICENSE.txt")
+    _lic_txt66 = (open(_lic66, encoding="utf-8").read()
+                  if os.path.isfile(_lic66) else "")
+    check("R66: 라이선스 고지 파일이 동봉돼 있다 (Apache 2.0 Section 4)", bool(_lic_txt66))
+    check("R66: 출처 URL 과 sha256 이 고지에 적혀 있다",
+          "storage.googleapis.com/mediapipe-models" in _lic_txt66
+          and "59929e1d1ee952877" in _lic_txt66)
+    check("R66: Apache 2.0 재사용 조건이 고지에 명시돼 있다",
+          "Apache License 2.0" in _lic_txt66 and "재배포" in _lic_txt66)
+
+# --- 경로 판정 동작 (가짜 파일시스템 없이) ---
+_orig_env66 = os.environ.pop("GORI_POSE_MODEL", None)
+_orig_file66 = ck._POSE_MODEL_FILENAME
+try:
+    # 환경변수 없으면 동봉본 경로
+    check("R66: 환경변수 없으면 동봉 파일 경로를 준다",
+          ck._pose_model_path() == _model_path66, str(ck._pose_model_path()))
+    check("R66: 그 경로가 실제 동봉 파일과 같은가",
+          os.path.realpath(ck._pose_model_path())
+          == os.path.realpath(_model_path66))
+    # 환경변수가 있으면 그것이 우선
+    os.environ["GORI_POSE_MODEL"] = "C:/custom/full.task"
+    check("R66: 환경변수가 동봉본을 덮는다",
+          ck._pose_model_path() == "C:/custom/full.task")
+    os.environ["GORI_POSE_MODEL"] = ""
+    check("R66: 빈 환경변수는 무시하고 동봉본으로 되돌아간다",
+          ck._pose_model_path() == _model_path66, str(ck._pose_model_path()))
+    # 파일명이 바뀌면 그것을 따라간다 (full/heavy 교체 대비)
+    ck._POSE_MODEL_FILENAME = "pose_landmarker_full.task"
+    check("R66: 동봉 파일명 교체 시 그 이름을 따라간다",
+          os.path.basename(ck._pose_model_path()) == "pose_landmarker_full.task",
+          os.path.basename(ck._pose_model_path()))
+finally:
+    ck._POSE_MODEL_FILENAME = _orig_file66
+    if _orig_env66 is None:
+        os.environ.pop("GORI_POSE_MODEL", None)
+    else:
+        os.environ["GORI_POSE_MODEL"] = _orig_env66
+
+# 안내 문구가 실제 파일명을 말해야 한다 ("lite" 라고 적어놓고 full 을 쓰는
+# 경우 사용자가 엉뚱한 곳을 본다).
+# R64 의 finally 가 ck._log 를 원본으로 되돌려놨으므로 다시 물어야 한다.
+_pose_logs.clear()
+_orig_log_r66 = ck._log
+ck._log = lambda m: _pose_logs.append(str(m))
+try:
+    ck._POSE_NOTED = False
+    ck._note_pose_unavailable()
+    check("R66: 꺼짐 안내가 동봉 파일명을 그대로 말함",
+          _pose_logs and _MODEL_NAME in _pose_logs[0], str(_pose_logs[:1]))
+    check("R66: 꺼짐 안내가 환경변수 확인법도 알려줌",
+          _pose_logs and "GORI_POSE_MODEL" in _pose_logs[0])
+finally:
+    ck._log = _orig_log_r66
+    ck._POSE_NOTED = False
+    _pose_logs.clear()
+
+# R67: 게이트는 "경로" 가 아니라 "세션" 을 본다 — 비싼 디코딩 전에 확인한다.
+# 왜(Why) 별도 블록인가: 1.9.5 에서 동봉 모델을 추가하면서 **실제 회귀**가
+# 났다. 게이트가 `_pose_model_path() is None` 만 보면, 경로는 있는데 파일을 못
+# 여는 경우(설치 경로에 한글, 파일 손상 등) VAE 디코딩을 **다 하고 나서야**
+# 포즈 없음을 알게 된다. 실측으로 프레임당 3회 버려지는 디코딩이 생겼다
+# (1회 → 4회). 세션은 캐시되므로 세션을 게이트로 쓰면 못 열 때 0원으로 빠진다.
+_src67 = open(os.path.join(PKG, "consistency_keeper.py"), encoding="utf-8").read()
+for _fn67, _label67 in (("_person_mask_for_latent", "인물 마스크"),
+                        ("_part_detail_map", "부위별 맵")):
+    _i67 = _src67.index("def " + _fn67)
+    _j67 = _src67.find("\ndef ", _i67 + 1)
+    _body67 = _src67[_i67:_j67 if _j67 > 0 else _i67 + 2000]
+    _d67 = _body67.find("_decode_latent_rgb")
+    _g67 = _body67.find("_pose_landmarker()")
+    check(f"R67: {_label67} 게이트가 세션 확인 (경로 확인이 아님)",
+          "_pose_model_path() is None" not in _body67
+          and _g67 != -1 and _d67 != -1 and _g67 < _d67,
+          f"gate@{_g67} decode@{_d67}")
+
+# 실제로 세션이 없으면 디코딩 0회여야 한다 (경로가 있어도).
+import torch as _t67  # noqa: E402
+_vaecalls67 = []
+
+
+class _CountVAE67:
+    def decode(self, latent, **kw):
+        _vaecalls67.append(1)
+        return _t67.zeros(1, 8, 8, 3)
+
+
+_orig_pm67 = ck._pose_landmarker
+ck._pose_landmarker = lambda: None          # "모델 못 읽는" 상태 재현
+try:
+    _lat67 = _t67.ones(1, 4, 32, 32)
+    _vaecalls67.clear()
+    _m67 = ck._person_mask_for_latent(_CountVAE67(), _lat67)
+    _mask_dec67 = len(_vaecalls67)
+    _vaecalls67.clear()
+    _d67 = ck._part_detail_map(_CountVAE67(), {"s": _lat67})
+    _part_dec67 = len(_vaecalls67)
+    check("R67: 세션 없을 때 인물 마스크는 None", _m67 is None)
+    check("R67: 세션 없을 때 부위별 맵은 None", _d67 is None)
+    check("R67: 세션 없으면 VAE 디코딩을 아예 하지 않는다 (비용 0원)",
+          _mask_dec67 == 0 and _part_dec67 == 0,
+          f"mask={_mask_dec67} part={_part_dec67}")
+finally:
+    ck._pose_landmarker = _orig_pm67
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

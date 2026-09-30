@@ -140,19 +140,36 @@ _TASKS_LANDMARKER = []
 _POSE_NOTED = False
 
 
-def _pose_model_path():
-    """Return the .task model path the host configured, or None.
+# 관절 33점 모델 파일명. 이 노드와 함께 배포된다(Apache 2.0, Google MediaPipe).
+_POSE_MODEL_FILENAME = "pose_landmarker_lite.task"
 
-    (왜) 이 노드는 파일시스템을 다루지 않는다 (R61). 경로를 찾지도 확인하지 않고 `GORI_POSE_MODEL` 문자열을 그대로 쓴다. 실제로 존재하는지는
-    `PoseLandmarker` 생성 시점에 mediapipe 가 판단한다. 그래서 `파일시스템` 를
-    쓰지 않으면서도 경로가 잘못되면 조용히 None 이 아니라 그 자리에서 죽는다.
+
+def _pose_model_path():
+    """Return the .task model path to use, or None.
 
     (왜) 이게 없다면 관절 33점 이 꺼진다. 구 `mediapipe.solutions` API 는 Windows
     배포판에 없고(0.10.33 / 1.0.1 휠에 `mediapipe/python/` 항목 0개),
-    tasks API 는 .task 모델 파일이 필요하다. 그래서 **호스트가 경로를 준다.**
+    tasks API 는 .task 모델 파일이 필요하다.
+
+    (왜) 동봉한다: 이 파일은 인체 마스크·부위별 강도·프레이밍 판정의 전제다.
+    없으면 세 기능이 **에러 없이 조용히** 꺼진다 — 사용자가 알아채기 어렵다.
+    그래서 "설치하면 따라오는 쪽" 이 되도록 노드 폴더에 함께 넣고 `__file__`
+    기준으로 찾는다. 사용자가 경로를 몰라도 되는 게 맞다.
+
+    (왜) 탐색하지 않는다 (R61): 시스템 여러 곳을 뒤지지 않고 **자기 옆 한 곳만**
+    본다. 그것도 존재 여부를 확인하지 않는다 — 경로가 잘못되면 조용히 None 이
+    아니라 `PoseLandmarker` 생성 시점에 그 자리에서 죽어야 "조용한 실패" 가
+    되지 않는다.
+
+    (왜) 환경변수가 먼저: 사용자가 lite 대신 full/heavy 를 쓰고 싶을 수 있다.
+    동봉본이 기본이고 환경변수가 선택지다.
     """
     import os as _os
-    return _os.environ.get("GORI_POSE_MODEL") or None
+    env = _os.environ.get("GORI_POSE_MODEL")
+    if env:
+        return env
+    return _os.path.join(_os.path.dirname(_os.path.realpath(__file__)),
+                          _POSE_MODEL_FILENAME)
 
 
 def _pose_landmarker():
@@ -248,8 +265,9 @@ def _note_pose_unavailable():
         return
     _POSE_NOTED = True
     _log("[GoRi Consistency Keeper] 인체 마스크·부위별 강도·프레이밍 판정이 꺼져 있다. "
-         "mediapipe.solutions 가 없어서(0.10.x 에서 구 API 제거) 관절 33점 을 못 읽는다. "
-         "인물 위치만 쓰는 강도 조절은 계속 동작한다.")
+         "mediapipe tasks 의 " + _POSE_MODEL_FILENAME + " 을 못 읽는다. "
+         "설치 폴더에 파일이 있는지, 또는 GORI_POSE_MODEL 환경변수 경로가 "
+         "맞는지 확인해 주세요. 인물 위치만 쓰는 강도 조절은 계속 동작한다.")
 
 
 _POSE_NOTED = False
@@ -268,8 +286,13 @@ def _person_mask_for_latent(vae, sampled, cache=None):
         import numpy as _np
         if vae is None or sampled is None:
             return None
-        if _pose_model_path() is None:
-            _note_pose_unavailable()
+        # 왜(Why) 경로가 아니라 **세션** 을 먼저 보는가: 게이트가 경로만 확인하면
+        # VAE 디코딩(비싼 비용)을 먼저 다 쓴 뒤에야 "모델 못 읽음" 을 알게 된다.
+        # 경로는 있고 파일이 깨졌거나(설치 경로에 한글 등) mediapipe 가 못 여는
+        # 경우 매 실행마다 디코딩 1회를 버리게 된다 — 2026-09-30 실측으로
+        # 확인한 회귀. 세션은 있으면 캐시되므로 여기서 부르는 비용이 없고,
+        # 없으면 그 자리에서 0 원으로 빠져나간다.
+        if _pose_landmarker() is None:
             return None
         arr = _decode_latent_rgb(vae, sampled, cache=cache)
         if arr is None:
@@ -351,14 +374,18 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
 
     (왜) 예전엔 `mediapipe.solutions.pose.Pose` 였는데 그 API 가 Windows
     배포판에 없다. tasks API + .task 모델로 대체한다.
+
+    (왜) 경로가 아니라 세션으로 게이트를 건다: 아래 루프는 프레임마다 VAE
+    디코딩을 한다. 게이트가 경로만 보면 파일이 못 열릴 때 **디코딩을 다 하고
+    나서야** 포즈 없음을 알게 되어 비용을 버린다 (2026-09-30 실측). 세션은
+    캐시되므로 여기서 부르는 비용은 없고, 못 열면 그 자리에서 0 원으로 빠진다.
     """
     try:
         import numpy as _np
         import torch as _t
     except Exception:
         return None
-    if _pose_model_path() is None:
-        _note_pose_unavailable()
+    if _pose_landmarker() is None:
         return None
     if vae is None or not latents:
         return None

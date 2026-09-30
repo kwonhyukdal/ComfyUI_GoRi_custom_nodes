@@ -1,0 +1,47 @@
+pose_landmarker_lite.task
+========================
+
+MediaPipe Pose Landmarker (lite) 모델 파일.
+
+    출처   https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
+    크기   5,777,746 bytes (5.51 MB)
+    sha256 59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a
+    라이선스 Apache License 2.0 (google-ai-edge/mediapipe)
+    형식   .task = ZIP 컨테이너 (TFLite + 메타데이터)
+
+사용 목적
+--------
+
+Consistency Keeper 가 결과 이미지에서 **관절 33점** 좌표와 **분할 마스크**를
+뽑는 데 쓴다. 여기서 나오는 정보로 세 가지가 돈다.
+
+    부위별 강도 조절   어깨·팔·손가락 등 부위마다 denoise 를 다르게 준다
+    인물 마스크        강도를 인물 영역에 집중시킨다
+    프레이밍 판정      기준 이미지와 결과물의 인물 위치·크기를 비교한다
+
+이 파일이 없으면 위 세 기능이 **에러 없이 조용히 꺼진다.** 그래서 함께
+배포한다 — 설치하면 따라오는 쪽이 맞다.
+
+대체 모델
+--------
+
+더 정확한 판정이 필요하면 lite 대신 full(9.4MB) 또는 heavy 를 쓰면 된다.
+노드 폴더의 이 파일을 교체하거나, 환경변수로 경로를 지정한다.
+
+    setx GORI_POSE_MODEL "C:\어딘가\pose_landmarker_full.task"
+
+환경변수가 동봉본보다 우선한다. 경로는 어디든 상관없다(노드가 존재 여부를
+확인하지 않고, `PoseLandmarker` 생성 시점에 판단한다).
+
+라이선스 고지 (Apache License 2.0, Section 4 요구사항)
+------------------------------------------------------
+
+이 파일은 Google MediaPipe 배포물이며 Apache License 2.0 으로 배포된다.
+재배포 시 다음을 만족해야 한다:
+
+  (a) 수신자에게 Apache License 2.0 사본을 함께 제공한다
+  (b) 수정된 파일에는 변경 사실을 명시한다 (이 파일은 미수정 원본이다)
+  (c) 원본의 저작권·Patent·상표·출처 고지를 보존한다
+  (d) 원본에 NOTICE 파일이 있으면 함께 제공한다
+
+전체 라이선스: https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE
