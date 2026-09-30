@@ -3693,7 +3693,12 @@ class CameraDirector:
     RETURN_TYPES = ("STRING", "STRING", "IMAGE")
     RETURN_NAMES = ("positive", "negative", "image_out")
     FUNCTION = "run"
-    CATEGORY = "GoRi/Camera"
+    # 되돌린 이유(2026-09-30): "GoRi/Camera" 로 바꿨다가 되돌렸다. Jev 가 이
+    # 변경을 public_api_impact=breaking P=0.43 으로 봤다(신뢰도 0.24 — 낮다).
+    # 게다가 CATEGORY 는 메뉴 묶음 문자열일 뿐 기능 이득이 0 이고, 1.9.7 이
+    # 배포 전이라 되돌릴 비용이 아직 0 이다. publisher 별 분류가 필요해지면
+    # 그때 한 번에 한다.
+    CATEGORY = "HF Skills/Camera"
     DESCRIPTION = ("주제 한 줄(한글 OK) + 프리셋/자동화 → 카메라 조항이 포함된 "
                    "영문 positive/negative 2줄. CLIPTextEncode.text에 연결하세요. "
                    "prompt_in 단자에 선을 연결하면 topic 칸 대신 그 프롬프트를 씁니다. "
@@ -4453,7 +4458,7 @@ class CameraDirectorEncode(CameraDirector):
     RETURN_NAMES = ("positive_out", "negative_out", "prompt_out", "image_out",
                     "reference_latent_out")
     FUNCTION = "run_prompt"
-    CATEGORY = "GoRi/Camera"
+    CATEGORY = "HF Skills/Camera"
     DESCRIPTION = ("주제와 1~10장의 레퍼런스 이미지로 카메라 연출을 구성한 영문 프롬프트를 "
                    "positive/negative conditioning과 prompt_out으로 출력합니다. "
                    "positive_out/negative_out은 KSampler에, prompt_out은 확인용으로 사용하세요.")

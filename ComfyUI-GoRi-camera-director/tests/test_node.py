@@ -85,10 +85,11 @@ check("optional 위젯 존재",
 check("출력 3개 (positive/negative/image_out)",
       cd.CameraDirector.RETURN_TYPES == ("STRING", "STRING", "IMAGE")
       and cd.CameraDirector.RETURN_NAMES == ("positive", "negative", "image_out"))
-# 왜(Why) GoRi/Camera 인가: 파생 팩의 템플릿 잔재였던 "HF Skills/Camera" 는 같은
-# 배포팩의 Keeper("GoRi/Refine")와 카테고리가 어긋나 노드 메뉴가 두 갈래로 갈라졌다.
-# 표시 이름은 (GoRi) 라 검색은 문제없었지만, 메뉴 묶음은|publisher 한 곳이어야 한다.
-check("카테고리 등록", cd.CameraDirector.CATEGORY == "GoRi/Camera")
+# CATEGORY 는 "GoRi/Camera" 로 바꾸려다 되돌렸다(2026-09-30). Jev 가 이 변경을
+# public_api_impact=breaking P=0.43 으로 봤고(신뢰도 0.24), CATEGORY 는 메뉴
+# 묶음 문자열이라 기능 이득이 없다. 표시 이름이 (GoRi) 라 검색·발견성은 원래
+# 괜찮았다. 값은 고정한다 — publisher 별 분류가 필요하면 그때 한 번에 바꾼다.
+check("카테고리 등록", cd.CameraDirector.CATEGORY == "HF Skills/Camera")
 
 bad = [(n, k, v) for n, pc in cd.PRESETS.items() for k, v in pc.items()
        if v not in cd._TABLES.get(k, {})]
