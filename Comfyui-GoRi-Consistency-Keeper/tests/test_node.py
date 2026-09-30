@@ -195,7 +195,6 @@ else:
 _orig_model_path = ck._pose_model_path
 _orig_landmarker = ck._pose_landmarker
 _orig_landmarks = ck._pose_landmarks_from_tasks
-_orig_segmentation = ck._segmentation_from_tasks
 _orig_noted = ck._note_pose_unavailable
 
 
@@ -208,21 +207,12 @@ def _fake_landmarks(u8):
     return [(0.5, 0.5)] * 33
 
 
-def _fake_segmentation(u8):
-    import numpy as _np
-    h, w = u8.shape[0], u8.shape[1]
-    seg = _np.zeros((h, w), dtype=_np.float32)
-    seg[h // 4:3 * h // 4, w // 4:3 * w // 4] = 0.9
-    return seg
-
-
 ck._pose_model_path = _fake_model_path
 # 1.9.5 부터 게이트가 "세션" 이다 (경로가 아니라). 세션까지 스텁해야
 # 디코딩 앞 게이트를 통과한다. 이걸 빠뜨리면 이 블록이 조용히 실패하고
 # "마스크가 안 만들어졌다" 는 잘못된 결론을 낸다.
 ck._pose_landmarker = lambda: object()
 ck._pose_landmarks_from_tasks = _fake_landmarks
-ck._segmentation_from_tasks = _fake_segmentation
 
 
 class _FakeVAE:
@@ -251,12 +241,41 @@ try:
     _r58_mask = ck._person_mask_for_latent(_FakeVAE(), base)
     check("R58: 마스크 경로가 조용히 실패하지 않음",
           _r58_mask is not None, "del 블록이 예외를 삼켰다면 마스크가 None")
+
+    # R69: 디코드 결과가 **(H,W,C)** 인가 — 2026-09-30 실측 회귀.
+    # 왜(Why) 이게 없었나: `VAE.decode` 는 (B,C,H,W) 를 주므로 arr[0] 는
+    # (C,H,W) 다. 그런데 소비자는 전부 (H,W,C) 를 기대한다 — mediapipe.Image
+    # 는 HWC 를 받고 `_edge_map_from_rgb` 는 arr[...,0] 을 R 채널로 읽는다.
+    # 순서가 틀리면 인체 마스크·부위별 맵·시트 분석이 **전부 조용히 None** 이
+    # 되고 로그도 남지 않는다. 실측 증거: vae 연결/미연결 두 실행의 결과 이미지가
+    # 픽셀 완전 동일했다(마스크가 적용되지 않았다는 뜻).
+    _r69 = ck._decode_latent_rgb(_FakeVAE(), base)
+    check("R69: _decode_latent_rgb 가 (H,W,C) 를 돌려준다",
+          _r69 is not None and _r69.shape == (64, 64, 3),
+          repr(getattr(_r69, "shape", None)))
+    _r69s = ck._decode_small(_FakeVAE(), base)
+    check("R69: _decode_small 도 (H,W,C) 를 돌려준다",
+          _r69s is not None and _r69s.ndim == 3 and _r69s.shape[-1] == 3,
+          repr(getattr(_r69s, "shape", None)))
+
+    # 실제로 쓰는 VAE 는 **채널이 4개** 다. (B,H,W,4) 로 준다(2026-09-30 실측:
+    # arr[0] = (1888,1056,4)). 이걸 그대로 mediapipe 에 넘기면 3채널 SRGB 만
+    # 받는 Image 가 거부해 포즈 검출이 조용히 전부 실패했다(실측 lm=None).
+    class _VAE4:
+        def decode(self, samples):
+            return _t.zeros(1, 64, 64, 4)
+
+    _r69b = ck._decode_latent_rgb(_VAE4(), base)
+    check("R69: 4채널 (B,H,W,4) 입력 -> (H,W,3) 으로 정규화",
+          _r69b is not None and _r69b.shape == (64, 64, 3),
+          repr(getattr(_r69b, "shape", None)))
+    check("R69: 3채널 미만이면 None ( mediapipe 가 받을 RGB 가 없다)",
+          ck._decode_latent_rgb(type("V", (), {"decode": lambda s, x: _t.zeros(1, 64, 64, 2)})(), base) is None)
 finally:
     ck._pose_model_path = _orig_model_path
     ck._pose_landmarker = _orig_landmarker
     ck._pose_landmarks_from_tasks = _orig_landmarks
-    ck._segmentation_from_tasks = _orig_segmentation
-
+    
 # R58: 두 함수가 조용히 실패하는 경로가 남아 있지 않은지 소스를 검사한다.
 # `del img` 처럼 스코프 밖 이름을 del 하면 NameError -> 예외 삼킴 -> 조용한 실패다.
 _ksrc_del = [ln.strip() for ln in _ksrc_lines
@@ -1107,7 +1126,7 @@ else:
 
 # R64: 포즈 로더 계약 (조용한 실패 방지의 핵심).
 # 왜(Why) 이 블록이 필요한가: 앞의 포즈 테스트는 `_pose_model_path` /
-# `_pose_landmarks_from_tasks` / `_segmentation_from_tasks` 를 **전부 스텁으로
+# `_pose_landmarks_from_tasks` / `_person_mask_from_rgb` 를 **전부 스텁으로
 # 대체**한다. 그래서 소비자가 가짜 관절점으로 도는 것만 확인하고, **로더가
 # 실제로 어떻게 실패하는지는 한 번도 실행된 적이 없다.** 그런데 이 노드가
 # 배포판에서 조용히 죽었던 지점이 정확히 그 자리였다(구 `mediapipe.solutions`
@@ -1285,8 +1304,8 @@ try:
         _u8_zero = _npr.zeros((8, 8, 3), dtype=_npr.uint8)
         check("R64: 관절점 추출은 로더 없으면 None",
               ck._pose_landmarks_from_tasks(_u8_zero) is None)
-        check("R64: 세그멘테이션도 로더 없으면 None",
-              ck._segmentation_from_tasks(_u8_zero) is None)
+        check("R64: 인체 마스크도 로더 없으면 None",
+              ck._person_mask_from_rgb(_u8_zero) is None)
     finally:
         ck._pose_landmarker = _orig_pl66
 
@@ -1302,8 +1321,8 @@ try:
     _u8 = _npr.zeros((8, 8, 3), dtype=_npr.uint8)
     check("R64: detect 실패해도 관절점은 None (예외 전파 안 됨)",
           ck._pose_landmarks_from_tasks(_u8) is None)
-    check("R64: detect 실패해도 세그멘테이션은 None",
-          ck._segmentation_from_tasks(_u8) is None)
+    check("R64: detect 실패해도 인체 마스크는 None",
+          ck._person_mask_from_rgb(_u8) is None)
     check("R64: detect 실패 원인이 1회 로그로 남음",
           len(_pose_logs) == 1 and "detect failed" in _pose_logs[0],
           str(_pose_logs[:1]))
@@ -1322,6 +1341,55 @@ finally:
             sys.modules[_k] = _saved[_k]
         else:
             sys.modules.pop(_k, None)
+
+# R64b: **설치된** mediapipe 표면으로 포즈 세션을 연다 (2026-09-30 회귀 가드).
+# 왜(Why) 스텁으로는 절대 못 잡는 버그다: 위 R64 의 `_install_fake_mp` 는
+# `tasks.BaseOptions` 를 만들어 넣는다. 그런데 실제 mediapipe 0.10.33 의
+# tasks/__init__.py 에는 BaseOptions 가 **없다**(ImportError). 그래서 R64 는
+# 전부 통과하는데 프로덕션에서는 landmarker 가 한 번도 열리지 않았고, 그 아래
+# 픽셀 공간 부위 분석(detail_boost / _apply_region_strength)이 통째로 죽었다.
+# 즉 스텁은 실제 패키지 표면과 어긋난 순간을 감추고 있다. 여기서는 스텁 없이
+# 진짜 설치본으로만 판정한다.
+_ksrc64b = open(os.path.join(PKG, "consistency_keeper.py"), encoding="utf-8").read()
+check("R64b: 잘못된 import 경로(_mp.tasks.BaseOptions)가 남아있지 않다",
+      "_mp.tasks.BaseOptions" not in _ksrc64b)
+# R64 는 스텁을 sys.modules 에 심어놓고 "복원" 하지만, `_saved` 캡처가
+# _install_fake_mp **뒤**라 복원되는 것도 스텁이다(기존 결함). 그래서 여기서는
+# 스텁을 명시적으로 축출한 뒤 진짜 패키지를 다시 import 한다.
+for _k64b in [k for k in list(sys.modules)
+              if k == "mediapipe" or k.startswith("mediapipe.")]:
+    sys.modules.pop(_k64b, None)
+try:
+    import mediapipe as _mp64b
+except Exception:
+    _mp64b = None
+if _mp64b is None:
+    check("R64b: mediapipe 미설치 — 세션 검증을 건너뛴다 (선택 의존성)", True)
+else:
+    try:
+        from mediapipe.tasks.python.core.base_options import BaseOptions as _bo64b
+    except Exception:
+        _bo64b = None
+    check("R64b: 설치된 mediapipe 에서 BaseOptions 가 실제로 존재한다",
+          _bo64b is not None,
+          "tasks.python.core.base_options 경로가 없으면 포즈가 죽는다")
+    _real_model64b = ck._pose_model_path()
+    if _real_model64b is None:
+        check("R64b: 동봉 모델 없음 — 세션 열기를 건너뛴다", True)
+    else:
+        _keep64b = ck._TASKS_LANDMARKER
+        ck._TASKS_LANDMARKER = []
+        try:
+            _lm64b = ck._pose_landmarker()
+            check("R64b: 진짜 landmarker 세션이 열린다", _lm64b is not None,
+                  f"모델={_real_model64b}")
+            if _lm64b is not None:
+                try:
+                    _lm64b.close()
+                except Exception:
+                    pass
+        finally:
+            ck._TASKS_LANDMARKER = _keep64b
 
 # R65: "조용히 None" 을 허용하는 자리는 반드시 1회 로그로 막는다.
 # 왜(Why) 이것도 회귀 가드인가: 포즈 로더는 예외를 삼키고 None 을 돌려주는 것이

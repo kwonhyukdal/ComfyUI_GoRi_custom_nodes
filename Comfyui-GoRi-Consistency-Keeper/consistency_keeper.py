@@ -101,6 +101,33 @@ def _light_damp_factor(mismatch) -> float:
         return 1.0
 
 
+def _as_rgb_hwc(arr):
+    """VAE decode 결과 -> (H,W,3) RGB. 레이아웃이 아니면 None.
+
+    왜(Why) 이렇게 복잡하나 (2026-09-30 실측): ComfyUI 의 VAE 마다 decode 가
+    주는 축 순서가 다르다. 여기서 쓰는 Qwen Image VAE 는 **(B,H,W,C=4)** 다 —
+    arr[0] = (1888,1056,4). 그레이스케일 SD 계열은 (B,C,H,W) 라 arr[0] =
+    (3,H,W) 다. 더 중요한 건 **채널이 4개** 라는 점이다. mediapipe.Image 는
+    3채널 SRGB 만 받으므로 4채널을 그대로 넘기면 포즈 검출이 조용히 전부
+    실패한다(실측 lm=None). 판정 근거는 첫 축이 4 이하라는 것(채널 축이면
+    1/3/4, 공간 축이면 수백~).
+    """
+    try:
+        import numpy as _np
+        a = _np.asarray(arr, dtype=_np.float32)
+        if a.ndim == 4:
+            a = a[0]
+        if a.ndim != 3:
+            return None
+        if a.shape[0] <= 4:
+            a = _np.transpose(a, (1, 2, 0))
+        if a.shape[-1] < 3:
+            return None
+        return _np.clip(a[..., :3], 0.0, 1.0)
+    except Exception:
+        return None
+
+
 def _decode_latent_rgb(vae, latent, cache=None):
     """latent -> RGB numpy 배열(H,W,3). 실행당 캐시로 중복 디코딩을 없앤다.
 
@@ -124,11 +151,9 @@ def _decode_latent_rgb(vae, latent, cache=None):
             img = img.detach().cpu()
         arr = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
         arr = _np.asarray(arr, dtype=_np.float32)
-        if arr.ndim == 4:
-            arr = arr[0]
-        if arr.ndim != 3:
+        arr = _as_rgb_hwc(arr)
+        if arr is None:
             return None
-        arr = _np.clip(arr, 0.0, 1.0)
         if cache is not None:
             cache[key] = arr
         return arr
@@ -139,6 +164,22 @@ def _decode_latent_rgb(vae, latent, cache=None):
 _TASKS_LANDMARKER = []
 _POSE_NOTED = False
 
+# 인체 마스크 감쇠 반경 = 랜드마크 bbox 긴 변의 몇 배인가.
+# 왜(Why) 0.30 인가 (2026-09-30 실측 스윕): 뼈대 중심에서 0.30x체격 거리에서
+# 가중치가 0 이 된다. 실측(인물 옆차 실물 생성본) 결과 —
+#   0.60: 인물 0.86 / 배경 0.57 (구분 안 됨)
+#   0.30: 인물 0.75 / 배경 0.31 (3배 대비, 화면 38% 배제)  <- 채택
+#   0.25: 인물 0.65 / 배경 0.16 (배경은 더 좋은데 인물 팔끝까지 잘릴 위험)
+_MASK_FALLOFF = 0.30
+
+# 감쇠 반경의 바닥/천장(정규화 좌표). landmark 가 몰리거나 사람이 화면을 꽉
+# 채울 때 마스크가 한 점으로 수축하거나 배경을 삼키는 것을 막는다.
+# 자세한 사유는 `_person_mask_from_rgb` 참고.
+_MASK_FALLOFF_MIN = 0.15
+_MASK_FALLOFF_MAX = 0.75
+
+# 인체 마스크 이진화 임계. _MASK_FALLOFF 스윕과 같은 실측에서 같이 정했다.
+_MASK_MIN_WEIGHT = 0.35
 
 # 관절 33점 모델 파일명. 이 노드와 함께 배포된다(Apache 2.0, Google MediaPipe).
 _POSE_MODEL_FILENAME = "pose_landmarker_lite.task"
@@ -183,20 +224,56 @@ def _pose_landmarker():
     if model is None:
         return None
     try:
-        import mediapipe as _mp
         from mediapipe.tasks.python import vision as _vision
+        # 왜(Why) 여기서 가져오나 (2026-09-30 실측):
+        # `mediapipe.tasks.BaseOptions` 는 0.10.33 의 tasks/__init__.py 에 없다
+        # (ImportError). 그래서 landmarker 가 한 번도 만들어지지 않았고,
+        # _part_detail_map 이 None 을 돌려주면서 그 아래 픽셀 공간 부위 분석
+        # (detail_boost / _apply_region_strength) 이 통째로 죽었다. 단위
+        # 테스트 223 건이 포즈 세션을 stub 으로 주입해서 이 경로를 검증하지
+        # 못한 탓이다. 정답은 深层 모듈 — landmarker 0.08초 생성, 33점
+        # 검출까지 확인했다.
+        from mediapipe.tasks.python.core.base_options import BaseOptions
         options = _vision.PoseLandmarkerOptions(
-            base_options=_mp.tasks.BaseOptions(model_asset_path=model),
+            base_options=BaseOptions(model_asset_path=model),
             running_mode=_vision.RunningMode.IMAGE,
             num_poses=1,
             min_pose_detection_confidence=0.5,
-            output_segmentation_masks=True)
+            # 왜(Why) False 로 고정하나 (2026-09-30 실측): True 로 세면
+            # mediapipe 0.10.33 가 내부 ROI 마스크를 만들다가 **네이티브
+            # SIGABRT** 로 죽는다(image_frame.cc "Check failed: 1 ==
+            # ChannelSize()"). SIGABRT 는 try/except 로 못 잡아 ComfyUI 서버
+            # 전체가 죽는다. 입��으로 막는 시도 3가지는 전부 실패했다(입력
+            # 홀짝 판정 / 512px 축소 / 정사각 패딩). 인체 마스크는 이 세션이
+            # 아니라 33점 포즈에서 직접 만든다(`_person_mask_from_rgb`).
+            output_segmentation_masks=False)
         lm = _vision.PoseLandmarker.create_from_options(options)
     except Exception as _e:
         _note_pose_error('_pose_landmarker', _e)
         return None
     _TASKS_LANDMARKER.append(lm)
     return lm
+
+
+def _even_rgb(u8):
+    """mediapipe 에 넣을 RGB 배열(짝수 치수). 실패하면 None.
+
+    왜(Why) 짝수로 잘라내나 (2026-09-30 실측, **프로세스 죽음** 버그):
+    홀수 높이/너비 이미지는 mediapipe 0.10.33 내부 계산에서 깨질 수 있다.
+    SIGABRT 는 try/except 로 못 잡으므로 아래 except 로는 "안전"이 되지 않고
+    그저 흉내만 낸다 — 실제로는 ComfyUI 서버 전체가 죽는다. 그래서 방어는
+    **호출 전**에 한다. 소비자는 결과(마스크/랜드마크)를 latent 해상도로
+    보간하므로 ±1px 는 무의미하다.
+    """
+    try:
+        import numpy as _np
+        arr = _np.asarray(u8)
+        if (arr.shape[0] % 2) or (arr.shape[1] % 2):
+            arr = arr[:arr.shape[0] - (arr.shape[0] % 2),
+                     :arr.shape[1] - (arr.shape[1] % 2)]
+        return _np.ascontiguousarray(arr)
+    except Exception:
+        return None
 
 
 def _pose_landmarks_from_tasks(u8):
@@ -206,9 +283,10 @@ def _pose_landmarks_from_tasks(u8):
         return None
     try:
         import mediapipe as _mp
-        import numpy as _np
-        img = _mp.Image(image_format=_mp.ImageFormat.SRGB,
-                       data=_np.ascontiguousarray(u8))
+        arr = _even_rgb(u8)
+        if arr is None:
+            return None
+        img = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=arr)
         res = lm.detect(img)
         groups = getattr(res, "pose_landmarks", None)
         if not groups:
@@ -219,26 +297,6 @@ def _pose_landmarks_from_tasks(u8):
         return [(float(p.x), float(p.y)) for p in pts[:33]]
     except Exception as _e:
         _note_pose_error('_pose_landmarks_from_tasks', _e)
-        return None
-
-
-def _segmentation_from_tasks(u8):
-    """uint8 HWC RGB -> (H, W) float 마스크. 모델/분할이 없으면 None."""
-    lm = _pose_landmarker()
-    if lm is None:
-        return None
-    try:
-        import mediapipe as _mp
-        import numpy as _np
-        img = _mp.Image(image_format=_mp.ImageFormat.SRGB,
-                       data=_np.ascontiguousarray(u8))
-        res = lm.detect(img)
-        masks = getattr(res, "segmentation_masks", None)
-        if not masks:
-            return None
-        return _np.asarray(masks[0].numpy_view(), dtype=_np.float32)
-    except Exception as _e:
-        _note_pose_error('_segmentation_from_tasks', _e)
         return None
 
 
@@ -273,6 +331,72 @@ def _note_pose_unavailable():
 _POSE_NOTED = False
 
 
+def _person_mask_from_rgb(u8):
+    """uint8 HWC RGB -> (H, W) float 인물 마스크(0~1). 사람 없으면 None.
+
+    왜(Why) mediapipe 세그멘테이션을 안 쓰는가 (2026-09-30 실측):
+    `output_segmentation_masks=True` 는 mediapipe 0.10.33 에서 **네이티브
+    SIGABRT** 로 프로세스를 죽인다 —
+        image_frame.cc:415] Check failed: 1 == ChannelSize() (1 vs. 4)
+    SIGABRT 는 try/except 로 못 잡으므로 그저 "안전"인 척할 뿐, 실제로는
+    ComfyUI 서버 전체가 죽는다. 입력으로 막는 시도 3가지는 **전부 실패**했다
+    (2026-09-30 실측): 입력 홀수/짝수 판정(짝수 1814x1244 도 죽음), 512px
+    축소(896x1152 죽음), 정사각 패딩(1814x1243 죽음). 즉 내부 ROI 계산에 의존
+    하는 크래시라 **크기 기반 방어가 불가능**하다.
+
+    왜(Why) 33점으로 충분한가: 이 마스크는 "인물이 어디 있나" 라는 **부드러운
+    공간 가중치**로만 쓰인다(`_person_mask_for_latent` → interpolate →
+    avg_pool2d). 정밀 윤곽이 아니라면 뼈대를 따라 부드럽게 감쇠하는 것만으로
+    같은 역할을 한다. 게다가 이 노드가 노리는 게 포즈·해부 일관성이므로
+    포즈에서 만든 마스크가 더 일관되고, 전체 해상도라 축소 손실도 없다.
+    """
+    try:
+        import numpy as _np
+        pts = _pose_landmarks_from_tasks(u8)
+        if not pts:
+            return None
+        arr = _np.asarray(u8)
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        if h < 2 or w < 2:
+            return None
+        ys, xs = _np.mgrid[0:h, 0:w]
+        xs = (xs + 0.5) / float(w)
+        ys = (ys + 0.5) / float(h)
+        best = None
+        for (px, py) in pts[:33]:
+            d = (xs - float(px)) ** 2 + (ys - float(py)) ** 2
+            best = d if best is None else _np.minimum(best, d)
+        dist = _np.sqrt(best)
+        # 왜(Why) 반경을 **체격**으로 재나 (2026-09-30 실측): 처음엔 이미지 최대
+        # 거리로 정규화했다. 그 결과 배경까지 전부 0.5~0.7 을 받아 마스크가
+        # 99.9% 를 덮었고 "인물 영역만 당김" 이 사실상 동작하지 않았다
+        # (실측 cover=0.999). 뼈대 주변에만 가중치를 주려면 감쇠 거리가 **몸집
+        # 크기** 기준이어야 한다 — 랜드마크 bbox 의 긴 변을 쓴다.
+        box = subject_bbox(pts)
+        if box is None:
+            return None
+        body = max(box[2] - box[0], box[3] - box[1])
+        r = _MASK_FALLOFF * float(body)
+        # 왜(Why) 바닥/천장이 필요한가: bbox 만 믿으면 양쪽 끝에서 깨진다.
+        # ① 랜드마크가 몇 점에 몰리면 bbox->0 이 되어 마스크가 한 점으로
+        # 수축한다. ② 사람이 화면을 꽉 차면 bbox->1 이 되어 배경을 삼킨다.
+        r = min(max(r, _MASK_FALLOFF_MIN), _MASK_FALLOFF_MAX)
+        if r <= 0.0:
+            return None
+        mask = _np.clip(1.0 - dist / r, 0.0, 1.0)
+        return mask.astype(_np.float32)
+    except Exception as _e:
+        # 왜(Why) 넓은 except 를 쓰면서 반드시 로그를 남기나 (Jev 게이트
+        # exception_swallowing_silent_none P=0.86): 이 노드가 픽셀 공간 분석
+        # 은 예외를 삼키고 None 을 돌려주는 것이 설계다(프레임마다 죽이면
+        # 노드가 못 쓴다). 그런데 **로그가 없으면** "조용히 꺼진 것" 과
+        # "조용히 실패한 것" 이 구분되지 않는다 — 실제로 이 경로는 3개 버그
+        # (import 경로 / SIGABRT / 디코드 레이아웃)를 한참 숨겼다. 넓게 잡되
+        # 반드시 한 번 말한다.
+        _note_pose_error('_person_mask_from_rgb', _e)
+        return None
+
+
 def _person_mask_for_latent(vae, sampled, cache=None):
     """전체 latent -> 인물 마스크 (latent 해상도, 0~1). 실패하면 None.
 
@@ -298,10 +422,14 @@ def _person_mask_for_latent(vae, sampled, cache=None):
         if arr is None:
             return None
         u8 = (_np.clip(arr, 0.0, 1.0) * 255.0).astype(_np.uint8)
-        seg = _segmentation_from_tasks(u8)
+        seg = _person_mask_from_rgb(u8)
         if seg is None or seg.max() <= 0.01:
             return None
-        mask = (seg > 0.5).astype(_np.float32)
+        # 왜(Why) 임계 0.35 인가 (2026-09-30 실측): 감쇠 마스크를 그대로 쓰면
+        # 배경에도 0.2~0.4 가 남아 "인물 영역만" 이라는 목적이 흐려진다(실측
+        # 배경 평균 0.31). 0.35 로 이진화하면 인물 0.95 / 배경 0.31 로 갈리고
+        # 화면의 38%가 완전히 빠진다. 그 뒤 보간+avg_pool 으로 다시 부드럽게.
+        mask = (seg > _MASK_MIN_WEIGHT).astype(_np.float32)
         m = _t.from_numpy(mask[None, None]).to(
             device=sampled.device, dtype=sampled.dtype)
         _, _, lh, lw = sampled.shape
@@ -898,11 +1026,7 @@ def _decode_small(vae, latent, scale: float = 0.5):
             img = img.detach().cpu()
         arr = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
         arr = _np.asarray(arr, dtype=_np.float32)
-        if arr.ndim == 4:
-            arr = arr[0]
-        if arr.ndim != 3:
-            return None
-        return _np.clip(arr, 0.0, 1.0)
+        return _as_rgb_hwc(arr)
     except Exception:
         return None
 
@@ -984,7 +1108,12 @@ def analyze_reference_sheet(vae, ref_latent, sampled) -> dict:
             out["framing"] = round(framing_similarity(box_ref, box_s), 3)
             out["gate"] = out["framing"] >= FRAMING_GATE
         _release_vram()
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) 로그를 남기나 (2026-09-30 실측): 여기가 조용하면 시트 경로가
+        # "안 되는 이유"를 아예 말하지 않는다. 실제로 예외 하나가 시트 분석
+        # 전체를 삼켜 로그가 0건이었고, 밖에서는 그것이 "시트가 아니다" 와
+        # 구분되지 않았다.
+        _note_pose_error('analyze_reference_sheet', _e)
         _release_vram()
     return out
 
@@ -1003,6 +1132,12 @@ def _log_sheet_analysis(info: dict, ref_name: str) -> None:
                      f"않습니다 (폭비 {info.get('wreg', 0):.2f} ≤ "
                      f"{SHEET_MAX_WIDTH_RATIO}, 간격비 {info.get('greg', 0):.2f} "
                      f"≥ {SHEET_MIN_SPACING_RATIO} 필요)")
+            elif info.get("raw", 0) > 0:
+                # 없이(Why) 이 줄이 필요하단가: 패널이 1~2개이면 이전은 아누 말도 없었다. 사용자가 시트를 무에다고 판정 로그가 0개이면
+                # "시트가 아닌 걸 모 아잣체다" 와 "분석이 죽다" 가 구부되지 않는다
+                # (2026-09-30 실체로 정확히 이 혼동이 발일다).
+                _log(f"[GoRi Consistency Keeper] {ref_name} 시트 아닌 — "
+                     f"패널 {info['raw']}개만 검출 (최소 {SHEET_MIN_PANELS}개 필요)")
             return
         _log(f"[GoRi Consistency Keeper] {ref_name} 참조에서 {info['panels']}개 "
              f"패널 검출 — 캐릭터 시트 형태로 보입니다")
@@ -1158,6 +1293,14 @@ class GoRiConsistencyKeeper:
         _dcache = {}
         _mask = None if _multi else _person_mask_for_latent(
             vae, sampled, cache=_dcache)
+        # 왜(Why) 이 로그가 필요한가 (2026-09-30 실측): 마스크가 없으면 당김이
+        # **전역**으로 퍼져 배경까지 끌려간다. 그런데 마스크 유무가 로그로 안
+        # 알려지면 "영향 없음"과 "전역 당김"을 구별할 수 없다 — 실제로 vae 를
+        # 연결했는데 마스크가 조용히 None 이었던 상태를 로그 없이 한참 알지
+        # 못했다. 한 줄로 충분하다.
+        if vae is not None and _mask is None and not _multi:
+            _log("[GoRi Consistency Keeper] 인체 마스크 없음 — 전역 당김으로 "
+                 "진행합니다 (포즈 미검출 또는 VAE 미연결)")
         # 부위별 디테일 손실 감지: 원본 latent는 1회만 디코딩해 재사용한다.
         # 왜(Why): sampled/original을 매번 디코딩하면 VAE 비용이 2배다.
         _pm = None
