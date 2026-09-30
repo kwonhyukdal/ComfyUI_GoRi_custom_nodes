@@ -1494,5 +1494,63 @@ try:
 finally:
     ck._pose_landmarker = _orig_pm67
 
+# R68: landmark 모양이 경로마다 다르다 — bbox 가 조용히 죽지 않게.
+# 왜(Why) 별도 블록인가: 구 `mediapipe.solutions` 는 `.x`/`.y` **속성 객체**를,
+# tasks API 경로는 `(x, y)` **튜플**을 준다. `subject_bbox` 는 속성만 보고
+# 있어서 튜플이면 전부 None → bbox=None → 프레이밍 판정이 tasks 전환 이후
+# **조용히** 죽어 있었다. 33점은 제대로 나왔기 때문에 아무도 몰랐다.
+# 실측(2026-09-30 설치본 1.9.5): 33점 OK / subject_bbox None.
+class _LmObj:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+_coords68 = [(0.48 + 0.01 * i, 0.08 + 0.02 * i) for i in range(33)]
+_as_tuples68 = list(_coords68)
+_as_objects68 = [_LmObj(x, y) for x, y in _coords68]
+
+_bt68 = ck.subject_bbox(_as_tuples68)
+_bo68 = ck.subject_bbox(_as_objects68)
+check("R68: 튜플 landmark 에서도 bbox 가 나온다 (tasks 경로)",
+      _bt68 is not None, "None 이면 프레이밍 판정이 조용히 죽는다")
+check("R68: 속성 객체 landmark 에서도 bbox 가 나온다 (구 경로, 회귀 방지)",
+      _bo68 is not None, "None")
+check("R68: 두 경로가 같은 bbox 를 낸다 (모양만 다른 같은 데이터)",
+      _bt68 == _bo68, "tuple=%s object=%s" % (_bt68, _bo68))
+if _bt68:
+    _xs = [c[0] for c in _coords68]
+    _ys = [c[1] for c in _coords68]
+    # 함수가 의도적으로 ±0.02 여유를 준다(관절이 화면 끝에 닿는 것을 대비).
+    # 그 마진까지 포함해 확인한다 — 마진을 없애면 극단 컷에서 잘린다.
+    check("R68: bbox 가 33점 외곽 + 의도된 ±0.02 여유와 일치",
+          abs(_bt68[0] - (min(_xs) - 0.02)) < 1e-6
+          and abs(_bt68[1] - (min(_ys) - 0.02)) < 1e-6
+          and abs(_bt68[2] - (max(_xs) + 0.02)) < 1e-6
+          and abs(_bt68[3] - (max(_ys) + 0.02)) < 1e-6,
+          "%s vs (%s,%s,%s,%s)" % (_bt68, min(_xs) - 0.02, min(_ys) - 0.02,
+                                   max(_xs) + 0.02, max(_ys) + 0.02))
+    check("R68: bbox 가 0~1 정규화 범위를 넘지 않음",
+          0.0 <= _bt68[0] < _bt68[2] <= 1.0 and 0.0 <= _bt68[1] < _bt68[3] <= 1.0,
+          str(_bt68))
+    check("R68: 프레이밍 유사도가 실제로 산출된다",
+          ck.framing_similarity(_bt68, _bo68) > 0.99,
+          str(ck.framing_similarity(_bt68, _bo68)))
+# 0 이하는 좌표 무효 처리이므로 실제 bbox 가 0 에 붙으면 안 된다
+_z68 = ck.subject_bbox([(0.5, 0.0)] * 8 + [(0.6, 0.2)] * 25)
+check("R68: 0 좌표는 무효 처리되어 bbox 에 안 들어간다",
+      _z68 is not None and _z68[1] > 0.0, str(_z68))
+check("R68: landmark 가 None 이면 None", ck.subject_bbox(None) is None)
+check("R68: 형태가 아무것도 아니면 예외 없이 None",
+      ck.subject_bbox([object(), object()]) is None)
+
+# tasks 반환값 형태가 바뀌면 조용히 또 죽는다 — 현재 계약을 고정한다
+_src68 = open(os.path.join(PKG, "consistency_keeper.py"), encoding="utf-8").read()
+check("R68: tasks 경로가 (x, y) 튜플을 돌려주는 현재 계약",
+      "return [(float(p.x), float(p.y)) for p in pts[:33]]" in _src68,
+      "반환 형태가 바뀌면 subject_bbox 를 같이 고쳐야 한다")
+check("R68: subject_bbox 가 튜플·리스트를 분기한다",
+      "isinstance(lm, (tuple, list))" in _src68)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

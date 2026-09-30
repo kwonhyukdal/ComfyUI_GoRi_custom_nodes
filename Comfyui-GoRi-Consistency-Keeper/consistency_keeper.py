@@ -804,6 +804,14 @@ def subject_bbox(landmarks):
     왜(Why) w, h 인자를 뺐나:landmark 좌표는 이미 **정규화(0~1)** 라서
     픽셀 크기가 필요 없다. 받던 인자는 `w < 1` 가드에만 쓰였고 실제로는
     `box_s`에 ref_arr의 너비를 넘기는 실수도 있었다(의도 뒤섞임).
+
+    왜(Why) 튜플과 객체 둘 다 받는가: landmark 의 모양이 **경로마다 다르다.**
+    구 `mediapipe.solutions` 는 `.x`/`.y` 속성 있는 객체를 줬고, tasks API
+    경로(`_pose_landmarks_from_tasks`)는 `(x, y)` 튜플을 준다. 속성만 보면
+    튜플에서는 전부 None 이 되어 조용히 **bbox=None** 이 되고, 그 결과 프레이밍
+    판정이 tasks 전환(2026-09-30) 이후 조용히 죽어 있었다 — 실측으로 확인했다
+    (33점은 제대로 나오는데 bbox만 None). 한쪽만 받던 어느 쪽이든 조용히 죽으므로
+    둘 다 받는다.
     """
     try:
         import numpy as _np
@@ -811,8 +819,11 @@ def subject_bbox(landmarks):
             return None
         xs, ys = [], []
         for lm in landmarks:
-            x = getattr(lm, "x", None)
-            y = getattr(lm, "y", None)
+            if isinstance(lm, (tuple, list)) and len(lm) >= 2:
+                x, y = lm[0], lm[1]
+            else:
+                x = getattr(lm, "x", None)
+                y = getattr(lm, "y", None)
             if x is None or y is None:
                 continue
             if float(x) <= 0.0 or float(y) <= 0.0:
