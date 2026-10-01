@@ -2036,5 +2036,112 @@ try:
 finally:
     ck._TASKS_LANDMARKER = _r74_real_lm
 
+# ---------------------------------------------------------------------------
+# R75: 판정층을 강도에 연결 (2026-10-01)
+#
+# (왜) 이 테스트의 핵심은 **기본 경로가 그대로**라는 것이다. trust_gate 가 꺼진
+# 동안 `detail_boost` 는 allow=None 이고, 그 결과는 allow 를 넣지 않았을 때와
+# 바이트 단위로 같아야 한다. opt-in 을 붙이면서 기본을 바꾸면, 사용자는
+# "왜 결과가 달라졌지" 를 설명할 수 없게 된다.
+# ---------------------------------------------------------------------------
+_say("-- 판정층 → 강도 연결 (2026-10-01) --")
+
+
+def _r75_parts():
+    """원본은 에지가 강하고 결과는 뭉개진 합성 parts 맵."""
+    return {"original": {"edge": [0.9] * 33, "xy": [(0.5, 0.5)] * 33,
+                         "pts": _r74_pts()},
+            "sampled": {"edge": [0.1] * 33, "xy": [(0.5, 0.5)] * 33,
+                        "pts": _r74_pts()}}
+
+
+def _r75_low(low_idx):
+    """지정한 관절만 가시성을 0.02 로 내린 landmark."""
+    p = _r74_pts()
+    for i in low_idx:
+        p[i] = (0.5, 0.4, 0.02)
+    return p
+
+
+_p = _r75_parts()
+
+# --- 하위호환: allow 를 주지 않으면 예전과 같다 ---
+_a_none = ck.detail_boost(_p, _p, 0.3)[0]
+_a_null = ck.detail_boost(_p, _p, 0.3, allow=None)[0]
+check("R75: allow=None 은 인자를 안 준 것과 같다 (기본 경로 보존)",
+      _a_none is not None and bool((_a_none == _a_null).all()))
+
+_all = {k: 1.0 for k in ck.PART_REGIONS}
+_a_all = ck.detail_boost(_p, _p, 0.3, allow=_all)[0]
+check("R75: 전부 허용도 allow=None 과 같다 (강도 같음)",
+      _a_all is not None and bool((_a_none == _a_all).all()))
+
+# --- 실제로 올라가는 부위가 있는가 (대조군) ---
+# (왜) face 와 비교하지 않는가: 합성 parts 는 33점이 전부 에지 0.9 이라
+# DETAIL_CRITICAL 에 든 부위가 **전부** 올라간다. base 강도 0.3 과 비교해야 한다.
+check("R75: 대조군에서 부위별 boost 가 실제로 일어난다",
+      _a_none is not None and float(_a_none[15]) > 0.3
+      and abs(float(_a_none[15]) - 0.48) < 1e-6,
+      "wrist %.3f (base 0.30)" % float(_a_none[15]))
+
+# --- 한 부위를 막으면 그 부위만 base 로 남는다 ---
+_no_hand = dict(_all)
+_no_hand["hand_left"] = 0.0
+_a_nh = ck.detail_boost(_p, _p, 0.3, allow=_no_hand)[0]
+check("R75: 막은 부위는 base 강도를 유지한다",
+      abs(float(_a_nh[15]) - 0.3) < 1e-6, "%.4f" % float(_a_nh[15]))
+check("R75: 막지 않은 부위는 여전히 올라간다",
+      float(_a_nh[25]) > 0.3, "%.4f" % float(_a_nh[25]))
+
+# --- 허용도 매핑 ---
+_al = ck.judge_region_allowance(ck.judge_points(_r75_low((25,))))
+check("R75: 판정 없음(None) 은 제한 없음",
+      ck.judge_region_allowance(None) is None)
+check("R75: 빈 판정도 제한 없음", ck.judge_region_allowance({}) is None)
+check("R75: 흐린 무릎이 속한 쪽 다리만 막힌다",
+      _al is not None and _al["leg_left"] == 0.0, str(_al))
+check("R75: 반대쪽 다리는 살아있다 (부위 단위 판정)",
+      _al is not None and _al["leg_right"] == 1.0, str(_al))
+check("R75: 얼굴은 판정 대상이 아니라 항상 허용",
+      _al is not None and _al["face"] == 1.0, str(_al))
+check("R75: 멀쩡한 관절로 이루어진 몸통은 허용",
+      _al is not None and _al["torso"] == 1.0, str(_al))
+
+# 손목(15)은 hand_left 과 arm_left 양쪽에 속한다 -> 양쪽 다 막혀야 한다
+_al2 = ck.judge_region_allowance(ck.judge_points(_r75_low((15,))))
+check("R75: 흐린 손목은 손과 팔 양쪽을 막는다",
+      _al2 is not None and _al2["hand_left"] == 0.0
+      and _al2["arm_left"] == 0.0, str(_al2))
+check("R75: 반대편은 막히지 않는다", _al2 is not None and _al2["hand_right"] == 1.0)
+
+# 전부 잘 보이면 전부 허용
+_al3 = ck.judge_region_allowance(ck.judge_points(_r74_pts()))
+check("R75: 전부 잘 보이면 전부 허용 (판정이 막지 않는다)",
+      _al3 is not None and all(v == 1.0 for v in _al3.values()), str(_al3))
+
+# 미판정(landmark 없음)도 전부 허용이어야 조용히 막히지 않는다
+_al4 = ck.judge_region_allowance(ck.judge_points(None))
+check("R75: 미검출 판정은 전부 허용 (조용히 막지 않는다)",
+      _al4 is not None and all(v == 1.0 for v in _al4.values()), str(_al4))
+
+# --- 방어: 형식이 잘못된 allow 는 "제한 없음" 이 된다 ---
+# (왜) fail-open 인가: 해석 불가 값 하나로 부위를 막으면 그 오타가 조용히
+# region 보강 전체를 꺼버린다. 오타 때문에 기능을 잃는 게 막는 것보다 나쁘다.
+# 판정값(0.0/1.0)은 항상 깨끗한 float 이므로 이 경로는 외부 호출자에만 reachable.
+for _bad in ({"hand_left": "x"}, {"hand_left": None}, "전체문자열", 12345, [1, 2]):
+    _out = ck.detail_boost(_p, _p, 0.3, allow=_bad)[0]
+    check(f"R75: 잘못된 allow({type(_bad).__name__}) 는 제한 없음과 같은 결과",
+          _out is not None and bool((_out == _a_none).all()),
+          "제한 없음과 다름" if _out is not None else "None")
+
+# --- 노드 계약: trust_gate 가 기본 False ---
+_its = ck.GoRiConsistencyKeeper.INPUT_TYPES()
+check("R75: trust_gate 가 입력에 있다", "trust_gate" in _its.get("optional", {}))
+check("R75: trust_gate 기본값이 False (opt-in)",
+      _its["optional"]["trust_gate"][1].get("default") is False,
+      str(_its["optional"]["trust_gate"]))
+check("R75: run() 이 trust_gate 를 받는다",
+      "trust_gate" in ck.GoRiConsistencyKeeper.run.__code__.co_varnames)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

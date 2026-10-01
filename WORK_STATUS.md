@@ -601,3 +601,60 @@ public_api_impact         judgment 블록 additive P=0.84 / landmarker 변경
 모두 HEAD 에 있던 손상이고 주석만이라 기능 영향은 없다. 이번 diff 에는 없다.
 깨진 바이트를 옮겨 적지 않고 **뜻으로만** 적었다 — 옮겨 적으면 문서도 깨진다.
 `camera_Logic.md` 에도 한자 2곳, `test_node.py` 에도 3곳이 같은 방식으로 남아 있다.
+
+### 10-12. 강도 연결 — `trust_gate` (2026-10-01, R75)
+
+판정이 실제 결과물에 닿았다. **기본은 꺼짐**이고, 켠 경우에만 영역별로
+다르게 당긴다.
+
+```
+기본 OFF  detail_boost(allow=None) → 기존과 바이트 단위로 동일
+켜면 ON    원본 landmark → judge_points → judge_region_allowance
+          → detail_boost(allow=...) 가 막힌 부위를 건너뛴다
+```
+
+**추가 디코드·추가 추론이 없다.** 이미 하던 검출을 버리지 않고 visibility만
+함께 받아온다. `_part_detail_map` 이 각 latent 를 디코드하고 포즈를 검출하므로
+거기서 3-튜플(`pts`)을 함께 보관하면 끝이다.
+
+```
+_part_detail_map 반환에 "pts" 추가 (x, y, visibility 3-튜플 × 33)
+"xy" 는 2-튜플 그대로 — _apply_region_strength 가 `for (px, py) in xy` 로
+        엄격 언팩하므로 3-튜플을 넣으면 죽는다. 두 계약을 함께 지킨다.
+```
+
+**부위 정의를 두 개 만들지 않았다.** `judge_region_allowance` 는 기존
+`PART_REGIONS` 에 판정 대상 관절 인덱스를 **교집합**해서 쓴다. 부위 표가 두 개
+생기면 나중에 한쪽만 고치는 사고가 난다.
+
+```
+PART_REGIONS        손목 15 → hand_left(15,17,19,21) 와 arm_left(11,13,15) 둘 다
+왼쪽 무릎 25 → leg_left(23,25,...) 만 막힘. leg_right 는 26 이 멀쩡해서 통과
+얼굴(0~10)   → 판정 대상이 아니라 항상 허용. 사용자가 "원본 일관성을 따른다" 고
+                정한 결정이라, 코드가 뒤집으면 안 된다
+```
+
+**내가 만들어서 고친 버그**: 처음에 `allow` 항목이 형식 오류면 그 부위를
+건너뛰게 짰다. 그러면 **오타 하나가 region 보강 전체를 조용히 꺼버린다**
+(silent degradation). 판정값은 항상 0.0/1.0 이므로 이 경로는 외부 호출자에만
+닿지만, 방어를 못 해두는 건 게이트 규칙을 어기는 셈이다. → 게이트를 루프 전에
+한 번에 청소하고, 해석 불가 항목은 **제한 없음**으로 두고 1회 로그한다.
+fail-open 인 이유: 오타로 부위를 막는 것이 기능을 잃는 것보다 나쁘다.
+
+**테스트**: 키퍼 297 → **320** (R75 23개 추가), FAIL 0.
+카메라 1025 / 팩 16 유지.
+
+**Jev 게이트 결과 (2026-10-01, R75)**
+```
+전체            advisory, exit 0  (게이트 실패 0건)
+prompt_or_output_assembly_change  안 걸림 — 기본 경로를 그대로 둔 opt-in 이라
+                                  pref 지침이 그대로 적용됨
+public_api_impact  behavioral P=0.78 / 0.65 / 0.53 / 0.51 / 0.49 → 전부 advisory
+                   (allow=True 일 때 결과가 실제로 달라진다. 의도한 변화다)
+max-hunks      11 hunks > 기본 10 → exit 2. 판정이 아니라 인프라 한도라
+                --max-hunks 20 으로 올려 다시 돌렸다
+```
+
+**아직 하지 않은 것**: `trust_gate` 를 켠 상태의 실측. 이 노드는 아직
+ComfyUI 를 실제로 돌려 본 적이 없으므로 **결과물의 차이가 있는지는 아직 모른다.**
+다음 작업이 이것이다.

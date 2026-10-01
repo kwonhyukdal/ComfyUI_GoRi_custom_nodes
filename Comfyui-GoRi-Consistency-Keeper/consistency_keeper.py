@@ -671,17 +671,21 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
             if em is None:
                 continue
             u8 = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
-            pts = _pose_landmarks_from_tasks(u8)
-            if not pts:
+            pts3 = _pose_landmarks_from_tasks(u8, with_visibility=True)
+            if not pts3:
                 continue
             edge = [0.0] * 33
             xy = []
-            for i, (px, py) in enumerate(pts[:33]):
+            for i, (px, py, pv) in enumerate(pts3[:33]):
+                # xy 는 **2-튜플 그대로** 둔다. `_apply_region_strength` 가
+                # `for (px, py) in xy` 로 엄격 언팩하므로 3-튜플을 넣으면 죽는다.
                 xy.append((px, py))
                 cx = min(15, max(0, int(px * 16)))
                 cy = min(15, max(0, int(py * 16)))
                 edge[i] = float(em[cy, cx])
-            out[name] = {"edge": edge, "xy": xy}
+            # pts 는 판정층이 그대로 받는 3-튜플(좌표 + 가시성).
+            # 좌표를 다시 맞추는 자리(join)를 두지 않기 위해 원본을 함께 둔다.
+            out[name] = {"edge": edge, "xy": xy, "pts": list(pts3[:33])}
             del em, u8
         except Exception:
             continue
@@ -798,7 +802,8 @@ DETAIL_CRITICAL = ("hand_left", "hand_right", "leg_left", "leg_right",
 
 
 
-def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35):
+def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35,
+                 allow=None):
     """부위별 adaptive 강도 → (강도 배열|None, 로그 문자열).
 
     원본이 더 살아있는(=에지 밀도가 높은) 부위만 강도를 올려 그 부위를
@@ -808,6 +813,15 @@ def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35):
     **중요**: 이 함수는 "손가락이 5개여야 한다"를 판정하지 않는다. latent에
     텍스트는 개입하지 않는다. 산술로 하는 것은 단 하나 —
     "원본과 이 부위가 얼마나 달라졌는가"다. 원본이 정확할 때만 효과가 있다.
+
+    왜(Why) allow 가 있나 (2026-10-01): 위 docstring의 "원본이 정확할 때만"을
+    실제로 지키는 장치다. 이전까지는 **에지가 0 인지**로 대신 판단했는데
+    그것은 "안 보인 것"과 "없어진 것"을 구분하지 못한다. 판정층(work_status
+    10절)이 판정을 내려주면 그걸 받는다.
+
+    왜(Why) 기본값이 None 인가: 판정이 없으면 **제한 없이** 기존대로 동작해야
+    한다. opt-in 구조라 켜기 전까지 결과물이 바뀌지 않는다.
+    allow 는 {부위명: 0.0|1.0} — `judge_region_allowance` 가 만든다.
     """
     try:
         import numpy as _np
@@ -819,8 +833,32 @@ def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35):
             return None, ""
         arr = _np.full(len(ref), float(strength), dtype=_np.float32)
         boost_list = []
+        # 왜(Why) 게이트를 **먼저** 정규화하나: 안에서 형식이 틀린 값을 만날 때
+        # 그 부위만 건너뛰면, 한 항목의 오타가 **전체 기능을 조용히 꺼버린다**
+        # (silent degradation). 그래서 한 번에 청소한다. 해석 불가 항목은
+        # "제한 없음" 으로 본다 — 오타로 부위를 막아버리는 게 더 나쁘다.
+        # 그리고 그 사실은 한 번 말한다.
+        gate = None
+        if allow is not None:
+            gate = {}
+            if isinstance(allow, dict):
+                _dropped = 0
+                for _k, _v in allow.items():
+                    try:
+                        gate[str(_k)] = float(_v)
+                    except (TypeError, ValueError):
+                        _dropped += 1
+                if _dropped:
+                    _log(f"[GoRi Consistency Keeper] ⚠ 판정 허용도에서 해석 불가 "
+                         f"항목 {_dropped}개를 무시했습니다 (제한 없음으로 처리)")
+            else:
+                gate = None
         for region, idxs in PART_REGIONS.items():
             if region not in DETAIL_CRITICAL:
+                continue
+            # 판정에서 미판정(allow 0)인 부위는 원본을 신뢰하지 못하므로
+            # 건드리지 않는다. 올리는 것이지 줄이는 것이 아니므로 continue.
+            if gate is not None and gate.get(region, 1.0) <= 0.0:
                 continue
             r = sum(ref[i] for i in idxs) / len(idxs)
             s = sum(samp[i] for i in idxs) / len(idxs)
@@ -1238,7 +1276,8 @@ def judge_points(pts):
         checks.append({"check_id": "pose_detected", "ok": False,
                        "detail": "landmark 없음"})
         return {"verdict": _JUDGE_UNDETERMINED, "confidence": 1.0,
-                "checks": checks, "low_visibility": [], "frame": None}
+                "checks": checks, "low_visibility": [], "low_indices": [],
+                "frame": None}
 
     checks.append({"check_id": "pose_detected", "ok": True, "detail": ""})
 
@@ -1247,10 +1286,12 @@ def judge_points(pts):
         checks.append({"check_id": "body_frame", "ok": False,
                        "detail": "몸통 길이가 하한 이하거나 퇴화"})
         return {"verdict": _JUDGE_UNDETERMINED, "confidence": 1.0,
-                "checks": checks, "low_visibility": [], "frame": None}
+                "checks": checks, "low_visibility": [], "low_indices": [],
+                "frame": None}
     checks.append({"check_id": "body_frame", "ok": True, "detail": ""})
 
     low = []
+    low_idx = []
     worst = 1.0
     for idx, name in _JUDGE_CORE_LANDMARKS:
         lm = tri[idx] if idx < len(tri) else None
@@ -1259,6 +1300,7 @@ def judge_points(pts):
             worst = vis
         if vis < _JUDGE_VIS_MIN:
             low.append(name)
+            low_idx.append(idx)
     vis_ok = not low
     checks.append({
         "check_id": "core_visibility",
@@ -1270,7 +1312,43 @@ def judge_points(pts):
     # confidence 는 "그 판정을 내리는 근거의 세기"다. intact 면 가장 흐린
     # 관절의 가시성이 곧 근거이고, undetermined 면 그것이 미판정의 근거다.
     return {"verdict": verdict, "confidence": max(0.0, min(1.0, worst)),
-            "checks": checks, "low_visibility": low, "frame": frame}
+            "checks": checks, "low_visibility": low, "low_indices": low_idx,
+            "frame": frame}
+
+
+def judge_region_allowance(verdict):
+    """판정 dict -> 부위별 당김 허용도 {부위명: 0.0|1.0}. 판정 없으면 None.
+
+    왜(Why) 부위 정의를 새 로 만들지 않는가: 프로젝트에 이미 `PART_REGIONS` 가
+    있고 `detail_boost` 가 그 순서를 그대로 순회한다. 관절 인덱스를 **그 표에
+    그대로 물려서** 교집합을 내는 것이 새 부위 체계를 만드는 유일한 방법이다.
+    두 개의 부위 표가 생기면 이후 갱신할 때 한쪽만 고치는 사고가 난다.
+
+    왜(Why) 판정 대상이 아닌 부위는 1.0 인가: 얼굴(0~10)은 사용자가 "원본
+    일관성을 따른다" 고 정해서 판정에서 제외했다(10절). 그 부위를 0 으로 주면
+    얼굴 신원 복원이 꺼져 버린다 — 사용자가 정한 결정을 코드가 뒤집는 셈이다.
+    판정하지 않는다는 것은 **허용**이라는 뜻으로 쓴다.
+
+    반환이 None 이면 판정이 없다는 뜻이고, 호출부는 None 을 "제한 없음" 으로
+    읽어 기존 동작을 그대로 둔다 (opt-in 구조).
+    """
+    if not verdict:
+        return None
+    low = set()
+    for i in (verdict.get("low_indices") or ()):
+        try:
+            low.add(int(i))
+        except (TypeError, ValueError):
+            continue
+    core = set(idx for idx, _n in _JUDGE_CORE_LANDMARKS)
+    out = {}
+    for region, idxs in PART_REGIONS.items():
+        touched = core & set(idxs)
+        if not touched:
+            out[region] = 1.0          # 판정 대상 아님 → 허용
+        else:
+            out[region] = 0.0 if (touched & low) else 1.0
+    return out
 
 
 def judge_reference_trust(u8):
@@ -1651,11 +1729,17 @@ class GoRiConsistencyKeeper:
                 "original_latent": ("LATENT",),
                 "camera_latent": ("LATENT",),
                 "vae": ("VAE",),
+                # 판정층 on/off (2026-10-01). 기본 False = 기존 동작 그대로.
+                # 왜(Why) 기본을 끄는가: 켰을 때 결과물이 달라지는 게 이 위젯의
+                # 존재 이유인데, 꺼놓고 모르고 돌아가는 노드는 "왜 결과가 바뀌지
+                # 않는지"를 설명할 수 없는 노드다. 켜는 쪽이 그 판단을 한다.
+                "trust_gate": ("BOOLEAN", {"default": False}),
             },
         }
 
     def run(self, sampled_latent, strength_camera=0.2, strength_original=0.2,
-            original_latent=None, camera_latent=None, vae=None):
+            original_latent=None, camera_latent=None, vae=None,
+            trust_gate=False):
         sampled = _get_samples(sampled_latent)
         if sampled is None:
             raise ValueError("(GoRi) Consistency Keeper: sampled_latent이 비어 있음")
@@ -1803,7 +1887,28 @@ class GoRiConsistencyKeeper:
             # 부위별 상향은 전역 결과에 **더하는 추가분**이다.
             # eff == 0 이면 계산하지 않는다(0*inf = nan 방지).
             if name == "original" and _pm and eff > 0:
-                _darr, _regions = detail_boost(_pm, _pm, eff)
+                _allow = None
+                if trust_gate:
+                    # 판정층 1층(work_status 10절). 원본 쪽 landmark 로
+                    # "이 부위를 원본에서 당겨와도 되는가" 를 정한다.
+                    # 판정이 없거나 vis 가 없으면 _allow=None = 제한 없음,
+                    # 즉 기존 동작으로 떨어진다(조용히 막지 않는다).
+                    _pts = (_pm.get("original") or {}).get("pts")
+                    if _pts:
+                        _verdict = judge_points(_pts)
+                        _allow = judge_region_allowance(_verdict)
+                    if _allow is None:
+                        _log("[GoRi Consistency Keeper] 판정 게이트 켰지만 원본 "
+                             "landmark 가 없어 제한 없이 진행합니다")
+                    else:
+                        _blocked = sorted(k for k, v in _allow.items()
+                                          if float(v) <= 0.0)
+                        _verdict_name = (_verdict.get("verdict")
+                                         if _verdict else "?")
+                        _log("[GoRi Consistency Keeper] 판정 게이트 "
+                             f"(verdict={_verdict_name}) — 미확인 부위 "
+                             f"{_blocked if _blocked else '없음'}")
+                _darr, _regions = detail_boost(_pm, _pm, eff, allow=_allow)
                 if _darr is not None:
                     try:
                         _inc = _apply_region_strength(
