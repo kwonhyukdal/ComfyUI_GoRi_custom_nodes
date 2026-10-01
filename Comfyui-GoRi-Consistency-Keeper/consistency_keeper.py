@@ -1066,6 +1066,54 @@ DETAIL_CRITICAL = ("hand_left", "hand_right", "leg_left", "leg_right",
 _NO_BOOST_NOTED = False
 
 
+_DETAIL_DIR_NOTED = False
+_DENS_PX = 640 * 360
+
+
+def _probe_detail_direction(vae, sampled, orig_ref, out):
+    """원본을 당겼을 때 디테일이 늘는지 줄는지 **재서** 말한다 (미해결 5-1).
+
+    왜(Why) 이게 먼저인가: 부위별 상향은 "원본은 살아있는데 결과가 뭉개졌다" 는
+    가정 위에 세워졌다. 그 가정이 **거짓이면** 설계 방향이 통째로 뒤집힌다.
+    어제까지는 "뭉개진다" 는 쪽을 손대지 않고 있었다.
+    """
+    global _DETAIL_DIR_NOTED
+    if _DETAIL_DIR_NOTED or vae is None:
+        return
+    try:
+        def _dens(lat):
+            # 왜(Why) `_decode_latent_rgb` 인가 (2026-10-01): `_decode_capped`
+            # 는 **torch 텐서 (1,C,H,W)** 를 돌려준다. `_edge_map_from_rgb` 는
+            # numpy **HWC 배열**을 받는다. 다른 디코더를 썼다가
+            # `too many indices for tensor of dimension 4` 로Measurement가
+            # 조용히 실패했다. 이 함수가 RGB numpy 를 반환하는 계약이다.
+            arr = _decode_latent_rgb(vae, lat)
+            if arr is None:
+                raise RuntimeError("디코드 결과 없음")
+            em = _edge_map_from_rgb(arr)
+            if em is None:
+                raise RuntimeError("에지맵 없음")
+            return float(em.mean())
+        _s = _dens(sampled)
+        _r = _dens(orig_ref)
+        _o = _dens(out)
+    except Exception as e:
+        # 왜(Why) 예외를 말하나: 조용히 `return` 하니 "측정이 안 됐다" 와
+        # "측정 결과가 안 바뀌었다" 를 구분할 수가 없었다. 사흘 만에 두 번째다.
+        _DETAIL_DIR_NOTED = True
+        _log(f"[GoRi Consistency Keeper] 물리 방향 실측 실패 "
+             f"({type(e).__name__}: {str(e)[:90]}) — 판정 보류")
+        return
+    _DETAIL_DIR_NOTED = True
+    _d_out = (_o - _s) / _s * 100.0 if _s > 1e-9 else 0.0
+    _d_ref = (_o - _r) / _r * 100.0 if _r > 1e-9 else 0.0
+    _verdict = ("당기면 살아난다" if _d_out > 0 else "당기면 뭉개진다")
+    _log("[GoRi Consistency Keeper] 물리 방향 실측 "
+         f"시본 {_s:.4f} / 원본 {_r:.4f} / 결과 {_o:.4f} — "
+         f"결과는 시본 대비 {_d_out:+.1f}%, 원본 대비 {_d_ref:+.1f}% "
+         f"⇒ {_verdict}")
+
+
 def _note_no_boost(worst, region, thresh):
     """부위별 상향이 없었던 이유를 **한 번만** 말한다 (조용한 무동작 방지)."""
     global _NO_BOOST_NOTED
@@ -2261,5 +2309,6 @@ class GoRiConsistencyKeeper:
                         # 한참 알 수 없었다.
                         _log(f"[GoRi Consistency Keeper] ⚠ 부위별 복원 실패 "
                              f"({type(e).__name__}: {e}) — 전역 당김만 적용")
+        _probe_detail_direction(vae, sampled, _orig_ref, out)
         _release_vram()
         return ({"samples": out},)
