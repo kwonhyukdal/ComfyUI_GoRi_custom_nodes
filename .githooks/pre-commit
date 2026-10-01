@@ -1,0 +1,43 @@
+#!/bin/sh
+# Commit gate: behaviour changed without the status doc changing.
+#
+# Why this exists (2026-10-01): working one long session kept producing
+# confident wrong conclusions - denoise, the switch and the sheet verdict
+# were each settled by guessing first and measuring later. WORK_STATUS.md
+# exists to stop that, but a doc nobody is forced to touch goes stale, and a
+# stale doc is worse than none because it reads as authoritative.
+#
+# Pure ASCII on purpose: git runs this under sh, and a hook carrying UTF-8
+# can be mis-split by a non-UTF-8 console the same way a .bat can.
+#
+# Bypass deliberately:  git commit --no-verify
+# A blocked commit is a prompt to write down what changed, not a wall.
+
+STATUS_DOC="WORK_STATUS.md"
+
+# Nothing staged at all (rare, but do not interfere).
+staged="$(git diff --cached --name-only)"
+[ -z "$staged" ] && exit 0
+
+# The status doc rides along: nothing to enforce.
+echo "$staged" | grep -qx "$STATUS_DOC" && exit 0
+
+# No python staged: docs or assets only, nothing to enforce.
+echo "$staged" | grep -q '\.py$' || exit 0
+
+{
+  echo ""
+  echo "BLOCKED: a .py file is staged but $STATUS_DOC is not."
+  echo ""
+  echo "Staged:"
+  echo "$staged" | sed 's/^/  /'
+  echo ""
+  echo "Update $STATUS_DOC with what changed and why, then stage it:"
+  echo "  git add $STATUS_DOC"
+  echo ""
+  echo "If this change genuinely needs no doc update, bypass on purpose:"
+  echo "  git commit --no-verify"
+  echo ""
+} >&2
+
+exit 1

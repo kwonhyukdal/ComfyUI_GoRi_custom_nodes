@@ -172,6 +172,25 @@ AGENTS.md        모든 AI 가 자동으로 읽는 작업 규칙. "작업 전 WO
 WORK_STATUS.md   진행상황·설계 결정·미해결·실측 수치의 단일 진실 원천.
 ```
 
+### 6-1. 커밋 게이트 (pre-commit 훅)
+
+`AGENTS.md` 가 "갱신하라"고 말해도 규칙은 지키고 싶을 때만 지켜진다. 그래서 훅으로 강제한다.
+
+```
+설치        install_hook.bat 실행 (clone 마다 1회)
+동작        .py 가 stage 면 WORK_STATUS.md 도 stage 되어야 커밋 통과
+무시        git commit --no-verify   ← 의도적으로 우회할 때
+멱등        문서만 바꾸거나, WORK_STATUS.md 가 함께 올라가면 통과
+```
+`.git/hooks` 는 git 이 추적하지 않아 fresh clone 에는 훅이 없다 → `install_hook.bat` 필요.
+
+**검증 완료 (실측 3케이스)**
+```
+.py 만 stage                        → 차단 (exit 1)  ✅
+git commit --no-verify              → 통과 (exit 0)  ✅
+install_hook.bat 만 (문서성)        → 통과 (exit 0)  ✅
+```
+
 ---
 
 ## 7. AI 가 이 저장소에서 작업할 때의 규칙
