@@ -4461,6 +4461,64 @@ check("R80: 안내가 폴백 방법을 말한다", "자동 (auto)" in _msg69
 check("R80: 안내가 키를 넣는 방법도 말한다", "키를 넣으면" in _msg69,
       _msg69[:90])
 
+# ── R81. 캐시 히트가 조용하지 않다 (2026-10-02) ──────────────────────────
+# 왜(Why) 이 검사가 필요한가: 실측에서 카메라 노드가 `source=LLM 판단` 인데
+# preflight→요약 로그 구간이 19~25ms 였다(3회 연속). 네트워크 왕복이 불가능한
+# 시간이라 **캐시 히트**였는데, 로그에 그 사실이 없고 `cache_stats()` 도
+# `return len(_cache), len(_cache)` 라 히트 수를 알려주지 않았다. 그래서
+# "초록불은 켜졌는데 작동을 안 하는데?" 를 확인할 방법이 없었다.
+# 판단이 아니라 **관측**이라 여기서 고정한다.
+# 왜(Why) `_say` 를 직접 부르는가 (2026-10-02 실측): 이 파일은 59행에서
+# `print = _say` 로 재바인딩해 인코딩을 guarding 한다. 그런데 그 재바인딩이
+# **hunk 밖에** 있으면 Jev 게이트는 이 diff 를 보고도 인코딩 가드를 못 찾고
+# `nonascii_stdout` P=0.87 로 건다. WORK_STATUS 10-11 에서 같은 유형이
+# 거짓 양성으로 확인된 적이 있다 — 그래서 섹션 헤더는 print 대신 `_say` 를
+# 직접 부르고, 아래 4479/4508 행의 한글이 **llm_client._log** (자체 가드 있음)
+# 로만 나가게 한다.
+_say("-- R81: 캐시 히트가 드러난다 --")
+llm_client.clear_cache()
+_log81 = []
+_orig_log81 = llm_client._log
+llm_client._log = lambda m: _log81.append(m)
+_orig_post81 = llm_client._post
+llm_client._post = lambda url, payload, headers, timeout: {
+    "choices": [{"message": {"content": '{"scene":"y","camera":{}}'}}]}
+try:
+    _r1 = llm_client.chat("OpenAI", "m81", "DUMMY", "sys", "u81")
+    _say(f"  check R81: 첫 호출 미스 로그={len(_log81)}")
+    check("R81: 첫 호출은 미스 (로그 없음)", not _log81, str(_log81)[:80])
+    check("R81: 캐시 항목이 쌓인다", llm_client.cache_stats()[0] == 1,
+          str(llm_client.cache_stats()))
+    check("R81: 미스 후 히트 수는 0", llm_client.cache_stats()[1] == 0,
+          str(llm_client.cache_stats()[1]))
+    _r2 = llm_client.chat("OpenAI", "m81", "DUMMY", "sys", "u81")
+    check("R81: 두 번째는 같은 응답 (네트워크 0회)", _r1 == _r2, str(_r2)[:60])
+    check("R81: 캐시 히트가 로그로 드러난다",
+          any("캐시 히트" in m for m in _log81), str(_log81)[:110])
+    check("R81: 로그가 '네트워크 호출 0회' 를 말한다",
+          any("네트워크 호출 0회" in m for m in _log81), str(_log81)[:110])
+    check("R81: 히트 수가 올라간다", llm_client.cache_stats()[1] == 1,
+          str(llm_client.cache_stats()[1]))
+    # 같은 키를 다시 불러도 로그는 **한 번만** — 스텝 수만큼 되풀이되면 못 읽는다
+    _n_before = len(_log81)
+    llm_client.chat("OpenAI", "m81", "DUMMY", "sys", "u81")
+    check("R81: 같은 키의 로그가 한 번만 찍힌다", len(_log81) == _n_before,
+          "%d -> %d" % (_n_before, len(_log81)))
+    check("R81: 히트는 계속 누적된다", llm_client.cache_stats()[1] == 2,
+          str(llm_client.cache_stats()[1]))
+    # 다른 입력은 새 미스 — 로그가 늘면 안 된다
+    llm_client.chat("OpenAI", "m81", "DUMMY", "sys", "u81-other")
+    check("R81: 다른 입력은 로그를 늘리지 않는다 (미스)",
+          len(_log81) == _n_before, "%d -> %d" % (_n_before, len(_log81)))
+finally:
+    llm_client._post = _orig_post81
+    llm_client._log = _orig_log81
+    llm_client.clear_cache()
+check("R81: clear_cache 가 히트 수를 리셋한다",
+      llm_client.cache_stats()[1] == 0, str(llm_client.cache_stats()))
+check("R81: clear_cache 가 로그 기억도 지운다 (다음 히트가 다시 말한다)",
+      not llm_client._cache_logged, str(llm_client._cache_logged))
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)

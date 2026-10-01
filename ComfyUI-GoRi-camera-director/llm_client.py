@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -43,6 +44,12 @@ _API_KEY_ENV = {
 _cache: dict = {}
 _cache_lock = threading.Lock()
 _CACHE_MAX = 256  # LLM 응답 캐시 상한 (장시간 세션의 무제한 성장 방지)
+# 캐시 히트/미스 횟수. `cache_stats()` 가 이걸 돌려준다.
+_cache_hits = 0
+_cache_misses = 0
+# 캐시 히트 로그를 **키마다 한 번만** 찍기 위한 집합. 같은 입력이 스텝 수만큼
+# 되풀이돼도 로그가 한 줄로 유지된다.
+_cache_logged = set()
 
 # ComfyUI 루트 .env 폴백 (표준 방식). 노드 폴더 밖이라 폴더째 압축 공유에도
 # 키가 딸려가지 않는다. 우선순위: 위젯 입력 > .env 파일 > OS 환경변수.
@@ -86,6 +93,26 @@ def _env_file_path():
 
 
 _ENV_ROOT_WARNED = set()
+
+
+def _log(msg: str) -> None:
+    """Windows(cp949 등) 콘솔에서도 인코딩 오류로 프로세스가 죽지 않게 한다.
+
+    왜(Why) 이 파일에 자체 로거가 없었나: 카메라 노드의 `_log` 을 빌려 쓰면
+    순환 임포트(카메라 → llm_client → 카메라)가 생긴다. 표준 print 한 줄로
+    처리한다 — `UnicodeEncodeError` 는 이 저장소가 가장 자주 만나는 죽음 원인이다.
+    """
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            print(msg.encode(enc, "replace").decode(enc, errors="replace"),
+                  flush=True)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _warn_env_root_once(root):
@@ -432,9 +459,31 @@ def chat(provider: str, model: str, api_key: str,
     # 다른 게이트웨이의 응답은 다를 수 있다).
     cache_provider = f"Custom|{endpoint}" if is_custom else provider
     key = _cache_key(cache_provider, model, system, user, image_b64, image_sig, image_list)
+    global _cache_hits, _cache_misses
     with _cache_lock:
-        if key in _cache:
-            return _cache[key]
+        hit = key in _cache
+        if hit:
+            _cache_hits += 1
+        else:
+            _cache_misses += 1
+        if hit:
+            obj = _cache[key]
+            # 왜(Why) 여기에 로그가 있나 (2026-10-02 실측): 캐시 히트는 네트워크
+            # 호출 0회라 **몇 초 만에 끝난다.** 초록불은 켜지는데 시스템 자원도
+            # 시간도 안 쓰는 현상을 사용자가 "작동을 안 하는데?" 로 읽었다.
+            # `cam_source` 가 "LLM 판단" 인데 20ms 만에 찍힌 실측이 그 근거다
+            # (카메라 노드 preflight→요약 로그 구간 19~25ms × 3회).
+            # 히트/미스 수가 telemetry 로도 보고되므로 여기서 같은 사실을 한 번만
+            # 말해둔다. **같은 키는 한 번만** — 스텝 수만큼 되풀이되면 못 읽는다.
+            if key not in _cache_logged:
+                _cache_logged.add(key)
+                try:
+                    _log(f"[GoRi Camera Director] LLM 캐시 히트 — 같은 입력의 "
+                         f"이전 응답을 재사용했습니다 (네트워크 호출 0회). "
+                         f"provider={cache_provider} model={model or '없음'}")
+                except Exception:
+                    pass
+            return obj
 
     api_key = (api_key or "").strip()
     if not api_key and provider not in ("Ollama", "LM Studio") and not is_custom:
@@ -556,11 +605,25 @@ def chat(provider: str, model: str, api_key: str,
 
 
 def cache_stats() -> tuple[int, int]:
-    """(캐시 항목 수, 히트 판정용 총 호출 시도 횟수는 별도) — 디버그용."""
+    """(캐시 항목 수, **캐시 히트 횟수**) — 디버그용.
+
+    왜(Why) 둘째 값을 '히트'가 아니라 예전엔 len 을 그대로 돌려줬다 (2026-10-02):
+    docstring 이 "히트 판정용 총 호출 시도 횟수는 별도" 라고 적어놓고 실제로는
+    `return len(_cache), len(_cache)` 였다. 즉 **히트 수를 알 방법이 없었다.**
+    그래서 "초록불이 켜졌는데 안 도는 거냐" 를 로그로 확인할 수 없었다.
+    테스트는 `cache_stats()[0]` (항목 수)만 사용하므로 둘째 값은 안전하다.
+    """
     with _cache_lock:
-        return len(_cache), len(_cache)
+        return len(_cache), _cache_hits
 
 
 def clear_cache() -> None:
+    # 왜(Why) `global` 이 필수인가: 없으면 아래 세 줄이 **함수 지역변수** 가 되어
+    # 모듈 수준 카운터가 리셋되지 않는다. 테스트가 `clear_cache()` 를 수십 번
+    # 호출하므로 카운터가 누적되면 히트 수가 뒤섞인다(2026-10-02 실측).
+    global _cache_hits, _cache_misses
     with _cache_lock:
         _cache.clear()
+        _cache_hits = 0
+        _cache_misses = 0
+        _cache_logged.clear()

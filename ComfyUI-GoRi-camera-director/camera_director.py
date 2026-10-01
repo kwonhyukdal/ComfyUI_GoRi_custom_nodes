@@ -4365,6 +4365,10 @@ class CameraDirector:
                 "attempted": llm_attempted,
                 "used": bool(llm_obj),
                 "provider": provider, "model": resolved_model,
+                # 왜(Why) 캐시 지표를 넣나 (2026-10-02 실측): 캐시 히트는
+                # 네트워크 호출 0회라 `used=True` 인데 시간이 안 걸린다. 지표가
+                # 없으면 "작동을 안 하는데?" 를 구분할 방법이 없다 — 로그로도.
+                "cache": llm_client.cache_stats()[1],
             },
             elapsed_ms=int((time.perf_counter() - _t0) * 1000))
         _release_vram()

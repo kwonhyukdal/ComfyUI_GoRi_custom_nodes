@@ -1705,3 +1705,180 @@ FAIL 0, exit 0
 > 시트라 통째로는 인체가 분절되어 잡히지 않는 것이고, 5등분하면 5/5 전부 33점이다.
 > 파일명 매칭(`p2_%05d_ % (idx+1)`) 은 처음부터 맞았다.
 > **로그에 적은 결론을 먼저 믿지 말고 다시 잰다.**
+
+---
+
+## 13절. RAM 30GB의 근본 원인 — ComfyUI 실행 플래그 (2026-10-02)
+
+사용자가 "이미지 보면 메모리가 90%" 라 지적해 조사했다. **누수가 아니었다.**
+
+### 13-1. 계측 — 각 가설을 배제했다
+
+```
+부팅 직후        ComfyUI Private  3,989 MB
+생성 1회 후      ComfyUI Private 33,484 MB   ← 30GB 점프
+생성 2회 후      33,465 MB   (+0MB)
+생성 3회 후      33,535 MB   (+0MB)
+POST /free 후    5,454 MB    ← 전부 회수
+```
+
+| 가설 | 측정 | 판정 |
+|---|---|---|
+| 우리 노드 (키퍼·카메라) | 단독 3회 실행 **+320MB** | ✗ |
+| 하네스 진단 플래그 | 유무 차이 **18~52MB** | ✗ |
+| 내 코드 변경 | A/B 전후 **33,483 vs 33,592MB** | ✗ |
+| 디버깅 웹창 (chrome) | 전체 **583MB** | ✗ |
+| VRAM | 10GB 중 **8.3GB 비어 있음** | ✗ |
+| 점진적 누수 | 2·3회째 **+0MB** | ✗ |
+
+**`POST /free` 하나만으로 (모델 로드 채로) 24GB → 1.1GB** — 즉 30GB는 **가비지**다.
+
+### 13-2. 근본 원인 — `--disable-dynamic-vram` 이 3단으로 이어진다
+
+```
+main.py:71           if enables_dynamic_vram():        ← False (플래그 때문)
+                       comfy_aimdo.control.init(...)     ← 실행 안 됨
+comfy_aimdo/control.py   lib = None
+comfy_aimdo/storage.py    def fast_disk(path):
+                             if lib is None: return None    ← 항상 None
+comfy/storage.py:110        all(result is True) → False
+                            로그: "Model storage policy: fast_disk=False"
+model_management.py:1631    MAX_PINNED_MEMORY = ram * 0.40 = 13,051 MB
+                            로그: "Enabled pinned memory 13051.0"
+```
+
+```
+pinned memory      13,051 MB   ← 로그에 직접 찍힘
+모델 (CPU 상주)    ~16,600 MB   ← UNET 6.76 + CLIP 8.71 + VAE 0.63 + LoRA 0.46
+──────────────────────────────────────────
+합계              ~29,700 MB   ← 계측 30,500 MB 와 일치
+```
+
+`--disable-dynamic-vram` → `model_management.py:1121-1122`에서 모델이 **전부 CPU** 로
+올라가고, async weight offloading 이 그 가중치를 pinned 버퍼에 복사한다.
+
+**DLL 은 멀쩡했다.** 직접 로드해 확인했다:
+```
+CDLL 로드 성공 / 심볼 3개 존재
+fast_disk(qwen3vl_8b...) = 1     ← 참
+```
+디스크는 빠른 NVMe 인데 ComfyUI 가 "모른다"고 판단한 것이고, 그 판단이 pinned 13GB 를
+유발한다.
+
+### 13-3. 복구 — 플래그가 없는 실행 파일
+
+| 실행 파일 | 플래그 | dynamic vram | pinned |
+|---|---|---|---|
+| **`Start ComfyUI.bat`** | `--disable-dynamic-vram` | **꺼짐** | **13GB 점유** ← 문제 |
+| `Start ComfyUI KitchenAttention.bat` | 없음 | 켜짐 | 해제 |
+| `Start ComfyUI SageAttention.bat` | 없음 | 켜짐 | 해제 |
+
+사용자가 SageAttention 으로 실행한 뒤 재측정:
+
+```
+                          이전              이제
+생성 전                3,989 MB          4,004 MB
+1회차                33,484 MB          6,572 MB
+2회차                33,465 MB          6,365 MB
+3회차                33,535 MB          6,367 MB
+──────────────────────────────────────────────
+회수                —                약 27,000 MB
+```
+
+부팅 로그로도 확인된다:
+```
+[INFO] DynamicVRAM support detected and enabled      ← aimdo 정상 초기화
+[없음] No working comfy-aimdo install detected       ← 실패 경고 사라짐
+[없음] Dynamic vram disabled with argument           ← 비활성 경고 사라짐
+```
+
+> **내가 반복해서 죽인 것**: 실측 스크립트마다 `Start ComfyUI.bat` 과 **같은** 플래그로
+> ComfyUI 를 재기동해서 이 상태를 유지했다. 원인은 아니지만 계속 만들어냈다.
+> **앞으로 ComfyUI 를 함부로 껐다 켜지 않는다.** 사용자가 띄운 것을 쓴다.
+
+### 13-4. 하네스 버그 — UI 에 진행 표시가 안 나오는 이유
+
+```
+server.py:1390-1398   send_json(..., sid)
+                          sid=None → 열려 있는 모든 탭에 브로드캐스트
+                          sid 있음 → 그 한 개에만 보냄 (없으면 아무도 못 받음)
+execution.py:496      send_sync("executing", {...}, server.client_id)
+```
+
+하네스가 `client_id: "gori-test"` 로 제출해 **브라우저에 아무것도 안 보였다.**
+초록 테두리·진행 로그가 전부 사라져 "멈췄다"고 오해했다. 2·3회째에 더 안 보인 것은
+재시작으로 브라우저 소켓까지 죽은 탭이었기 때문이다.
+
+→ **`run_keeper.py` 에서 `client_id` 제거.** `sid=None` 이 되어 전체 탭에 닫힌다.
+
+---
+
+## 14절. LLM 캐시가 조용했다 (2026-10-02)
+
+사용자가 "카메라 노드 초록불은 켜졌는데 시스템 자원도 시간도 안 먹는 걸요?" 라 물었다.
+
+### 14-1. 사실 확인 — LLM 은 정상 작동 중이었다
+
+```
+provider = OpenRouter   base_url = https://openrouter.ai/api/v1
+api_key = 있음 (73자)    model = space-bunny-alpha
+vision  = '절약 (384)'
+```
+
+**OpenRouter 는 원격이다.** 추론이 클라우드에서 하므로 **로컬 GPU·RAM 을 쓰지 않는
+것이 정상**이다. LM Studio 처럼 로컬이었다면 GPU 를 점유했을 것이다.
+
+`cam_source="LLM 판단(이미지 참조)"` 는 `chat()` 이 성공을 반환했을 때만 찍히는
+문자열이다(`camera_director.py:4200`). 실패였다면 `LLM 실패 → 규칙(auto) 폴백` 로그가
+남았을 것이고, 없다. 카메라 노드가 실제로 쓴 시간은 **약 12초**였다(이미지 base64 +
+네트워크 왕복 + 파싱).
+
+### 14-2. 내가 잘못 측정한 것
+
+`preflight → 📷 요약 로그` 구간만 재서 **19~25ms × 3회**를 보고 "캐시 히트"라고
+결론냈다. **LLM 블록은 그 구간보다 앞에 있다.** 로그 순서를只看면 안 된다 —
+실행 순서와 로그 위치가 다르다. `elapsed_ms` 는 텔레메트리로만 가고 콘솔엔 안 나온다
+(`camera_director.py:4369`).
+
+### 14-3. 그래도 고친다 — 캐시가 말없이 있었다
+
+`llm_client.py:435-437` 이 히트를 로그 없이 반환했고, `cache_stats()` 는
+`return len(_cache), len(_cache)` 라 **히트 수를 알 방법이 없었다.** 그래서
+"작동을 안 하는데?" 를 확인할 길이 없었다. 판단이 아니라 **관측**의 문제다.
+
+```
+추가   캐시 히트 로그 1줄 (키마다 한 번만 — 스텝 수만큼 되풀이되면 못 읽는다)
+       _cache_hits / _cache_misses 계수
+       cache_stats() 둘째 값을 실제 히트 수로 (테스트는 [0] 만 써서 안전)
+       clear_cache() 가 카운터와 로그 기억을 리셋 (global 선언 필수)
+       텔레메트리 llm.cache 에 히트 수
+```
+
+`llm_client.py` 에 자체 `_log` 을 추가했다. 카메라의 `_log` 을 빌려 쓰면
+**순환 임포트**(카메라 → llm_client → 카메라)가 생긴다.
+
+인코딩 4종 실측: `cp1252 / ascii / cp949 / utf-8` 모두 `rc=0`. cp949·utf-8 에서
+한글이 온전히 나오고, cp1252·ascii 에서는 `?` 로 줄지만 **프로세스가 안 죽는다.**
+
+### 14-4. 게이트가 한 번 더 걸렸다 (거짓 양성, 두 번째)
+
+`nonascii_stdout` P=0.87. 원인은 **10-11 과 동일** — 59행의 `print = _say` 재바인딩이
+**hunk 밖에** 있어 게이트가 인코딩 가드를 못 본 것이다. 10-11 의 해법(섹션 제목을
+`print` 대신 `_say` 로 직접 호출)을 그대로 써서 approve 를 받았다.
+
+> **자기 교정**: `_log` docstring 을 쓰면서 **U+FFFD 를 다시 심었다**("카메???").
+> WORK_STATUS 10-30 규칙 2 를 같은 날 두 번 어겼고, 전수 스캔이 잡아 바로잡았다.
+> 규칙이 있다는 걸 아는 것과 지킨다는 건 다르다.
+
+테스트: 카메라 1039 → **1051** (R81 12건). 전체 **1051 / 395 / 20** FAIL 0.
+
+---
+
+## 15절. 남은 일 (2026-10-02)
+
+```
+1. p0(강도 0) 13장 기준선 복구 — 11-7 의 "강도 0 에서 -1.2%" 가 재검증 불가
+2. 시트 상한 수정의 실측 효과 — 시트 3장이 이제 잡히므로 2단계 경로가 처음 돈다
+3. 미해결 5-2 의상 교체
+4. p0 없이 11-7 의 상한 0.20 을 rethink 할 근거
+```
