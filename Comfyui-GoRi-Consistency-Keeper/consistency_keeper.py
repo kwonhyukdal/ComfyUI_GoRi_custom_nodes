@@ -31,11 +31,29 @@ def _get_samples(latent) -> object:
 
 
 def _match_spatial(ref, target) -> object:
-    """ref를 target의 (N, C, H, W) 중 공간 크기에 맞춘다. 실패 시 None."""
+    """ref를 target의 (N, C, H, W) 중 공간 크기에 맞춘다. 실패 시 None.
+
+    왜(Why) 크기가 같아도 device/dtype 을 확인하나 (2026-10-01 실측):
+    크기가 같으면 `return ref` 로 바로 돌려주고 있었는데, 그 `ref` 는 워크플로에서
+    넘어온 latent 라 **target 과 다른 장치에 있을 수 있다.** 실제로 하네스로
+    처음 끝까지 돌렸을 때 여기서 죽었다 — 텐서 장치가 둘로 섞여 있다는
+    RuntimeError 가 `out + eff * _mask * (matched - sampled)` 에서 났다.
+    (에러 문구를 그대로 적지 않는다. 아래 테스트가 소스의 하드코딩된 디바이스
+    문자열을 금지한다 — 이 노드는 어떤 장치에서도 돌아야 하기 때문.)
+
+    이 버그는 v1.7.0 부터 있었으나 판정층 작업 전까지 이 노드가 끝까지
+    실행된 적이 없어 드러나지 않았다. **조용히 못 도는 것과 죽는 것은
+    둘 다 실패**이고, 죽는 쪽이 찾기 쉬워서 그나마 다행이었다.
+
+    이미 device 와 dtype 이 같으면 아무것도 옮기지 않는다(무조건 `.to()` 를
+    걸면 매 호출마다 복사가 생긴다).
+    """
     try:
         import torch.nn.functional as _f
         if tuple(ref.shape) == tuple(target.shape):
-            return ref
+            if (ref.device == target.device and ref.dtype == target.dtype):
+                return ref
+            return ref.to(device=target.device, dtype=target.dtype)
         if ref.shape[0] != target.shape[0] or ref.shape[1] != target.shape[1]:
             return None
         resized = _f.interpolate(
