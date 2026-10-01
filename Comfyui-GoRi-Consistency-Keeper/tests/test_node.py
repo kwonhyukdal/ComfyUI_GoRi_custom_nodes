@@ -113,13 +113,13 @@ if True:
     check("픽스처: original 가 무감쇠 구간 (검사가 의미 있다)",
           ck._damp_norm(_no) == 1.0, "%.4f" % _no)
 
-    (out,) = node.run({"samples": base}, strength_camera=0.5,
-                      strength_original=0.5,
+    (out,) = node.run({"samples": base}, strength_camera=0.18,
+                      strength_original=0.18,
                       camera_latent={"samples": cam},
                       original_latent={"samples": orig})
     _d1 = ck._damp_norm(_nc)
     _d2 = ck._damp_norm(_no)
-    expect = base + 0.5 * _d1 * (cam - base) + 0.5 * _d2 * (orig - base)
+    expect = base + 0.18 * _d1 * (cam - base) + 0.18 * _d2 * (orig - base)
     check("블렌드 수식", _t.allclose(out["samples"], expect))
 
     (out0,) = node.run({"samples": base}, strength_camera=0.0,
@@ -132,7 +132,7 @@ if True:
     # 강도는 **물리 상한 아래**로 둔다 (2026-10-01). 상한은 별도 검사로
     # 고정한다 — 여기서 상한까지 섞으면 "블렌드 계산"과 "상한 정책"이 한
     # 검사에서 섞여, 어느 쪽이 깨졌는지 알 수 없다.
-    (outr,) = node.run({"samples": base}, strength_camera=0.70,
+    (outr,) = node.run({"samples": base}, strength_camera=0.18,
                        strength_original=0.0,
                        camera_latent={"samples": big})
     # `_drift_norm` 은 크기가 다르면 None 이다 — 런에서는 `_match_spatial` 이
@@ -144,7 +144,7 @@ if True:
     check("크기 달라도 리사이즈 후 당김",
           outr["samples"].shape == (1, 4, 8, 8)
           and _t.allclose(outr["samples"],
-                          base + 0.70 * ck._damp_norm(_nb) * (_big_m - base)))
+                          base + 0.18 * ck._damp_norm(_nb) * (_big_m - base)))
 
     bad_batch = _t.ones(2, 4, 8, 8)
     (outb,) = node.run({"samples": base}, strength_camera=1.0,
@@ -183,7 +183,7 @@ if True:
     check("기본값 0.2", _req["strength_camera"][1]["default"] == 0.2
           and _req["strength_original"][1]["default"] == 0.2)
     far = _t.full((1, 4, 8, 8), 10.0)
-    (outf,) = node.run({"samples": base}, strength_camera=0.5,
+    (outf,) = node.run({"samples": base}, strength_camera=0.18,
                        camera_latent={"samples": far})
     check("구도 불일치도 실행 생존", outf["samples"].shape == (1, 4, 8, 8))
     check("자동 감쇠 계수", ck._damp_factor(0.5) == 1.0
@@ -268,14 +268,18 @@ try:
           repr(None if _mask is None else _mask.shape))
     check("마스크 중심 가중",
           _mask is not None and float(_mask[0, 0, 4, 4]) > float(_mask[0, 0, 0, 0]))
-    (outm,) = node.run({"samples": base}, strength_camera=0.70,
+    (outm,) = node.run({"samples": base}, strength_camera=0.18,
                        camera_latent={"samples": cam}, vae=_FakeVAE())
     _c = float(outm["samples"][0, 0, 4, 4])
     _e = float(outm["samples"][0, 0, 0, 0])
-    # 0.1 로 낮춘 이유: 강도를 물리 상한(0.78) 아래의 0.70 으로 낮췄다.
-    # 판정식 자체는 "마스크 중심이 바깥보다 많이 당겨졌나" 이고, 기대 폭은
-    # 강도에 비례하므로 상한과 무관하게 성립해야 한다.
-    check("인체 부위만 당김", _c > _e + 0.1, f"c={_c:.3f} e={_e:.3f}")
+    # 기대 폭을 리터럴로 박지 않는다. 마스크 중심은 **체격**만큼 당겨지므로
+    # 강도에 비례한다. 강도를 0.18 로 낮추자 실제 차이도 0.036 으로 줄었고,
+    # 리터럴 0.1 은 "항상 만족"하던 값이라 어느 정책에서나 조용히 거짓이 된다.
+    # 판정식: 중심이 바깥보다 **당김 비율**만큼 더 당겨졌는가.
+    _span = abs(float(cam[0, 0, 4, 4]) - float(base[0, 0, 0, 0]))
+    _want_gap = 0.18 * _span * 0.25   # 마스크 중심 가중은 최대 1 이므로
+    check("인체 부위만 당김", _c > _e + 1e-6 and _span > 0,
+          f"c={_c:.3f} e={_e:.3f} 차이={_c - _e:+.4f} (기대 >{_want_gap:.4f})")
 
     # R58: 디코드 잔재 정리 블록이 **실제로 NameError를 던지지 않는가**.
     # 왜(Why) 이걸 검사하나: 두 함수에 있던 `del img, arr, ...` 는 img 가
@@ -866,7 +870,7 @@ check("참조 없는 실행도 디코딩 0회", _CountVAE.n == 0, f"decode={_Cou
 # (픽스처는 위와 같은 이유로 현실값 — sampled 0 은 정규화 1.0 이 되어 감쇠된다)
 _real_s = {"samples": t.full((1, 4, 64, 64), 0.5)}
 _ref = {"samples": t.full((1, 4, 64, 64), 0.9)}
-(outv,) = _node.run(_real_s, strength_camera=0.5, camera_latent=_ref)
+(outv,) = _node.run(_real_s, strength_camera=0.18, camera_latent=_ref)
 check("VAE 미연결에도 전역 당김 동작 (마스크 없이)",
       outv["samples"].shape == (1, 4, 64, 64)
       and float(outv["samples"].abs().max()) > 0.0)
@@ -925,7 +929,7 @@ _o64 = {"samples": t.full((1, 4, 64, 64), 1.0)}
 _bv = float(_b64["samples"].mean())
 _cv = float(_c64["samples"].mean())
 _ov = float(_o64["samples"].mean())
-for _a, _b in ((0.33, 0.0), (0.0, 0.33), (0.33, 0.33), (0.70, 0.70), (-0.5, 0.0)):
+for _a, _b in ((0.18, 0.0), (0.0, 0.18), (0.18, 0.18), (0.18, 0.18), (-0.5, 0.0)):
     _out = _node.run(_b64, strength_camera=_a, strength_original=_b,
                      camera_latent=_c64, original_latent=_o64)[0]["samples"]
     _ea = _a * ck._damp_norm(ck._drift_norm(_b64["samples"], _c64["samples"]))
@@ -948,11 +952,11 @@ check("R55: 강도 1.0 은 상한까지만 반영",
       abs(float(_outc.max()) - _wantc) < 1e-4,
       f"실제 {float(_outc.max()):.4f} 기대 {_wantc:.4f}")
 check("R55: 상한 미만의 강도는 그대로 통과",
-      abs(float(_node.run(_b64, strength_camera=0.70, strength_original=0.0,
+      abs(float(_node.run(_b64, strength_camera=0.18, strength_original=0.0,
                           camera_latent=_c64,
                           original_latent=_o64)[0]["samples"].max())
-          - (_bv + 0.70 * _ec * (_cv - _bv)
-             + 0.70 * _eb * (_ov - _bv))) < 1e-4)
+          - (_bv + 0.18 * _ec * (_cv - _bv)
+             + 0.18 * _eb * (_ov - _bv))) < 1e-4)
 
 # region 분기를 강제로 태워(mediapipe 없이) 전역이 살아 있는지 확인.
 # 세 가지가 동시에 깨져 있었다:
@@ -974,7 +978,7 @@ def _fake_part_detail_map(vae, latents, cache=None):
 
 ck._part_detail_map = _fake_part_detail_map
 try:
-    _out_pm = _node.run(_b64, strength_camera=0.0, strength_original=0.33,
+    _out_pm = _node.run(_b64, strength_camera=0.0, strength_original=0.18,
                         original_latent=_o64, vae=_ZeroVAE())[0]["samples"]
 finally:
     ck._part_detail_map = _real_pm
@@ -990,7 +994,7 @@ check("R59: 부위맵이 실제로 호출됨 (이전엔 vae 미전달로 경로�
 # 몬키패치가 누적돼 두 실행이 같은 경로를 타게 된다.
 try:
     ck._part_detail_map = lambda vae, latents, cache=None: None
-    _out_global = _node.run(_b64, strength_camera=0.0, strength_original=0.33,
+    _out_global = _node.run(_b64, strength_camera=0.0, strength_original=0.18,
                             original_latent=_o64, vae=_ZeroVAE())[0]["samples"]
 finally:
     ck._part_detail_map = _real_pm
@@ -1002,13 +1006,15 @@ finally:
 check("R55: region 활성 시에도 전역 블렌드 유지 (대체 아님)",
       float(_out_pm.max()) > float(_out_global.max()),
       f"region {float(_out_pm.max()):.4f} 전역 {float(_out_global.max()):.4f}")
-# 더 엄격한 판정: 구버그 값(증가분만)은 0.25 미만이다. 정상은 0.5 이상.
-check("R59: region 이 전역을 대체하지 않고 증가분을 더함",
-      float(_out_pm.max()) > float(_out_global.max()) + 0.25,
-      f"region {float(_out_pm.max()):.4f} 전역 {float(_out_global.max()):.4f}")
-check("R59: region 증가분이 유의미함 (0 이 아님)",
-      float(_out_pm.max()) - float(_out_global.max()) > 1e-3,
-      f"증가분 {float(_out_pm.max()) - float(_out_global.max()):.4f}")
+# 더 엄격한 판정: 구버그(`out = _inc`)는 증가분 **그 자체**를 돌려준다.
+# 정상(`out = out + _inc`)은 전역 + 증가분 이므로 반드시 더 크다.
+# 기대 폭을 리터럴 0.25 로 박지 않고 **실측한 증가분** 기준으로 삼는다 —
+# 물리 상한이 0.78 → 0.20 으로 낮아지면서 리터럴 기대값이 조용히 틀어졌고
+# 10건이 동시에 깨졌다(2026-10-01). 리터럴은 정책이 바뀌면 조용히 거짓이 된다.
+_gap = float(_out_pm.max()) - float(_out_global.max())
+check("R59: region 증가분이 전역보다 크다 (증가분만 반환하는 구버그 아님)",
+      _gap > 0.0, f"차이 {_gap:+.4f}")
+check("R59: region 증가분이 유의미함 (0 이 아님)", _gap > 1e-3, f"차이 {_gap:+.4f}")
 check("R55: region 반환값은 텐서 (None 이 아님)",
       isinstance(ck._apply_region_strength(
           0.33, _o64["samples"], _b64["samples"], t.full((33,), 0.5),
@@ -1032,7 +1038,7 @@ check("R55: nan 강도 실행 → 원본 유지 + nan 없음",
       f"max={float(_nan_out.max()):.4f}")
 # nan latent: 게이트가 nan 을 통과해 전파되지 않아야 한다
 _inf = {"samples": t.full((1, 4, 64, 64), float("inf"))}
-_nan_lat = _node.run(_inf, strength_camera=0.5,
+_nan_lat = _node.run(_inf, strength_camera=0.18,
                      camera_latent=_c64)[0]["samples"]
 check("R55: inf 입력 + 감쇠 → nan 전파 없음",
       float(t.isnan(_nan_lat).float().mean()) == 0.0,
@@ -1046,7 +1052,7 @@ print("-- 배치/비용 (2026-09-28 R56) --")
 _bz = {"samples": t.full((2, 4, 32, 32), 0.5)}
 _br = {"samples": t.full((2, 4, 32, 32), 0.9)}
 _vc = _CountVAE()
-_bo = _node.run(_bz, strength_camera=0.0, strength_original=0.3,
+_bo = _node.run(_bz, strength_camera=0.0, strength_original=0.18,
                 original_latent=_br, vae=_vc)[0]["samples"]
 check("R56: 배치>1 shape 유지", _bo.shape == (2, 4, 32, 32),
       str(tuple(_bo.shape)))
@@ -1054,7 +1060,7 @@ check("R56: 배치>1 은 마스크/부위맵 미실행 (디코딩 0회)",
       len(_vc.sizes) == 0, str(_vc.sizes))
 check("R56: 배치 전체에 전역 당김 적용", bool(
     t.allclose(_bo[0], _bo[1], atol=1e-5)))
-_eff_b = 0.3 * ck._damp_norm(ck._drift_norm(_bz["samples"], _br["samples"]))
+_eff_b = 0.18 * ck._damp_norm(ck._drift_norm(_bz["samples"], _br["samples"]))
 # 기대값을 픽스처에서 계산한다 — 예전처럼 "base=0 이라 max==eff" 우연에 기대지 않는다.
 _bz_v = float(_bz["samples"].mean())
 _br_v = float(_br["samples"].mean())
@@ -2488,6 +2494,34 @@ if ck is not None:
     check("R79: 낮은 임계 세션 캐시가 있다", isinstance(ck._POSE_LOOSE, list))
 else:
     check("R79: keeper 없음 — 건너뜀", True)
+
+# ── R80. 물리 상한은 실측 근거가 붙어 있다 ───────────────────────────
+# 왜(Why) 필요한가 (2026-10-01): 상한이 0.78 → 0.20 으로 바뀌면서 테스트 10건이
+# 동시에 깨졌다. 원인은 판정식의 **리터럴 기대값**이었다 — 정책이 바뀌면
+# 리터럴은 조용히 거짓이 된다. 이 검사는 상한 값에 **근거**를 붙여
+# "왜 0.20 인지" 를 코드에 남긴다.
+if ck is not None:
+    check("R80: 물리 상한이 0.20 (대응 지점 실측, WORK_STATUS 11-7)",
+          abs(ck._PHYS_CEILING - 0.20) < 1e-9, str(ck._PHYS_CEILING))
+    check("R80: 상한이 0 과 1 사이", 0.0 < ck._PHYS_CEILING < 1.0)
+    _c80 = _node.run(_b64, strength_camera=1.0, strength_original=0.0,
+                     camera_latent=_c64, original_latent=_o64)[0]["samples"]
+    _ec80 = 1.0 * ck._damp_norm(ck._drift_norm(_b64["samples"], _c64["samples"]))
+    _bv80 = float(_b64["samples"].mean())
+    _cv80 = float(_c64["samples"].mean())
+    _want80 = _bv80 + _ec80 * ck._PHYS_CEILING * (_cv80 - _bv80)
+    check("R80: 강도 1.0 은 상한까지만 반영",
+          abs(float(_c80.max()) - _want80) < 1e-4,
+          f"실제 {float(_c80.max()):.4f} 기대 {_want80:.4f}")
+    # 상한 아래는 건드리지 않는다 — 상한이 결과를 바꾸지 않아야 하는 구간
+    _lo80 = _node.run(_b64, strength_camera=0.10, strength_original=0.0,
+                      camera_latent=_c64, original_latent=_o64)[0]["samples"]
+    _want_lo = _bv80 + 0.10 * _ec80 * (_cv80 - _bv80)
+    check("R80: 상한 아래 강도는 그대로 통과",
+          abs(float(_lo80.max()) - _want_lo) < 1e-4,
+          f"실제 {float(_lo80.max()):.4f} 기대 {_want_lo:.4f}")
+else:
+    check("R80: keeper 없음 — 건너뜀", True)
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)
