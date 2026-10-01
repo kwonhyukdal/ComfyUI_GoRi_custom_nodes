@@ -21,13 +21,16 @@
 STATUS_DOC="WORK_STATUS.md"
 # Each logic doc is personal and gitignored, so it is checked by modification time
 # rather than by staging, and it only guards the folder it documents.
+# Doc naming follows the rule: <development target name>_Logic.md
 LOGIC_DOC="Keeper_Logic.md"
 LOGIC_DIR="Comfyui-GoRi-Consistency-Keeper"
 CAMERA_LOGIC_DOC="camera_Logic.md"
+HARNESS_LOGIC_DOC="Harness_Logic.md"
 # Why the odd casing: git matches pathspecs case-sensitively even on Windows, and
 # a wrong-case directory silently matches nothing - the rule then never fires and
 # reports success. Both directory names below are copied from `git ls-files`.
 CAMERA_DIR="ComfyUI-GoRi-camera-director"
+HARNESS_DIR="tools"
 
 staged="$(git diff --cached --name-only)"
 [ -z "$staged" ] && exit 0
@@ -88,5 +91,6 @@ check_freshness() {
 
 check_freshness "$LOGIC_DOC" "$LOGIC_DIR" || exit 1
 check_freshness "$CAMERA_LOGIC_DOC" "$CAMERA_DIR" || exit 1
+check_freshness "$HARNESS_LOGIC_DOC" "$HARNESS_DIR" || exit 1
 
 exit 0
