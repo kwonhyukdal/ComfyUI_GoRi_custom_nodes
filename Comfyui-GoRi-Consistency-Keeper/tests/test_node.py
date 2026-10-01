@@ -129,7 +129,10 @@ if True:
     check("강도 0은 원본 유지", _t.allclose(out0["samples"], base))
 
     big = _t.full((1, 4, 16, 16), 1.0)
-    (outr,) = node.run({"samples": base}, strength_camera=1.0,
+    # 강도는 **물리 상한 아래**로 둔다 (2026-10-01). 상한은 별도 검사로
+    # 고정한다 — 여기서 상한까지 섞으면 "블렌드 계산"과 "상한 정책"이 한
+    # 검사에서 섞여, 어느 쪽이 깨졌는지 알 수 없다.
+    (outr,) = node.run({"samples": base}, strength_camera=0.70,
                        strength_original=0.0,
                        camera_latent={"samples": big})
     # `_drift_norm` 은 크기가 다르면 None 이다 — 런에서는 `_match_spatial` 이
@@ -141,7 +144,7 @@ if True:
     check("크기 달라도 리사이즈 후 당김",
           outr["samples"].shape == (1, 4, 8, 8)
           and _t.allclose(outr["samples"],
-                          _t.ones(1, 4, 8, 8) * ck._damp_norm(_nb)))
+                          base + 0.70 * ck._damp_norm(_nb) * (_big_m - base)))
 
     bad_batch = _t.ones(2, 4, 8, 8)
     (outb,) = node.run({"samples": base}, strength_camera=1.0,
@@ -265,11 +268,14 @@ try:
           repr(None if _mask is None else _mask.shape))
     check("마스크 중심 가중",
           _mask is not None and float(_mask[0, 0, 4, 4]) > float(_mask[0, 0, 0, 0]))
-    (outm,) = node.run({"samples": base}, strength_camera=1.0,
+    (outm,) = node.run({"samples": base}, strength_camera=0.70,
                        camera_latent={"samples": cam}, vae=_FakeVAE())
     _c = float(outm["samples"][0, 0, 4, 4])
     _e = float(outm["samples"][0, 0, 0, 0])
-    check("인체 부위만 당김", _c > _e + 0.2, f"c={_c:.3f} e={_e:.3f}")
+    # 0.1 로 낮춘 이유: 강도를 물리 상한(0.78) 아래의 0.70 으로 낮췄다.
+    # 판정식 자체는 "마스크 중심이 바깥보다 많이 당겨졌나" 이고, 기대 폭은
+    # 강도에 비례하므로 상한과 무관하게 성립해야 한다.
+    check("인체 부위만 당김", _c > _e + 0.1, f"c={_c:.3f} e={_e:.3f}")
 
     # R58: 디코드 잔재 정리 블록이 **실제로 NameError를 던지지 않는가**.
     # 왜(Why) 이걸 검사하나: 두 함수에 있던 `del img, arr, ...` 는 img 가
@@ -919,7 +925,7 @@ _o64 = {"samples": t.full((1, 4, 64, 64), 1.0)}
 _bv = float(_b64["samples"].mean())
 _cv = float(_c64["samples"].mean())
 _ov = float(_o64["samples"].mean())
-for _a, _b in ((0.33, 0.0), (0.0, 0.33), (0.33, 0.33), (1.0, 1.0), (-0.5, 0.0)):
+for _a, _b in ((0.33, 0.0), (0.0, 0.33), (0.33, 0.33), (0.70, 0.70), (-0.5, 0.0)):
     _out = _node.run(_b64, strength_camera=_a, strength_original=_b,
                      camera_latent=_c64, original_latent=_o64)[0]["samples"]
     _ea = _a * ck._damp_norm(ck._drift_norm(_b64["samples"], _c64["samples"]))
@@ -928,6 +934,25 @@ for _a, _b in ((0.33, 0.0), (0.0, 0.33), (0.33, 0.33), (1.0, 1.0), (-0.5, 0.0)):
     check(f"R55: 강도 {_a}/{_b} 전역 반영 정확",
           abs(float(_out.max()) - _want) < 1e-4,
           f"실제 {float(_out.max()):.4f} 기대 {_want:.4f}")
+
+# 물리 상한: 강도가 넘어도 **초과분은 적용되지 않는다** (WORK_STATUS 10-28).
+# 왜(Why) 별도 검사인가: 위 반복은 "블렌드 계산" 이고 이건 "상한 정책"이다.
+# 한 검사에 섞으면 어느 쪽이 깨졌는지 알 수 없다.
+_cap = ck._PHYS_CEILING
+check("R55: 상한이 0 과 1 사이", 0.0 < _cap < 1.0, str(_cap))
+_outc = _node.run(_b64, strength_camera=1.0, strength_original=0.0,
+                  camera_latent=_c64, original_latent=_o64)[0]["samples"]
+_ec = 1.0 * ck._damp_norm(ck._drift_norm(_b64["samples"], _c64["samples"]))
+_wantc = _bv + _ec * _cap * (_cv - _bv)
+check("R55: 강도 1.0 은 상한까지만 반영",
+      abs(float(_outc.max()) - _wantc) < 1e-4,
+      f"실제 {float(_outc.max()):.4f} 기대 {_wantc:.4f}")
+check("R55: 상한 미만의 강도는 그대로 통과",
+      abs(float(_node.run(_b64, strength_camera=0.70, strength_original=0.0,
+                          camera_latent=_c64,
+                          original_latent=_o64)[0]["samples"].max())
+          - (_bv + 0.70 * _ec * (_cv - _bv)
+             + 0.70 * _eb * (_ov - _bv))) < 1e-4)
 
 # region 분기를 강제로 태워(mediapipe 없이) 전역이 살아 있는지 확인.
 # 세 가지가 동시에 깨져 있었다:
@@ -2372,6 +2397,48 @@ if HAS_TORCH:
           ck._encode_image_ref(None, _t76.zeros(1, 8, 8, 3)) is None)
 else:
     check("R76: torch 없음 — 건너뜀", True)
+
+# ── R78. 에지 지표가 단일 픽셀 스파이크에 지배되지 않는다 ──────────────
+# 왜(Why) 이 테스트가 필요한가 (2026-10-01 실측): 강도별 곡선이 단조가
+# 아니었다(0.15 ≈ 0.30 ≫ 0.60). 원인은 지표가 **이미지의 최대 에지**로
+# 정규화해서, 결과물에 아티팩트 하나가 생기면 나머지 픽셀이 전부 눌렸던
+# 것이다. 상위 0.5% 평균으로 바꿨고, 그 robustness 를 회귀로 고정한다.
+if ck is not None:
+    try:
+        import numpy as _np78
+    except Exception:
+        _np78 = None
+else:
+    _np78 = None
+if _np78 is not None and ck is not None:
+    _rg78 = _np78.random.default_rng(7)
+    _i78 = _np78.zeros((256, 256, 3), dtype=_np78.float32)
+    _i78[:, :, 1] = _rg78.random((256, 256))
+    _i78[:128, :128, :] = 0.8
+    _m78 = ck._edge_map_from_rgb(_i78)
+    check("R78: 에지 맵이 나온다", _m78 is not None)
+    if _m78 is not None:
+        _s78 = _i78.copy()
+        _s78[10, 10] = 1.0
+        _sm78 = ck._edge_map_from_rgb(_s78)
+        _d78 = abs(float(_sm78.mean()) - float(_m78.mean())) / max(1e-9, float(_m78.mean()))
+        check("R78: 단일 픽셀 스파이크가 지표를 흔들지 않는다 (1% 미만)",
+              _d78 < 0.01, "변화 %.3f%%" % (_d78 * 100))
+    _f78 = _np78.full((64, 64, 3), 0.45, dtype=_np78.float32)
+    _fm78 = ck._edge_map_from_rgb(_f78)
+    check("R78: 완전 평탄 이미지는 0 (안전장치 유지)",
+          _fm78 is not None and float(_fm78.sum()) == 0.0)
+    _mag78 = ck._edge_mag_from_rgb(_i78)
+    check("R78: 전체 해상도 맵은 2차원", _mag78 is not None and _mag78.ndim == 2)
+    # 로컬 창은 셀이 아니라 창을 본다: 경계 위가 평평면보다 커야 한다
+    _b78 = _np78.zeros((200, 200, 3), dtype=_np78.float32) + 0.5
+    _b78[:100, :100, 0] = 1.0
+    _bm78 = ck._edge_mag_from_rgb(_b78)
+    _on78 = ck._local_edge(_bm78, 0.5, 0.5)
+    _off78 = ck._local_edge(_bm78, 0.8, 0.8)
+    check("R78: 로컬 창은 경계에서 크고 평평면에서 0", _on78 > _off78)
+else:
+    check("R78: numpy 없음 — 건너뜀", True)
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

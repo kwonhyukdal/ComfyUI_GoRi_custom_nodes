@@ -126,6 +126,9 @@ def _drift_norm(sampled, matched) -> float | None:
 # 정상 범위를 **덮어야** 한다. 그래서 무감쇠 끝을 측정 최댓값(0.487) 바로 위인
 # 0.50 으로 잡았다. 0 에 도달하는 지점은 측정 최댓값의 2 배로 두었다.
 _DRIFT_NORM_KNEE = 0.50
+# 물리 상한: 당김 강도가 이 값을 넘으면 결과의 에지 밀도가 **원본보다 낮아진다**.
+# 근거는 WORK_STATUS 10-28 의 실측. 이미지 1장·시드 1개 기준이라잪정.
+_PHYS_CEILING = 0.78
 _DRIFT_NORM_ZERO = 1.00
 
 _DRIFT_NORM_NOTED = False
@@ -902,7 +905,17 @@ def _edge_mag_from_rgb(arr) -> "object | None":
             # 여기에 해당한다. None을 돌려주면 부위 비교가 불가능해져
             # "뭉개진 부위"를 판정할 수 없게 된다(실측에서 확인).
             return _np.zeros_like(mag)
-        return mag / mx
+        # 왜(Why) 최대값이 아니라 **상위 0.5% 의 평균**인가 (2026-10-01 실측):
+        # 강도별 곡선이 단조가 아니었다(0.15 ≈ 0.30 ≫ 0.60). 원인은 여기다.
+        # 0.60 결과에 강한 에지 하나(아티팩트)가 생기면 `mx` 가 뛰고 **나머지
+        # 픽셀 전체가 눌린다** — 지표가 단일 픽셀 스파이크에 지배되는 셈이다.
+        # 상위 0.5% 의 평균은 그런 스파이크에 거의 흔들리지 않으면서도 진짜
+        # 에지에는 반응한다. 비교 대상인 두 이미지 사이의 **척도**가 같아진다.
+        _k = max(1, int(mag.size * 0.005))
+        _ref = float(_np.partition(mag.ravel(), -_k)[-_k:].mean())
+        if not (_ref > 0.0):
+            _ref = mx
+        return mag / _ref
     except Exception as e:
         # 왜(Why) 조용히 두지 않나: 실패하면 **부위 비교가 전부 무의미**해진다.
         # 아무 말 없이 None 이면 "상향할 곳 없음" 과 "재지를 못 읽음" 이 구분되지
@@ -2350,6 +2363,20 @@ class GoRiConsistencyKeeper:
                 eff = eff * _light_damp_factor(mismatch)
                 _log(f"[GoRi Consistency Keeper] ⚠ {name} 조명 흐름 불일치 "
                      f"({mismatch:.2f}) — 당김 추가 감쇠 {_old_eff:.2f}→{eff:.2f}")
+            # 물리 상한 (2026-10-01 실측). 왜(Why) 있는가:
+            # 당길수록 디테일이 줄고, **0.78 을 넘어서면 결과의 에지가 원본보다
+            # 적어진다** — 참조로 당기는 노드가 참조보다 더 뭉개진 결과를 낸다.
+            # 실측(같은 시드, 서있는 자세 1장, 강건한 지표):
+            #   0.15 → 원본 대비 +6.1%   0.30 → +2.1%
+            #   0.60 → +2.2%             0.90 → -1.5%   (여기서 하강)
+            # **한 장짜리 실측이라잪정 값이다.** 더 많은 표본으로 갱신할 것.
+            # 조용히 줄이지 않는다 — 잘렸을 때 반드시 말한다.
+            if eff > _PHYS_CEILING:
+                _old_eff = eff
+                eff = _PHYS_CEILING
+                _log(f"[GoRi Consistency Keeper] ⚠ {name} 당김이 물리 상한을 "
+                     f"넘었습니다 {_old_eff:.2f}→{eff:.2f} — 실측상 이 이상은 "
+                     f"결과가 원본보다 뭉개집니다")
             # 부위별 adaptive 강도: 원본이 살아 있는데 결과가 뭉개진 부위만
             # 강도를 올려 그 부위를 원본 쪽으로 당긴다. 언제나 산술이며 추측이
             # 아니다 — "몇 개여야 한다"가 아니라 "얼마나 달라졌는가"만 본다.
