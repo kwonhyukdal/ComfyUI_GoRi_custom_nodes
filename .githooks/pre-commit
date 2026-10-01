@@ -1,43 +1,80 @@
 #!/bin/sh
-# Commit gate: behaviour changed without the status doc changing.
+# Commit gate.
+#
+# Rule 1: any .py change requires WORK_STATUS.md, which travels with the commit.
+# Rule 2: a keeper change requires Keeper_Logic.md to be at least as new as the
+#         code. That doc is a personal reference and is gitignored, so it is
+#         checked by modification time rather than by staging.
 #
 # Why this exists (2026-10-01): working one long session kept producing
-# confident wrong conclusions - denoise, the switch and the sheet verdict
-# were each settled by guessing first and measuring later. WORK_STATUS.md
-# exists to stop that, but a doc nobody is forced to touch goes stale, and a
-# stale doc is worse than none because it reads as authoritative.
+# confident wrong conclusions - denoise, the switch and the sheet verdict were
+# each settled by guessing first and measuring later. WORK_STATUS.md exists to
+# stop that, but a doc nobody is forced to touch goes stale, and a stale doc
+# is worse than none because it reads as authoritative.
 #
-# Pure ASCII on purpose: git runs this under sh, and a hook carrying UTF-8
-# can be mis-split by a non-UTF-8 console the same way a .bat can.
+# Pure ASCII on purpose: git runs this under sh, and a hook carrying UTF-8 can
+# be mis-split by a non-UTF-8 console the same way a .bat can.
 #
 # Bypass deliberately:  git commit --no-verify
 # A blocked commit is a prompt to write down what changed, not a wall.
 
 STATUS_DOC="WORK_STATUS.md"
+LOGIC_DOC="Keeper_Logic.md"
+# Keeper_Logic.md documents the keeper only, so rule 2 covers the keeper folder
+# alone. A camera-only change has nothing to update there.
+KEEPER_DIR="Comfyui-GoRi-Consistency-Keeper"
 
-# Nothing staged at all (rare, but do not interfere).
 staged="$(git diff --cached --name-only)"
 [ -z "$staged" ] && exit 0
 
-# The status doc rides along: nothing to enforce.
-echo "$staged" | grep -qx "$STATUS_DOC" && exit 0
+# Rule 1.
+if ! echo "$staged" | grep -qx "$STATUS_DOC"; then
+  if echo "$staged" | grep -q '\.py$'; then
+    {
+      echo ""
+      echo "BLOCKED: a .py file is staged but $STATUS_DOC is not."
+      echo ""
+      echo "Staged:"
+      echo "$staged" | sed 's/^/  /'
+      echo ""
+      echo "Update $STATUS_DOC with what changed and why, then stage it:"
+      echo "  git add $STATUS_DOC"
+      echo ""
+      echo "If this change genuinely needs no doc update, bypass on purpose:"
+      echo "  git commit --no-verify"
+      echo ""
+    } >&2
+    exit 1
+  fi
+fi
 
-# No python staged: docs or assets only, nothing to enforce.
-echo "$staged" | grep -q '\.py$' || exit 0
+# Rule 2. If the doc does not exist - fresh clone, or someone who does not keep
+# it - the rule does not apply. A gate that fires for everyone over a file
+# nobody has is a gate people learn to bypass.
+if [ -f "$LOGIC_DOC" ]; then
+  for f in $(echo "$staged" | grep "^$KEEPER_DIR/.*\.py$"); do
+    if [ "$f" -nt "$LOGIC_DOC" ]; then
+      {
+        echo ""
+        echo "BLOCKED: keeper code is newer than $LOGIC_DOC."
+        echo ""
+        echo "  $f   (edited after the doc)"
+        echo "  $LOGIC_DOC"
+        echo ""
+        echo "$LOGIC_DOC documents every function, constant and decision in the"
+        echo "keeper. A code change that does not update it leaves the document"
+        echo "describing code that no longer exists."
+        echo ""
+        echo "Read it, update it, then mark it newer than the code:"
+        echo "  touch $LOGIC_DOC"
+        echo ""
+        echo "If this change genuinely needs no doc update, bypass on purpose:"
+        echo "  git commit --no-verify"
+        echo ""
+      } >&2
+      exit 1
+    fi
+  done
+fi
 
-{
-  echo ""
-  echo "BLOCKED: a .py file is staged but $STATUS_DOC is not."
-  echo ""
-  echo "Staged:"
-  echo "$staged" | sed 's/^/  /'
-  echo ""
-  echo "Update $STATUS_DOC with what changed and why, then stage it:"
-  echo "  git add $STATUS_DOC"
-  echo ""
-  echo "If this change genuinely needs no doc update, bypass on purpose:"
-  echo "  git commit --no-verify"
-  echo ""
-} >&2
-
-exit 1
+exit 0

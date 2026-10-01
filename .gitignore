@@ -231,3 +231,9 @@ GoRi-Wireless-Engine/
 # 아니고, 남의 PC 에서는 경로가 틀려서 그대로 동작하지 않는다.
 run_tests.bat
 
+# 개인 참고 문서 — 공개 저장소에 올리지 않는다.
+# 키퍼 코드의 함수·상수·판정 근거를 한국어로 풀어쓴 개인 해설서다.
+# commit 게이트는 이 파일이 키퍼 코드보다 오래지지 않았는지 **로컬에서** 검사한다
+# (`.githooks/pre-commit` 규칙 2). gitignore 에 있으므로 stage 대상이 아니다.
+Keeper_Logic.md
+

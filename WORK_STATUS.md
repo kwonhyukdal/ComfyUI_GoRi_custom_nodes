@@ -22,6 +22,8 @@ ComfyUI 커스텀 노드 3종이 **하나의 클론**에 들어 있다 (`custom_
 | `AGENTS.md` | 이 폴더에서 코딩하는 모든 AI 가 자동으로 읽는 작업 규칙 |
 | `jev-pref.json` | 저장소별 Jev 의미 규칙. **있으면 게이트가 자동 동작** |
 | `run_tests.bat` | 테스트 실행기. ComfyUI 내장 Python 3.12로 돌린다 |
+| `install_hook.bat` | 커밋 게이트 설치 (clone 맨 처음 1회) |
+| `Keeper_Logic.md` | **(개인, gitignore 됨)** 키퍼 로직 전체 해설. 위치를 아는 사람이 쓴다 |
 
 카메라 디렉터와 키퍼는 **항상 세트로 함께** 쓰인다. 카메라만 있으면 키퍼가 기준을 못 받고,
 키퍼만 있으면 카메라 연출이 없다.
@@ -178,17 +180,24 @@ WORK_STATUS.md   진행상황·설계 결정·미해결·실측 수치의 단일
 
 ```
 설치        install_hook.bat 실행 (clone 마다 1회)
-동작        .py 가 stage 면 WORK_STATUS.md 도 stage 되어야 커밋 통과
+규칙 1      .py 가 stage 면 WORK_STATUS.md 도 stage 되어야 커밋 통과
+규칙 2      키퍼 폴더의 .py 가 stage 면 Keeper_Logic.md 가 코드보다 최신이어야 통과
 무시        git commit --no-verify   ← 의도적으로 우회할 때
-멱등        문서만 바꾸거나, WORK_STATUS.md 가 함께 올라가면 통과
 ```
 `.git/hooks` 는 git 이 추적하지 않아 fresh clone 에는 훅이 없다 → `install_hook.bat` 필요.
 
-**검증 완료 (실측 3케이스)**
+**`Keeper_Logic.md` 는 개인 문서라 gitignore 로 저장소에서 뺐다.**
+stage 대상이 아니므로 규칙 2 는 **수정 시각**으로 신선도를 잰다.
+문서가 없으면(fresh clone) 규칙 2 는 적용되지 않는다 — 아무도 안 가진 파일에
+게이트를 걸면 결국 우회당하기 때문이다.
+
+**검증 완료 (실측 5케이스)**
 ```
-.py 만 stage                        → 차단 (exit 1)  ✅
-git commit --no-verify              → 통과 (exit 0)  ✅
-install_hook.bat 만 (문서성)        → 통과 (exit 0)  ✅
+.py 만 stage                          → 차단 (exit 1)  ✅
+WORK_STATUS + 키퍼 .py (문서가 오래됨) → 차단 (exit 1)  ✅
+WORK_STATUS + 키퍼 .py (문서가 최신)   → 통과 (exit 0)  ✅
+WORK_STATUS + 문서 없음 + 키퍼 .py    → 통과 (exit 0)  ✅ 규칙2 미적용
+git commit --no-verify                → 통과 (exit 0)  ✅
 ```
 
 ---

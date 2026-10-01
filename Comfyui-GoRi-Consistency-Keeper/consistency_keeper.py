@@ -1639,3 +1639,5 @@ class GoRiConsistencyKeeper:
                              f"({type(e).__name__}: {e}) — 전역 당김만 적용")
         _release_vram()
         return ({"samples": out},)
+
+# g
