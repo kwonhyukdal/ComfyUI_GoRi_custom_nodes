@@ -593,7 +593,7 @@ def _pose_landmarker():
         # _part_detail_map 이 None 을 돌려주면서 그 아래 픽셀 공간 부위 분석
         # (detail_boost / _apply_region_strength) 이 통째로 죽었다. 단위
         # 테스트 223 건이 포즈 세션을 stub 으로 주입해서 이 경로를 검증하지
-        # 못한 탓이다. 정답은深层이 아니라 그 안의 모듈 — landmarker 0.08초 생성, 33점
+        # 못한 탓이다. 정답은 긴 드이 아니라 그 안의 모듈 — landmarker 0.08초 생성, 33점
         # 검출까지 확인했다.
         _BaseOptions = _find_base_options()
         options = _vision.PoseLandmarkerOptions(
@@ -2017,10 +2017,10 @@ def analyze_reference_sheet(vae, ref_latent, sampled, cache=None) -> dict:
         # 2) 프레이밍 게이트: 고른 패널의 인물 비율이 결과와 맞는지
         if best is not None:
             x0, x1 = panels[best]
-            # 왜(Why) 여기서만 원본 해��도로 다시 잡나 (2026-09-30 실측):
+            # 왜(Why) 여기서만 원본 해상도로 다시 잡나 (2026-09-30 실측):
             # `ref_arr` 은 0.5배 축소본이라 패널 폭이 216 -> 108 px 로 줄어
             # 33점 검출이 실패한다. 그 결과 "인물 bbox 미검출" -> 프레이밍 게이트가
-            # 항상 False -> 2단계 (A) 경로로 영영 못 들어간다. 패널 검��·유사도
+            # 항상 False -> 2단계 (A) 경로로 영영 못 들어간다. 패널 검감출·유사도
             # 판정은 축소본으로 충분하니 **포즈만** 원본 크기로 본다.
             _pose_src = ref_arr[:, x0:x1]
             _full = _decode_latent_rgb(vae, ref_latent, cache=cache)
