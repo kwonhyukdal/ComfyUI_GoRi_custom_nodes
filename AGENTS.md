@@ -75,9 +75,14 @@ LoadImage 하위 폴더 미지원   nodes.py:1750 이 input/ 최상위만 훑는
 비ASCII 를 print()          Windows 콘솔에서 프로세스가 죽는다.
                             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 BOM 저장                    .bat / .py 첫 줄이 깨진다. BOM 없이 저장.
-외부 API 호출               지침상 금지. 카메라 노드의 LLM 경로는 api_key 가 비면
-                            openrouter 로 요청해서 401 을 받고 45초를 날린다.
-                            automation 을 로컬(규칙) 판단으로 유지하십시오.
+외부 LLM 사용              허용 (키가 있을 때). 카메라 노드의 LLM 경로는
+                            api_key 가 비면 외부로 요청하지 않고 규칙으로
+                            폴백한다(0초). automation 을 '자동 (auto)' 로 두면
+                            LLM 을 아예 쓰지 않는다. 상용 파이프라인이므로 외부
+                            전송 전에 아래를 확인하고 WORK_STATUS 에 남긴다:
+                            비용·프라이버시(원본 이미지가 밖으로 나감)·오프라인
+                            필요성. 원본을 클라우드에 못 보내는 작업이면
+                            automation 을 '자동 (auto)' 로 두고 로컬 규칙을 쓴다.
 ```
 
 ## 3. 구조

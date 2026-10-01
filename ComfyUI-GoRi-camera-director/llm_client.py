@@ -457,15 +457,19 @@ def chat(provider: str, model: str, api_key: str,
         # 실측 로그:
         #   HTTP 401: {"error":{"message":"No cookie auth credentials found"}}
         # provider=Custom (OpenAI 호환)  base_url=https://openrouter.ai/api/v1
-        # 즉 지침상 금지된 외부 전송이 매 실행마다 일어났고 45초를 버렸다.
-        # **키가 없으면 애초에 요청하지 않는 게 옳다.** 로컬 엔드포인트는 키가
-        # 필요 없을 수 있으니 "주소가 같은 머신인가" 로 구분한다.
+        # 즉 키가 없는데 45초를 버리고 실패했다. **키가 없으면 애초에 요청하지
+        # 않는 게 옳다.** 로컬 엔드포인트는 키가 필요 없을 수 있으니 "주소가
+        # 같은 머신인가" 로 구분한다.
+        #
+        # **중요**: 외부 LLM 자체를 금지하는 게 아니다. 키를 넣으면 정상 호출한다.
+        # 막는 것은 "키가 없는 채로 나가는 요청" 뿐이다. 같은 머신으로 되돌릴
+        # 방법이 없는 실수이므로, 관측 가능성을 남기는 게 낫다.
         # 순서는 model 검사 다음이다 — 더 구체적인 안내를 먼저 준다.
         if not api_key and _is_remote_endpoint(endpoint):
             raise LLMError(
-                "API 키 없음 — 외부 Custom 엔드포인트로는 요청하지 않습니다 "
-                f"({_host_of(endpoint)}). 지침상 외부 전송은 금지이므로 규칙으로 "
-                "폴백합니다. 키를 넣거나 automation 을 '자동 (auto)' 로 바꾸세요")
+                "API 키 없음 — 외부 엔드포인트로는 요청하지 않습니다 "
+                f"({_host_of(endpoint)}). 키를 넣으면 정상 호출되고, "
+                "automation 을 '자동 (auto)' 로 두면 규칙으로 폴백합니다")
         raw = _openai_compatible_chat(
             endpoint, model.strip(), api_key, system, user, image_list, timeout)
     elif provider in _OPENAI_COMPATIBLE_PROVIDERS:
