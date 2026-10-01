@@ -1860,5 +1860,181 @@ try:
 finally:
     ck._pose_landmarks_from_tasks = _real_pose73
 
+# ---------------------------------------------------------------------------
+# R74: 판정층 1층 (2026-10-01, WORK_STATUS 10절)
+#
+# (왜) 이 판정은 "원본을 믿어도 되는가" 다. 절대 평가("이 자세가 옳나")가 아니다.
+# 그래서 테스트도 두 가지를 먼저 박는다: ① 발이 판정 대상이 아니다(실측 근거가
+# 없으므로) ② v1 은 damaged 를 내지 않는다(기준 데이터 없이 기하 판정을 하지
+# 않으므로). 이 두 개가 깨지면 설계가 뒤집힌 것이다.
+# ---------------------------------------------------------------------------
+# (왜) 섹션 제목을 print 대신 _say 로 직접 부르는가: 이 파일은 60행에서
+# `print = _say` 로 재바인딩하므로 print 도 안전하다. 하지만 그 재바인딩에
+# 기대면 "한글을 stdout 에 쓰는데 가드가 보인다" 는 판단을 hunk 만으로 하는
+# 도구에서 못 읽는다 (2026-10-01 실측: jev-pref 가 nonascii_stdout P=0.90 으로
+# 걸었다. cp1252/ascii/cp949 3종에서 실제로 돌려 exit 0 · PASS 297 · FAIL 0 이
+# 거짓 양성이었다). 의존성을 없애는 편이 코드도 게이트도 명확해진다.
+_say("-- 판정층 1층: 참조 신뢰 판정 (2026-10-01) --")
+
+import numpy as _np74  # noqa: E402
+
+
+def _r74_pts(vis=0.9, low=(), n=33):
+    """33점 합성 landmark. low 에 든 인덱스만 가시성을 0.05 로 낮춘다.
+
+    어깨(y=0.20)·골반(y=0.50) 을 고정해 몸통길이 0.30 을 만든다 —
+    실측 정상 구간(0.156~0.511) 안이다.
+    """
+    out = []
+    for i in range(n):
+        if i == 11:
+            x, y = 0.40, 0.20
+        elif i == 12:
+            x, y = 0.60, 0.20
+        elif i == 23:
+            x, y = 0.45, 0.50
+        elif i == 24:
+            x, y = 0.55, 0.50
+        else:
+            x, y = 0.5, 0.30 + (i % 7) * 0.05
+        out.append((x, y, 0.05 if i in low else vis))
+    return out
+
+
+class _LM74:
+    """x / y / visibility 를 가진 landmark 객체."""
+
+    def __init__(self, x, y, v):
+        self.x, self.y, self.visibility = x, y, v
+
+
+class _Det74:
+    def __init__(self, pts):
+        self._pts = pts
+
+    def detect(self, _img):
+        return type("R", (), {"pose_landmarks": [self._pts]})()
+
+
+_r74_real_lm = ck._TASKS_LANDMARKER
+
+try:
+    # --- 순수 함수 judge_points ---
+    _r = ck.judge_points(None)
+    check("R74: landmark 없으면 미판정",
+          _r["verdict"] == ck._JUDGE_UNDETERMINED, _r["verdict"])
+    check("R74: 미검출은 confidence 1.0 (보류임을 확신)",
+          _r["confidence"] == 1.0, str(_r["confidence"]))
+    check("R74: 미검출은 frame 이 없다", _r["frame"] is None)
+    check("R74: 빈 리스트도 미판정",
+          ck.judge_points([])["verdict"] == ck._JUDGE_UNDETERMINED)
+
+    _r = ck.judge_points(_r74_pts(vis=0.9))
+    check("R74: 전부 잘 보이면 intact", _r["verdict"] == ck._JUDGE_INTACT, _r["verdict"])
+    check("R74: intact 면 frame 이 나온다", _r["frame"] is not None, str(_r["frame"]))
+    check("R74: intact 면 미확인 관절 목록이 비었다",
+          _r["low_visibility"] == [], str(_r["low_visibility"]))
+    check("R74: confidence 는 근거인 가장 흐린 관절",
+          abs(_r["confidence"] - 0.9) < 1e-6, str(_r["confidence"]))
+    check("R74: checks 에 통과 항목이 기록된다",
+          any(c["check_id"] == "body_frame" and c["ok"] for c in _r["checks"]))
+
+    _r = ck.judge_points(_r74_pts(vis=0.9, low=(25,)))
+    check("R74: 무릎 하나만 흐리면 정상으로 넘기지 않는다",
+          _r["verdict"] == ck._JUDGE_UNDETERMINED, _r["verdict"])
+    check("R74: 어느 관절이 안 보인지 알려준다",
+          _r["low_visibility"] == ["l_knee"], str(_r["low_visibility"]))
+    check("R74: 이름이 순서대로 온다",
+          ck.judge_points(_r74_pts(low=(26, 15)))["low_visibility"]
+          == ["l_wrist", "r_knee"],
+          str(ck.judge_points(_r74_pts(low=(26, 15)))["low_visibility"]))
+
+    # --- 퇴화 프레임 ---
+    _deg = _r74_pts()
+    for _i in (11, 12, 23, 24):
+        _deg[_i] = (0.5, 0.5, 0.9)
+    _r = ck.judge_points(_deg)
+    check("R74: 어깨와 골반이 겹치면 퇴화로 보고 미판정",
+          _r["verdict"] == ck._JUDGE_UNDETERMINED, _r["verdict"])
+    check("R74: 퇴지면 frame 이 없다", _r["frame"] is None)
+
+    # --- v1 은 damaged 를 절대 내지 않는다 ---
+    _geo = _r74_pts(vis=0.9)
+    for _i in (13, 15, 14, 16, 25, 27, 26, 28):
+        _geo[_i] = (0.99, 0.99, 0.9)
+    _r = ck.judge_points(_geo)
+    check("R74: 기하가 말이 안 되어도 v1 은 damaged 를 내지 않는다",
+          _r["verdict"] != ck._JUDGE_DAMAGED, _r["verdict"])
+
+    # --- 판정 대상에 발이 없는가 ---
+    _core = set(i for i, _n in ck._JUDGE_CORE_LANDMARKS)
+    check("R74: 판정 대상이 10점", len(_core) == 10, str(len(_core)))
+    check("R74: 얼굴(0~10)은 판정 대상이 아니다", not _core & set(range(0, 11)),
+          str(sorted(_core)))
+    check("R74: 발(27~32)은 판정 대상이 아니다 (실측 중앙값 0.08~0.21)",
+          not _core & set(range(27, 33)), str(sorted(_core)))
+
+    # --- landmark 형태 통일 ---
+    class _Obj74:
+        def __init__(self, x, y, v):
+            self.x, self.y, self.visibility = x, y, v
+
+    _tri = ck._judge_triples([_Obj74(0.1, 0.2, 0.7), (0.3, 0.4),
+                              (0.5, 0.6, 0.8), None])
+    check("R74: 속성 객체와 튜플을 한 목록으로 읽는다", len(_tri) == 4, str(len(_tri)))
+    check("R74: 해석 불가 항목은 None 으로 남는다", _tri[3] is None)
+    check("R74: 2-튜플은 가시성 0.0 으로 채운다 (관측 불가)",
+          _tri[1][2] == 0.0, str(_tri[1]))
+    check("R74: 3-튜플 가시성을 보존", abs(_tri[2][2] - 0.8) < 1e-9, str(_tri[2]))
+    check("R74: 속성 객체의 가시성을 읽는다", abs(_tri[0][2] - 0.7) < 1e-9, str(_tri[0]))
+    check("R74: None 입력은 빈 목록", ck._judge_triples(None) == [])
+
+    # --- 몸통 프레임 ---
+    _fr = ck._judge_body_frame(ck._judge_triples(_r74_pts()))
+    check("R74: 몸통 프레임이 나온다 (몸통길이 0.30)",
+          _fr is not None and abs(_fr[2] - 0.30) < 1e-6, str(_fr))
+    check("R74: 원점은 중골반",
+          _fr is not None and abs(_fr[0] - 0.50) < 1e-6, str(_fr))
+    check("R74: 33점 미만이면 None",
+          ck._judge_body_frame(ck._judge_triples(_r74_pts(n=20))) is None)
+    _fr2 = ck._judge_triples(_r74_pts())
+    _fr2[11] = None
+    check("R74: 필수 관절이 None 이면 frame 은 None",
+          ck._judge_body_frame(_fr2) is None)
+
+    # --- with_visibility 경로 계약 ---
+    _u8 = _np74.zeros((64, 64, 3), _np74.uint8)
+    ck._TASKS_LANDMARKER = [_Det74([_LM74(p[0], p[1], p[2]) for p in _r74_pts()])]
+    _p2 = ck._pose_landmarks_from_tasks(_u8)
+    check("R74: 기본 호출은 2-튜플 (기존 호출자 계약 유지)",
+          _p2 is not None and len(_p2) == 33 and len(_p2[0]) == 2,
+          str(None if _p2 is None else len(_p2[0])))
+    check("R74: 2-튜플은 subject_bbox 를 그대로 받는다",
+          ck.subject_bbox(_p2) is not None)
+    _p3 = ck._pose_landmarks_from_tasks(_u8, with_visibility=True)
+    check("R74: with_visibility 면 3-튜플",
+          _p3 is not None and len(_p3) == 33 and len(_p3[0]) == 3,
+          str(None if _p3 is None else len(_p3[0])))
+    check("R74: visibility 값이 보존된다",
+          _p3 is not None and abs(_p3[0][2] - 0.9) < 1e-6,
+          str(None if _p3 is None else _p3[0]))
+    check("R74: judge_reference_trust 가 판정을 낸다",
+          ck.judge_reference_trust(_u8)["verdict"] == ck._JUDGE_INTACT)
+
+    # visibility 속성이 없으면 관측 불가로 친다
+    class _NoVis74:
+        def __init__(self, x, y):
+            self.x, self.y = x, y
+
+    ck._TASKS_LANDMARKER = [_Det74([_NoVis74(p[0], p[1]) for p in _r74_pts()])]
+    _p3b = ck._pose_landmarks_from_tasks(_u8, with_visibility=True)
+    check("R74: visibility 가 없으면 0.0 (관측 불가)",
+          _p3b is not None and _p3b[0][2] == 0.0,
+          str(None if _p3b is None else _p3b[0]))
+    check("R74: visibility 없으면 전부 미판정 (아무것도 안 보인다)",
+          ck.judge_reference_trust(_u8)["verdict"] == ck._JUDGE_UNDETERMINED)
+finally:
+    ck._TASKS_LANDMARKER = _r74_real_lm
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

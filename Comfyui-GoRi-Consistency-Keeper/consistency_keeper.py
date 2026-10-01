@@ -380,8 +380,18 @@ def _even_rgb(u8):
         return None
 
 
-def _pose_landmarks_from_tasks(u8):
-    """uint8 HWC RGB -> 33 (x, y). 모델/검출이 없으면 None."""
+def _pose_landmarks_from_tasks(u8, with_visibility=False):
+    """uint8 HWC RGB -> 33 (x, y). 모델/검출이 없으면 None.
+
+    왜(Why) with_visibility 인자가 있나 (2026-10-01): 판정층(work_status 10절)은
+    **관절이 보이는지** 를 알아야 하는데 이 함수는 좌표만 버리고 visibility 를
+    흘려보내고 있었다. 판정층을 위해 landmark 를 **두 번째로 검출**하면 프레임마다
+    mediapipe 가 한 번 더 돈다 — `new_vae_decode_in_per_frame_path` 와 같은 종류의
+    낭비다. 그래서 한 번의 검출 결과를 두 형태로 읽게 한다.
+
+    기본값이 False 라 기존 호출자(`_person_mask_from_rgb`, `subject_bbox`,
+    `_pose_landmarks`) 는 **똑같이 2-튜플**을 받는다. 그대로 둔다.
+    """
     lm = _pose_landmarker()
     if lm is None:
         return None
@@ -398,7 +408,17 @@ def _pose_landmarks_from_tasks(u8):
         pts = groups[0]
         if len(pts) < 33:
             return None
-        return [(float(p.x), float(p.y)) for p in pts[:33]]
+        if not with_visibility:
+            return [(float(p.x), float(p.y)) for p in pts[:33]]
+        out = []
+        for p in pts[:33]:
+            # visibility 는 landmark 마다 없을 수 있다. 없는 것은 0.0 이다 —
+            # 판정층이 "관측 불가"와 "관측됐으나 흐림"을 구분할 수 있어야 하는데,
+            # 두 값이 합쳐져도 게이트 결과는 같으므로 한 값으로 읽어도 무방하다.
+            vis = getattr(p, "visibility", None)
+            out.append((float(p.x), float(p.y),
+                        float(vis) if vis is not None else 0.0))
+        return out
     except Exception as _e:
         _note_pose_error('_pose_landmarks_from_tasks', _e)
         return None
@@ -1094,6 +1114,168 @@ def subject_bbox(landmarks):
         return (x0, y0, x1, y1)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# 판정층 1층 (2026-10-01, WORK_STATUS 10절)
+#
+# 원본 영역을 **믿어도 되는지** 판정한다. 절대 평가("이 자세가 옳나")가 아니다.
+# 원본이 캐릭터의 기준이므로 정상이면서 극적인 자세가 탈락해서는 안 된다.
+# 따라서 관절 가동범위·체격 비례·좌우 대칭은 **판정 근거가 아니다.**
+# WORK_STATUS 10-1 에서 방향을 정정한 이유다.
+# ---------------------------------------------------------------------------
+
+_JUDGE_INTACT = "intact"
+_JUDGE_DAMAGED = "damaged"
+_JUDGE_UNDETERMINED = "undetermined"
+
+# 판정 대상 관절. 발은 **제외**한다 (2026-10-01 실측 근거는 아래 주석 참조).
+_JUDGE_CORE_LANDMARKS = (
+    (11, "l_shoulder"), (12, "r_shoulder"),
+    (13, "l_elbow"), (14, "r_elbow"),
+    (15, "l_wrist"), (16, "r_wrist"),
+    (23, "l_hip"), (24, "r_hip"),
+    (25, "l_knee"), (26, "r_knee"),
+)
+
+# 왜(Why) 관절 10개만인가 — 실측(2026-10-01, conf 0.3, 검출 11장, 관절별 중앙값):
+#   어깨 1.00 · 팔꿈치 0.87~0.97 · 손목 0.81~0.90 · 골반 1.00 · 무릎 0.81~0.85
+#   발목 0.21 · 발뒤꿈치 0.19 · 발끝 0.08
+# 팔·다리는 중앙값이 높지만 **발은 0.1~0.2 다** — 관측값 자체가 신뢰할 수 없다.
+# 발에 같은 임계를 걸면 정상 발도 전부 미판정이 되므로 판정 대상에서 뺀다.
+# 무릎은 중앙값 0.83 이므로 판정 안에 남는다.
+
+# 가시성 임계 0.30 의 근거 (2026-10-01 실측): 팔다리 관절 132점 중 **77%** 가
+# 0.30 이상이고 중앙값은 0.93 이다. 0.50 으로 올리면 77% → 72% 로 떨어져
+# 정상 팔·다리를 미판정으로 버린다. 추측 숫자가 아니라 분포에서 고른 값이다.
+_JUDGE_VIS_MIN = 0.30
+
+# 몸통(중어깨→중골반) 길이 하한. 실측 정상 검출 구간은 0.156~0.511 이다.
+# 0.02 는 그 최솟값보다 7.8배 낮으므로 **퇴화 프레임만** 걸러내는 용도이며
+# 정상 판정에 영향하지 않는다.
+_JUDGE_TORSO_MIN = 0.02
+
+
+def _judge_triples(landmarks):
+    """landmark 열 -> [(x, y, visibility)] 리스트. 해석 불가하면 None 항목.
+
+    왜(Why) 형태를 두 가지 다 받나: 경로마다 landmark 모양이 다르다 (구
+    `mediapipe.solutions` 는 속성 객체, tasks API 는 튜플). 한쪽만 받는 코드는
+    반대쪽 경로에서 **조용히** 전부 None 이 된다 — `subject_bbox` 가 그 사고를
+    겪었다. 그래서 여기서 한 번 통일한다.
+    """
+    out = []
+    if landmarks is None:
+        return out
+    for lm in landmarks:
+        if isinstance(lm, (tuple, list)) and len(lm) >= 2:
+            x, y = lm[0], lm[1]
+            vis = lm[2] if len(lm) >= 3 else None
+        else:
+            x = getattr(lm, "x", None)
+            y = getattr(lm, "y", None)
+            vis = getattr(lm, "visibility", None)
+        if x is None or y is None:
+            out.append(None)
+            continue
+        out.append((float(x), float(y),
+                    float(vis) if vis is not None else 0.0))
+    return out
+
+
+def _judge_body_frame(tri):
+    """몸통 기준 프레임 -> (ox, oy, scale). 퇴화면 None.
+
+    왜(Why) 몸통길이가 단위인가 (WORK_STATUS 10-2): landmark 좌표는 이미지마다
+    정규화 스케일이 다르다. 중골반을 원점으로, 중어깨→중골반 거리를 단위로 삼으면
+    거리·프레이밍이 상쇄되어 같은 사람의 비율이 항상 같은 숫자가 된다.
+    """
+    if not tri or len(tri) < 33:
+        return None
+    try:
+        ls, rs = tri[11], tri[12]
+        lh, rh = tri[23], tri[24]
+        if ls is None or rs is None or lh is None or rh is None:
+            return None
+        ox = (lh[0] + rh[0]) * 0.5
+        oy = (lh[1] + rh[1]) * 0.5
+        sx = (ls[0] + rs[0]) * 0.5
+        sy = (ls[1] + rs[1]) * 0.5
+        scale = ((sx - ox) ** 2 + (sy - oy) ** 2) ** 0.5
+        if scale < _JUDGE_TORSO_MIN:
+            return None
+        return (ox, oy, scale)
+    except (TypeError, ValueError, IndexError, ZeroDivisionError):
+        return None
+
+
+def judge_points(pts):
+    """landmark 열 -> 판정 dict (순수 함수, 검출 없음).
+
+    반환::
+
+        {"verdict": "intact"|"damaged"|"undetermined",
+         "confidence": float,
+         "checks": [{"check_id", "ok", "detail"}],
+         "low_visibility": [관절 이름],
+         "frame": (ox, oy, scale) or None}
+
+    왜(Why) v1 은 damaged 를 **반환하지 않는다**: 기하 판정을 실측해 봤는데
+    쓸 만한 신호가 없었다. 정상 사진에서 투영 팔길이의 좌우 차이가 최대 0.745
+    (몸통길이 기준, 2026-10-01 실측) 나 났다 — 한쪽 팔이 앞으로 나온 사진에서는
+    그게 정상이다. 임계값을 추측으로 넣으면 정상 사진의 절반이 "손상" 으로
+    분류된다. 그러니 기하 검사 없이 판정할 수 있는 유일한 신뢰 신호인
+    **가시성만** 쓴다. 기준 데이터를 실측해 넣을 때 damaged 를 연다.
+    `_JUDGE_DAMAGED` 는 그때를 위해 상수로 남아 있다.
+
+    왜(Why) undetermined 가 꼭 필요한가: 발 가시성은 실측 중앙값이 0.08~0.21 다.
+    이걸 "정상"으로 떨어뜨리면 **스스로도 못 본 영역을 신뢰**하게 된다.
+    그게 지금 strength 가 0.00 으로 죽는 사고와 같은 종류다.
+    """
+    checks = []
+    tri = _judge_triples(pts)
+    if not tri:
+        checks.append({"check_id": "pose_detected", "ok": False,
+                       "detail": "landmark 없음"})
+        return {"verdict": _JUDGE_UNDETERMINED, "confidence": 1.0,
+                "checks": checks, "low_visibility": [], "frame": None}
+
+    checks.append({"check_id": "pose_detected", "ok": True, "detail": ""})
+
+    frame = _judge_body_frame(tri)
+    if frame is None:
+        checks.append({"check_id": "body_frame", "ok": False,
+                       "detail": "몸통 길이가 하한 이하거나 퇴화"})
+        return {"verdict": _JUDGE_UNDETERMINED, "confidence": 1.0,
+                "checks": checks, "low_visibility": [], "frame": None}
+    checks.append({"check_id": "body_frame", "ok": True, "detail": ""})
+
+    low = []
+    worst = 1.0
+    for idx, name in _JUDGE_CORE_LANDMARKS:
+        lm = tri[idx] if idx < len(tri) else None
+        vis = 0.0 if lm is None else lm[2]
+        if vis < worst:
+            worst = vis
+        if vis < _JUDGE_VIS_MIN:
+            low.append(name)
+    vis_ok = not low
+    checks.append({
+        "check_id": "core_visibility",
+        "ok": vis_ok,
+        "detail": "" if vis_ok else "미확인 관절: " + ", ".join(low),
+    })
+
+    verdict = _JUDGE_INTACT if vis_ok else _JUDGE_UNDETERMINED
+    # confidence 는 "그 판정을 내리는 근거의 세기"다. intact 면 가장 흐린
+    # 관절의 가시성이 곧 근거이고, undetermined 면 그것이 미판정의 근거다.
+    return {"verdict": verdict, "confidence": max(0.0, min(1.0, worst)),
+            "checks": checks, "low_visibility": low, "frame": frame}
+
+
+def judge_reference_trust(u8):
+    """uint8 HWC RGB 원본 -> 판정 dict. 검출 실패도 미판정으로 친다."""
+    return judge_points(_pose_landmarks_from_tasks(u8, with_visibility=True))
 
 
 def framing_similarity(box_a, box_b) -> float:
