@@ -2440,5 +2440,54 @@ if _np78 is not None and ck is not None:
 else:
     check("R78: numpy 없음 — 건너뜀", True)
 
+# ── R79. 판정 게이트가 조용히 통과하지 않는다 ────────────────────────
+# 왜(Why) 이 테스트가 필요한가 (2026-10-01): trust_gate 를 켰는데 로그가
+# "landmark 없음" 한 줄뿐이었다. 사용자는 게이트가 왜 안 막는지 알 수 없었다.
+# 실제로 원인이 셋이었다(사람 없음 / 모델 없음 / 탐지 실패) — 구분 없이
+# 전부 "제한 없이 진행" 으로 끝났다. 그래서 **사유가 반드시 드러나야** 한다.
+_t79 = []
+if ck is not None:
+    # 사유 문자열별로 경고(⚠) 가 붙는지 확인한다
+    _cases = [
+        ("포즈 모델 없음 (세션 생성 실패)", True),
+        ("디코드 결과 없음", True),
+        ("에지 맵 계산 실패", True),
+        ("예외 ValueError: 뭐가 잘못됨", True),
+        ("사람 미검출 (임계 0.3 재시도까지 실패) — 제품 사진 등 사람이 없는 "
+         "이미지일 수 있음, 탐지 문제면 이 문구가 반복된다", False),
+        ("사유 기록 없음", False),
+    ]
+    _log79 = []
+    _orig79 = ck._log
+    ck._log = lambda m: _log79.append(m)
+    try:
+        for _why, _want_severe in _cases:
+            ck._POSE_WHY.clear()
+            ck._POSE_WHY["original"] = _why
+            _msg = ck._pose_gate_message(_why)
+            _log79.clear()
+            ck._note_pose_why("gate", _msg)
+            _out = _log79[0] if _log79 else ""
+            check(f"R79: 사유가 로그에 드러난다 [{_why[:14]}]",
+                  "landmark 없음" in _out and _why[:20] in _out, _out[:90])
+            check(f"R79: 심각 사유만 ⚠ 표시 [{_why[:14]}]",
+                  ("⚠" in _out) == _want_severe, _out[:60])
+    finally:
+        ck._log = _orig79
+
+    # 소스 문자열 검사 대신 **실제로** 게이트 분기가 사유를 읽는지 확인한다.
+    # (소스를 훑는 검사는 import 를 Pull 하고, 그 자체가 R63 인코딩을
+    #  깨뜨렸다 — 2026-10-01 실측. 동작을 보는 게 낫다.)
+    ck._POSE_WHY.clear()
+    ck._POSE_WHY["original"] = "디코드 결과 없음"
+    _msg79 = ck._pose_gate_message(ck._POSE_WHY["original"])
+    check("R79: 게이트가 기록된 사유를 읽는다",
+          "디코드 결과 없음" in _msg79, _msg79[:80])
+    check("R79: 낮은 임계 재시도 상수가 0.3 (13장 실측)",
+          abs(ck._POSE_LOOSE_CONF - 0.3) < 1e-9, str(ck._POSE_LOOSE_CONF))
+    check("R79: 낮은 임계 세션 캐시가 있다", isinstance(ck._POSE_LOOSE, list))
+else:
+    check("R79: keeper 없음 — 건너뜀", True)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

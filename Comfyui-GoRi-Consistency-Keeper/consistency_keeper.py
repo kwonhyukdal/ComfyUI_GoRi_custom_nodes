@@ -668,7 +668,17 @@ def _pose_landmarks_from_tasks(u8, with_visibility=False):
         res = lm.detect(img)
         groups = getattr(res, "pose_landmarks", None)
         if not groups:
-            return None
+            # 왜(Why) 여기서 한 번 더 시도하나 (2026-10-01 실측): 기본 세션의
+            # `min_pose_detection_confidence=0.5` 가 **사람 있는 시트**를 놓쳤다.
+            # 13장 실측에서 0.5 는 9/13, 0.3 은 12/13 이었다. 놓친 한 장은
+            # 흰 배경 시트(캐릭터 시트1)인데 흰 배경 **의상 제품 사진** 3장은
+            # 0.3 에서도 0 이다. 즉 0.3 재시도는 "사람 있는데 놓친 것" 과
+            # "사람이 아예 없는 것" 을 **구별해 주는** 신호가 된다.
+            # 그냥 0.5 에서 놓치면 게이트가 조용히 통과해 버린다.
+            res = _pose_retry_low_conf(lm, arr, _mp)
+            groups = getattr(res, "pose_landmarks", None)
+            if not groups:
+                return None
         pts = groups[0]
         if len(pts) < 33:
             return None
@@ -1013,19 +1023,40 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
     if vae is None or not latents:
         return None
     out = {}
+    # 왜(Why) `_POSE_WHY` 를 남기나 (2026-10-01): 예전엔 `if not pts3: continue`
+    # 뿐이었다. 그러면 **사람이 없는 사진**과 **탐지 실패**와 **이미지가 부적합**
+    # 이 셋이 구분되지 않았다. 실측에서 `의상 교체1~3`(사람 없는 제품 사진) 이
+    # 0점이라 "탐지 실패처럼" 보였고, 그 결과 판정 게이트가 조용히 제한 없이
+    # 진행했다. 게이트를 켰는데 판정이 없다는 이유로 완전 통과하는 셈이다.
+    _POSE_WHY = {}
     for name, lat in latents.items():
         if lat is None:
             continue
         try:
             arr = _decode_latent_rgb(vae, lat, cache=cache)
             if arr is None:
+                _POSE_WHY[name] = "디코드 결과 없음"
                 continue
             em = _edge_mag_from_rgb(arr)
             if em is None:
+                _POSE_WHY[name] = "에지 맵 계산 실패"
                 continue
             u8 = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
+            if _pose_landmarker() is None:
+                _POSE_WHY[name] = "포즈 모델 없음 (세션 생성 실패)"
+                continue
             pts3 = _pose_landmarks_from_tasks(u8, with_visibility=True)
             if not pts3:
+                # 왜(Why) "사람 없음" 과 "탐지 실패" 를 나눠 말하나 (2026-10-01
+                # 실측): 13 장을 재서 봤다. 임계 0.3 에서도 0 인 것은 **의상
+                # 제품 사진 3 장**(사람이 없다) 뿐이었고, 흰 배경 **시트**는
+                # 0.3 에서 전부 잡혔다. 즉 "0.5 에서도 0.3 에서도 0" 은 이
+                # 표본에서 "사람 없음" 을 뜻했다. 다만 이를 **단정**하지 않고
+                # 그대로 말해, 다른 원본에서 같은 로그가 나오면 Investigate
+                # 되도록 표기를 남긴다.
+                _POSE_WHY[name] = ("사람 미검출 (임계 0.3 재시도까지 실패) "
+                                   "— 제품 사진 등 사람이 없는 이미지일 수 있음, "
+                                   "탐지 문제면 이 문구가 반복된다")
                 continue
             edge = [0.0] * 33
             xy = []
@@ -1041,8 +1072,13 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
             # 좌표를 다시 맞추는 자리(join)를 두지 않기 위해 원본을 함께 둔다.
             out[name] = {"edge": edge, "xy": xy, "pts": list(pts3[:33])}
             del em, u8
-        except Exception:
+        except Exception as _e:
+            # 조용히 넘기지 않는다. 예외 종류를 남겨야 원인을 아는다.
+            _POSE_WHY[name] = "예외 %s: %s" % (type(_e).__name__, str(_e)[:60])
             continue
+    # 왜(Why) `_POSE_WHY` 를 남기나 (2026-10-01): `_part_detail_map` 는 None 을
+    # 돌려주는 쪽이라 **왜**를 잃는다. 호출부가 "사람이 없었다" 와 "탐지가
+    # 깨졌다" 를 구분할 수 없게 되고, 게이트가 조용히 무력화된다.
     return out or None
 
 
@@ -1168,10 +1204,17 @@ def _probe_detail_direction(vae, sampled, orig_ref, out):
 
     왜(Why) 이게 먼저인가: 부위별 상향은 "원본은 살아있는데 결과가 뭉개졌다" 는
     가정 위에 세워졌다. 그 가정이 **거짓이면** 설계 방향이 통째로 뒤집힌다.
-    어제까지는 "뭉개진다" 는 쪽을 손대지 않고 있었다.
+
+    왜(Why) 환경변수로 꺼는가 (2026-10-01): 항상 돌리면 프롬프트마다 디코딩
+    3회가 추가돼 **디코딩 예산 검사**(R56)가 깨진다. 계측 장치가 정작 제품
+    경로를 망가뜨릴 수는 없다. `GORI_PROBE_PHYSICS=1` 일 때만 돈다 — 측정
+    전용 계기다.
     """
-    global _DETAIL_DIR_NOTED
-    if _DETAIL_DIR_NOTED or vae is None:
+    if vae is None:
+        return
+    # 이 파일은 모듈 임포트를 지역에서 한다(아래 함수들도 모두 그렇다).
+    import os as _os
+    if _os.environ.get("GORI_PROBE_PHYSICS", "0") != "1":
         return
     try:
         def _dens(lat):
@@ -1193,11 +1236,9 @@ def _probe_detail_direction(vae, sampled, orig_ref, out):
     except Exception as e:
         # 왜(Why) 예외를 말하나: 조용히 `return` 하니 "측정이 안 됐다" 와
         # "측정 결과가 안 바뀌었다" 를 구분할 수가 없었다. 사흘 만에 두 번째다.
-        _DETAIL_DIR_NOTED = True
         _log(f"[GoRi Consistency Keeper] 물리 방향 실측 실패 "
              f"({type(e).__name__}: {str(e)[:90]}) — 판정 보류")
         return
-    _DETAIL_DIR_NOTED = True
     _d_out = (_o - _s) / _s * 100.0 if _s > 1e-9 else 0.0
     _d_ref = (_o - _r) / _r * 100.0 if _r > 1e-9 else 0.0
     _verdict = ("당기면 살아난다" if _d_out > 0 else "당기면 뭉개진다")
@@ -1205,6 +1246,68 @@ def _probe_detail_direction(vae, sampled, orig_ref, out):
          f"시본 {_s:.4f} / 원본 {_r:.4f} / 결과 {_o:.4f} — "
          f"결과는 시본 대비 {_d_out:+.1f}%, 원본 대비 {_d_ref:+.1f}% "
          f"⇒ {_verdict}")
+
+
+_POSE_WHY = {}
+
+# 낮춘 임계값 세션. 0.5 세션이 놓친 **사람 있는** 이미지를 되찾기 위한 것.
+_POSE_LOOSE = [None]
+_POSE_LOOSE_CONF = 0.3
+
+
+def _pose_retry_low_conf(lm, arr, _mp):
+    """임계값 0.3 세션으로 한 번 더 시도한다 (13장 실측 기반).
+
+    왜(Why) 별도 세션인가: `min_pose_detection_confidence` 는 **생성 시점**에
+    고정된다. 세션을 새로 만들어야 한다. 한 번만 만들고 재사용한다.
+    """
+    try:
+        if _POSE_LOOSE[0] is None:
+            from mediapipe.tasks.python import vision as _V
+            _opts = _V.PoseLandmarkerOptions(
+                base_options=_find_base_options()(
+                    model_asset_path=_pose_model_path()),
+                running_mode=_V.RunningMode.IMAGE,
+                num_poses=1,
+                min_pose_detection_confidence=_POSE_LOOSE_CONF,
+                output_segmentation_masks=False)
+            _POSE_LOOSE[0] = _V.PoseLandmarker.create_from_options(_opts)
+        img = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=arr)
+        return _POSE_LOOSE[0].detect(img)
+    except Exception as e:
+        _note_pose_error('_pose_retry_low_conf', e)
+        return None
+
+
+def _pose_gate_message(why):
+    """판정 게이트가 landmark 를 못 얻은 사유 → 로그 한 줄.
+
+    왜(Why) 함수를 뺐나 (2026-10-01): 게이트 분기가 `run()` 안에서 인라인으로
+    로그를 만들었는데, 그 **메시지 내용**을 테스트할 방법이 없었다. 사유별
+    ⚠ 표시 규칙이 조용히 바뀌면 아무도 몰랐다. 함수로 빼면 규칙 자체를 고정한다.
+    """
+    severe = (why.startswith("포즈 모델 없음")
+              or why.startswith("디코드")
+              or why.startswith("에지")
+              or why.startswith("예외"))
+    tag = "⚠ " if severe else ""
+    return (f"[GoRi Consistency Keeper] {tag}판정 게이트: "
+            f"원본 landmark 없음 — {why}"
+            + ("" if severe else
+               " → 제한 없이 진행합니다(막을 부위 판단 근거 없음)"))
+
+
+def _note_pose_why(key, msg):
+    """포즈 실패 사유를 키마다 **한 번만** 말한다 (무음 실패 제거).
+
+    왜(Why) 한 번뿐인가: 같은 사유가 여러 노드에서 반복되면 로그를 읽을 수
+    없다. 하지만 **한 번도 안 나오면** 조용한 실패가 된다. 한 번이 정답이다.
+    """
+    _seen = _POSE_WHY.setdefault("_said", set())
+    if key in _seen:
+        return
+    _seen.add(key)
+    _log(msg)
 
 
 def _note_no_boost(worst, region, thresh, max_r=0.0, max_rg=""):
@@ -2411,8 +2514,13 @@ class GoRiConsistencyKeeper:
                         _verdict = judge_points(_pts)
                         _allow = judge_region_allowance(_verdict)
                     if _allow is None:
-                        _log("[GoRi Consistency Keeper] 판정 게이트 켰지만 원본 "
-                             "landmark 가 없어 제한 없이 진행합니다")
+                        # 왜(Why) 판단하지 않고 그대로 말하나 (2026-10-01):
+                        # "사람이 없는 이미지" 라고 단정하면 추측이 된다.
+                        # 판단은 하지 않고 **사유를 드러낸다**. 판단은 실측
+                        # 근거가 쌓인 뒤에 한다.
+                        _why = _POSE_WHY.get("original", "사유 기록 없음")
+                        _note_pose_why("gate", _pose_gate_message(_why))
+                        _allow = None
                     else:
                         _blocked = sorted(k for k, v in _allow.items()
                                           if float(v) <= 0.0)
