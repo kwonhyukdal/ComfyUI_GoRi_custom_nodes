@@ -192,6 +192,25 @@ stage 대상이 아니므로 규칙 2 는 **수정 시각**으로 신선도를 �
 문서가 없으면(fresh clone) 규칙 2 는 적용되지 않는다 — 아무도 안 가진 파일에
 게이트를 걸면 결국 우회당하기 때문이다.
 
+**테스트 하네스는 이 저장소에 없다.** 아래 별도 저장소에 있다 (2026-10-01):
+```
+C:\Users\khd19\Documents\개발\coding skills\My_Jev_Browser_harness_skills
+    \examples\comfyui-gori\
+        wf_to_api.py     UI→API 변환기 (노드 무관하게 재사용 가능)
+        run_keeper.py    실행기 (값 대입 8곳만 노드별로 수정)
+        Harness_Logic.md 해설서 + 문서 이름 규칙
+```
+> 워크플로에 하네스가 덧대는 배선(값 대입 8곳과 그 사유)은 그쪽 `Harness_Logic.md` 3절에 있다.
+
+**문서 이름 규칙: 개발 대상 이름 + `_Logic.md`**
+| 대상 | 폴더 | 문서 |
+|---|---|---|
+| 키퍼 | `Comfyui-GoRi-Consistency-Keeper/` | `Keeper_Logic.md` |
+| 카메라 | `ComfyUI-GoRi-Camera-Director/` | `camera_Logic.md` |
+
+**새 노드를 개발하면** ① `<노드이름>_Logic.md` 작성 ② `.gitignore` 추가
+③ 훅에 폴더↔문서 짝 추가. 세 단계를 빠뜨리면 그 노드는 규칙 2 에 걸리지 않습니다.
+
 > **대소문자 함정 (2026-10-01 실측)**: git 은 Windows 에서도 pathspec 을
 > **대소문자를 구분**합니다. `git add "Comfyui-GoRi-Camera-Director/..."` 는
 > exit=0 인데 **아무것도 stage 하지 않습니다**. 그래서 훅의 폴더명은

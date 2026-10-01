@@ -237,7 +237,9 @@ run_tests.bat
 # **로컬에서** 검사한다(`.githooks/pre-commit` 규칙 2). gitignore 에 있으므로
 # stage 대상이 아니다.
 # 이름 규칙: 개발 대상 이름 + `_Logic.md`
+# 테스트 하네스는 이 저장소가 아니라 별도 저장소에 있다:
+#   C:\Users\khd19\Documents\개발\coding skills\My_Jev_Browser_harness_skills
+#     \examples\comfyui-gori\  (wf_to_api.py, run_keeper.py, Harness_Logic.md)
 Keeper_Logic.md
 camera_Logic.md
-Harness_Logic.md
 

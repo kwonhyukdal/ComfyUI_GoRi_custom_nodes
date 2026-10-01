@@ -29,7 +29,9 @@ git commit --no-verify    # 진짜 문서 갱신이 불필요하다고 판단될
 | 1 | `.py` 를 stage 함 | `WORK_STATUS.md` 를 함께 stage |
 | 2 | **키퍼 폴더**의 `.py` 를 stage 함 | `Keeper_Logic.md` 가 코드보다 최신이어야 함 |
 | 2 | **카메라 폴더**의 `.py` 를 stage 함 | `camera_Logic.md` 가 코드보다 최신이어야 함 |
-| 2 | **`tools/`** 의 `.py` 를 stage 함 | `Harness_Logic.md` 가 코드보다 최신이어야 함 |
+
+테스트 하네스는 이 저장소가 아니라 별도 저장소에 있습니다:
+`Documents\개발\coding skills\My_Jev_Browser_harness_skills\examples\comfyui-gori\`
 
 **새 노드를 만들면 세 단계를 따라야 규칙 2 에 걸립니다:**
 ① `<노드이름>_Logic.md` 작성 ② `.gitignore` 에 추가 ③ 훅에 폴더↔문서 짝 추가.
