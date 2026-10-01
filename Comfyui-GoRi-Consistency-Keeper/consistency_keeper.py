@@ -1063,6 +1063,23 @@ DETAIL_CRITICAL = ("hand_left", "hand_right", "leg_left", "leg_right",
 
 
 
+_NO_BOOST_NOTED = False
+
+
+def _note_no_boost(worst, region, thresh):
+    """부위별 상향이 없었던 이유를 **한 번만** 말한다 (조용한 무동작 방지)."""
+    global _NO_BOOST_NOTED
+    if _NO_BOOST_NOTED:
+        return
+    _NO_BOOST_NOTED = True
+    if not region:
+        _log("[GoRi Consistency Keeper] 부위별 복원: 판단 불가 (원본 에지가 0)")
+        return
+    _log(f"[GoRi Consistency Keeper] 부위별 복원: 상향할 부위 없음 "
+         f"(가장 손실 큰 부위 {region} {worst:.0%} < 임계 {thresh:.0%}) — "
+         f"결과물이 원본만큼 살아 있습니다")
+
+
 def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35,
                  allow=None):
     """부위별 adaptive 강도 → (강도 배열|None, 로그 문자열).
@@ -1134,6 +1151,25 @@ def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35,
                 boost_list.append(f"{region}({loss:.0%})")
         if boost_list:
             return arr, ", ".join(boost_list)
+        # 왜(Why) 여기서 말하나 (2026-10-01 실측): 이 경로는 **한 번도 켜지지
+        # 않았다** — 로그 0건, 실패 0건. 조용히 None 을 돌려주는 구조라
+        # "안 되는 것" 과 "될 필요가 없는 것" 이 구분되지 않았다. 그래서 어떤
+        # 부위가 얼마나 손실됐는지를 한 번 말한다. 판정 게이트는 이 경로에만
+        # 걸려 있으므로 여기가 조용하면 게이트도 조용하다.
+        _worst = 0.0
+        _worst_r = ""
+        for _rg, _idxs in PART_REGIONS.items():
+            if _rg not in DETAIL_CRITICAL:
+                continue
+            _r = sum(ref[i] for i in _idxs) / len(_idxs)
+            if _r <= 1e-6:
+                continue
+            _s = sum(samp[i] for i in _idxs) / len(_idxs)
+            _l = (_r - _s) / _r
+            if _l > _worst:
+                _worst = _l
+                _worst_r = _rg
+        _note_no_boost(_worst, _worst_r, thresh)
         return None, ""
     except Exception:
         return None, ""
