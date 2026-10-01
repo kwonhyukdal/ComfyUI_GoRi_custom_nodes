@@ -2143,5 +2143,136 @@ check("R75: trust_gate 기본값이 False (opt-in)",
 check("R75: run() 이 trust_gate 를 받는다",
       "trust_gate" in ck.GoRiConsistencyKeeper.run.__code__.co_varnames)
 
+# ---------------------------------------------------------------------------
+# R76: 감쇠가 노드를 죽이지 않게 한다 (2026-10-01)
+#
+# (왜) 이게 급했던가: 실측에서 eff 가 0.00 이 되어 `if eff:` / `eff > 0` 이
+# 전부 거짓이 되었고, 그 뒤에 있는 부위별 복원과 **판정층이 아예 도달하지
+# 않았다.** 임계값(0.8/2.0)이 Qwen Image 2.1 에서 재측정된 적이 없다.
+# 그래서 ① 정규화 값을 계산해 로그로 노출시키고 ② 감쇠에 **바닥**을 둔다.
+# 바닥은 측정값이 아니라 설계 파라미터다 — "줄인다" 는 의도는 남기되
+# "조용히 아무것도 하지 않는다" 는 상태는 없애야 한다.
+# ---------------------------------------------------------------------------
+_say("-- 감쇠 바닥과 정규화 불일치 (2026-10-01) --")
+
+if HAS_TORCH:
+    _t76 = _t
+    # 1) 같은 텐서면 정규화 불일치는 0
+    _a = _t76.zeros(1, 4, 8, 8)
+    _a += 0.5
+    _n0 = ck._drift_norm(_a, _a)
+    check("R76: 참조와 같으면 정규화 불일치 0", _n0 is not None and abs(_n0) < 1e-9,
+          str(_n0))
+
+    # 2) 스케일 불변 — **차이는 유지한 채** 참조 크기만 2배로 올린다.
+    # (처음엔 `_a * 2.0` 을 샘플로 넘겨 차이가 0 이 되어 검증이 무의미했다.
+    #  스케일 의존성은 "같은 차이인데 수치가 달라지는가" 로 보여야 한다.)
+    _r1 = _t76.ones(1, 4, 8, 8)              # 참조 크기 1.0
+    _s1 = _r1 + 0.5                          # 차이 0.5
+    _r2 = _t76.ones(1, 4, 8, 8) * 2.0       # 참조 크기 2.0
+    _s2 = _r2 + 0.5                          # 차이 역시 0.5
+    _n1 = ck._drift_norm(_s1, _r1)
+    _n2 = ck._drift_norm(_s2, _r2)
+    _m1 = ck._drift_mse(_s1, _r1)
+    _m2 = ck._drift_mse(_s2, _r2)
+    check("R76: 절대 MSE 는 참조 크기가 바뀌어도 같다 (스케일 무관)",
+          _m1 is not None and _m2 is not None and abs(_m1 - _m2) < 1e-9,
+          "%.6f vs %.6f" % (_m1, _m2))
+    check("R76: 정규화 값은 참조 크기에 따라 달라진다 (그래서 MSE 를 못 쓴다)",
+          _n1 is not None and _n2 is not None
+          and abs(_n2 - _n1 / 4.0) < 1e-6,
+          "%.6f -> %.6f (기대 %.6f)" % (_n1, _n2, _n1 / 4.0))
+    check("R76: 정규화는 0 과 1 사이를 읽는다 (기준선 확인)",
+          _n1 is not None and 0.0 < _n1 < 1.0, str(_n1))
+
+    # 3) 0 텐서는 분모가 0 — 비교 불가로 친다
+    check("R76: 참조가 전부 0 이면 정규화 불가(None)",
+          ck._drift_norm(_s1, _t76.zeros_like(_r1)) is None)
+
+    # 4) 드리프트 임계값은 **재측정 대기** — 이 테스트는 그 사실만 고정한다.
+    #    (처음엔 "감쇠 바닥" 을 넣었는데 기존 테스트 셋이 그 계약을 지켜서
+    #     깨뜨렸다. 감쇠가 0 이면 region 경로도 0 이어야 감쇠를 우회할 수 없다.
+    #     바닥은 안전장치를 뚫는 것이라 되돌렸다.)
+    check("R76: 큰 유한 drift 는 0 으로 내려간다 (안전장치 유지)",
+          ck._damp_factor(5.198) == 0.0, str(ck._damp_factor(5.198)))
+    check("R76: 작은 drift 는 감쇠하지 않는다",
+          ck._damp_factor(0.5) == 1.0, str(ck._damp_factor(0.5)))
+    check("R76: drift 이 None 이면 감쇠하지 않는다",
+          ck._damp_factor(None) == 1.0)
+    check("R76: nan 은 0 (전파 차단)",
+          ck._damp_factor(float("nan")) == 0.0,
+          str(ck._damp_factor(float("nan"))))
+    check("R76: 감쇠 바닥 상수를 다시 넣지 않았다 (계약 위반)",
+          not hasattr(ck, "_DAMP_FLOOR"), "_DAMP_FLOOR 가 살아있다")
+    # --- VAE 축소 비율은 하드코딩하지 않는다 ---
+    # 왜(Why) 디코드에서 배우는가: 프로브로 "재서" 재는 순간 모델이 VRAM 에
+    # 올라간 상태라 ms 가 아니라 초 단위가 걸렸다(2026-10-01 실측). 디코드는
+    # 이미 하고 있으니 거기서 비율을 읽으면 공짜다.
+    _say("-- VAE 축소 비율은 실제 디코드에서 배운다 (하드코딩 금지) --")
+
+    class _NoVae:
+        pass
+
+    _lat16 = _t76.zeros(1, 4, 4, 4)          # latent 4칸
+    _dec64 = _t76.zeros(1, 3, 64, 64)        # 이미지 64px → 16배
+    check("R76: Qwen 계열(16배)은 16 이라고 배운다",
+          ck._vae_pixel_factor_learn(_NoVae(), _lat16, _dec64) == 16,
+          str(ck._vae_pixel_factor_learn(_NoVae(), _lat16, _dec64)))
+    check("R76: 배운 값이 그 VAE 에 대해 남는다",
+          ck._vae_pixel_factor_for(_NoVae()) == 16,
+          str(ck._vae_pixel_factor_for(_NoVae())))
+    # 왜(Why) 다른 VAE 에 새지 않는가: 한 세션에 VAE 가 여러 개 로드된다
+    # (실제로 이 워크플로는 WanVAE 와 QwenImage21 를 함께 쓴다). 전역 하나면
+    # 한쪽에서 배운 배율이 다른 쪽에 새어 조용히 틀린다 — 테스트에서 실제로
+    # 그 일이 났고 R72 가 깨졌다.
+    class _OtherVae:
+        pass
+
+    check("R76: 다른 VAE 로 새지 않는다 (구조로 구분)",
+          ck._vae_pixel_factor_for(_OtherVae())
+          == ck._VAE_PIXEL_FACTOR_FALLBACK,
+          str(ck._vae_pixel_factor_for(_OtherVae())))
+    _lat8 = _t76.zeros(1, 4, 8, 8)           # latent 8칸 → 8배
+    check("R76: SD 계열(8배)은 8 이라고 배운다",
+          ck._vae_pixel_factor_learn(_OtherVae(), _lat8, _dec64) == 8,
+          str(ck._vae_pixel_factor_learn(_OtherVae(), _lat8, _dec64)))
+    check("R76: 두 VAE 가 서로 간섭하지 않는다",
+          ck._vae_pixel_factor_for(_NoVae()) == 16
+          and ck._vae_pixel_factor_for(_OtherVae()) == 8,
+          "16쪽=%s 8쪽=%s" % (ck._vae_pixel_factor_for(_NoVae()),
+                              ck._vae_pixel_factor_for(_OtherVae())))
+    check("R76: 배울 수 없으면 안전망을 유지한다",
+          ck._vae_pixel_factor_learn(_NoVae(), None, None) == 16)
+    check("R76: 안전망은 SD 계열 값(기존 동작과 동일)",
+          ck._VAE_PIXEL_FACTOR_FALLBACK == 8)
+    check("R76: 프로브 인코딩 함수는 남아있지 않다 (비용 회피)",
+          not hasattr(ck, "_vae_pixel_factor"),
+          "_vae_pixel_factor 가 살아있다")
+
+    # --- 원본 기준을 이미지에서 직접 인코딩 ---
+    class _VFEnc:
+        def __init__(self):
+            self.device = "cpu"
+            self.seen = None
+
+        def encode(self, px):
+            self.seen = tuple(px.shape)
+            return px[:, :4]
+
+    check("R76: (B,H,W,C) 를 (B,C,H,W) 로 옮겨 인코딩한다",
+          _VFEnc().encode(_t76.zeros(2, 8, 6, 3).movedim(-1, 1)).shape[1] == 3)
+    _e76 = _VFEnc()
+    _e76.encode(_t76.zeros(1, 64, 64, 3)[..., :3].movedim(-1, 1))
+    check("R76: 앞 3채널만 쓴다 (알파 제외)",
+          _e76.seen == (1, 3, 64, 64), str(_e76.seen))
+    check("R76: 원본 이미지 입력이 등록됐다",
+          "original_image" in (ck.GoRiConsistencyKeeper.INPUT_TYPES()["optional"]))
+    check("R76: run() 이 original_image 를 받는다",
+          "original_image" in ck.GoRiConsistencyKeeper.run.__code__.co_varnames)
+    check("R76: 이미지 없으면 None",
+          ck._encode_image_ref(None, _t76.zeros(1, 8, 8, 3)) is None)
+else:
+    check("R76: torch 없음 — 건너뜀", True)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

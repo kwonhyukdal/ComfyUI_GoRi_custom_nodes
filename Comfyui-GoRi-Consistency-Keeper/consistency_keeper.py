@@ -74,11 +74,63 @@ def _drift_mse(a, b) -> float | None:
         return None
 
 
+def _drift_norm(sampled, matched) -> float | None:
+    """두 latent 를 **참조 크기 기준**으로 정규화한 불일치. 비교 불가면 None.
+
+    왜(Why) MSE 를 그대로 쓰면 안 되는가 (2026-10-01 실측):
+    `MSE(sampled, matched)` 는 **절대값**이라 latent 스케일에 비례한다.
+    그런데 0.8 / 2.0 이라는 임계값은 SD 계열에서 잡은 값이고, Qwen Image
+    2.1 (int8) 로 바꿔진 뒤 한 번도 재측정되지 않았다. 실측으로 드러난 사실:
+
+        이전 실행   camera 5.72   original 14.33   → 둘 다 감쇠 0.00
+        이번 실행   camera 5.198  original 14.217  → 둘 다 감쇠 0.00
+
+    즉 이 워크플로의 **전형적인 값이 임계값보다 한 자릿수 크다.** 감쇠가 전부
+    0 이 되어 노드가 무조건 아무것도 하지 않게 되어 있었다.
+
+    게다가 `original` 의 불일치가 `camera` 보다 **더 컸다.** 같은 사람인데
+    원본이 카메라에서 더 멀다면, 두 latent 의 스케일이 다르다는 뜻이다 —
+    이미지가 실제로 다른 게 아니라 **단위가 다른 것.**
+
+    그래서 크기로 나눈다. `matched` 의 평균제곱값으로 나누면 "얼마나 다른가"가
+    "참조의 크기 대비 얼마나 다른가" 가 되고, 모델이 바뀌어도 임계값이 유지된다.
+    0 = 완전히 같음, 1 = 참조 크기만큼 다름.
+
+    **아직 임계값은 이 값으로 재측정되지 않았다.** 아래 실행 로그가 그 값을
+    직접 말해준다. 그 실측값을 보고 임계값을 정한다 — 지금 숫자를 넣으면
+    또 추측이 된다.
+    """
+    try:
+        import torch as _t
+        den = float(_t.mean(matched.float() ** 2).item())
+        if den <= 1e-12:
+            return None
+        return float(_t.mean((sampled.float() - matched.float()) ** 2).item()) / den
+    except Exception:
+        return None
+
+
 def _damp_factor(drift) -> float:
     """틀어짐 기반 자동 감쇠. 작으면 1, 크면 0으로 수렴.
 
     왜(Why): "융합하되 변형 없이" — 당기면 깨질 구도면 노드가 스스로
     손을 놓는다. 0.8부터 선형 감쇠, 2.0에서 0.
+
+    **바닥을 두지 않는다 — 의도적으로.**
+    처음엔 "감쇠가 0 이 되면 뒤 경로가 전부 죽는다" 고 보고 바닥(0.25)을
+    넣었다. 그러자 기존 테스트 셋이 깨졌다:
+
+        자동 감쇠 계수
+        큰 틀어짐은 당김 감쇠
+        감쇠로 eff=0 이면 region 당김도 0 (감쇠 우회 방지)
+
+    세 번째가 핵심이다. **eff 가 0 이면 region 경로도 0 이어야 한다** 는
+    계약이고, 그게 없는 순간 사용자가 강도를 올려 region 경로로 감쇠를
+    우회할 수 있다. 그러면 "틀어지면 손을 놓는다" 는 노드의 목적이 무너진다.
+
+    즉 바닥은 "조용한 무동작" 을 고치는 것처럼 보이지만 실제로는
+    **안전장치를 뚫는 것**이었다. 문제는 바닥이 아니라 임계값이다 —
+    위 `_drift_norm` docstring 의 실측값으로 다시 잡는다.
     """
     try:
         if drift is None or drift <= 0.8:
@@ -148,6 +200,140 @@ def _as_rgb_hwc(arr):
         return None
 
 
+# VAE 가 latent 1칸을 몇 픽셀 이미지로 복원하는지 못 알아낼 때의 임시값.
+# **8 은 SD 계열 기준이고 Qwen 은 16 이다.** 실패했을 때만 쓰는 안전망이며
+# 정상 경로에서는 쓰이지 않는다.
+_VAE_PIXEL_FACTOR_FALLBACK = 8
+
+
+# VAE 의 "latent 1칸 = 이미지 몇 픽셀" 을 **클래스별로** 기억한다.
+# **프로브로 재지 않는다** — 2026-10-01 실측으로 프로브는 사치다:
+# 6.9GB 모델이 VRAM 에 오른 상태에서 128/256/512 인코딩을 시도하면 ms 가
+# 아니라 초 단위가 걸렸고, 그 여파로 하네스 폴링이 타임아웃났다.
+# 실제 디코드를 **이미 하고 있으니** 거기서 비율을 읽으면 공짜다.
+_VAE_PIXEL_FACTOR_FALLBACK = 8
+_VAE_FACTOR_BY_CLASS = {}
+
+
+def _vae_factor_key(vae):
+    """VAE 를 구조적으로 구분하는 키.
+
+    왜(Why) VAE 클래스로 잡는가 (2026-10-01 실측): 처음엔 모듈 전역 하나로
+    저장했다가 테스트가 오염되었고, production 도 같은 이유로 위험했다 —
+    **한 세션에서 VAE 가 여러 개 로드된다.** 실제로 이 워크플로는 `WanVAE`
+    와 `QwenImage21` 를 함께 쓴다. 전역 하나로 두면 한쪽에서 배운 배율이
+    다른 쪽에 그대로 적용되어 조용히 틀린다.
+
+    왜(Why) `id()` 가 아니라 클래스인가: `id()` 는 주소 재사용 때문에 위험하다
+    (Jev 게이트가 명시적으로 금지). 그리고 배율은 **아키텍처의 속성**이므로
+    같은 클래스면 같은 배율이다 — 이건 성질이지 우연이 아니다.
+    """
+    t = type(vae)
+    return (getattr(t, "__module__", ""),
+            getattr(t, "__qualname__", None) or getattr(t, "__name__", "?"))
+
+
+def _vae_pixel_factor_for(vae) -> int:
+    """이 VAE 에서 배운 배율. 배운 적 없으면 안전망."""
+    if vae is None:
+        return _VAE_PIXEL_FACTOR_FALLBACK
+    try:
+        return _VAE_FACTOR_BY_CLASS.get(_vae_factor_key(vae),
+                                        _VAE_PIXEL_FACTOR_FALLBACK)
+    except Exception:
+        return _VAE_PIXEL_FACTOR_FALLBACK
+
+
+def _vae_pixel_factor_learn(vae, latent, decoded) -> int:
+    """디코드 결과로 축소 비율을 **배운다**. 배운 값을 돌려준다.
+
+    왜(Why) 별도 프로브가 아닌가: 위 주석 — 프로브는 비싸고, 디코드는 이미
+    하고 있다. `decoded` 의 높이가 latent 높이의 몇 배인지만 보면 끝이다.
+
+    왜(Why) 실패해도 조용히 두는가: 처음엔 안전망을 쓴다. 그건 지금과 **같은**
+    동작이므로 새로 나빠지는 것이 아니다. 첫 디코드 뒤부터 정확해진다.
+    배율은 최적화 파라미터라 틀어도 **결과물의 정확성**을 해치지 않고 속도만
+    달라진다.
+    """
+    try:
+        if vae is None or latent is None or decoded is None:
+            return _vae_pixel_factor_for(vae)
+        lh = int(latent.shape[-2])
+        ih = int(getattr(decoded, "shape", [-1, -1, -1, -1])[-2])
+        if lh > 0 and ih > 0 and ih % lh == 0:
+            f = ih // lh
+            if 1 <= f <= 64:
+                _VAE_FACTOR_BY_CLASS[_vae_factor_key(vae)] = f
+    except Exception:
+        pass
+    return _vae_pixel_factor_for(vae)
+
+
+def _encode_image_ref(vae, image):
+    """IMAGE 텐서 -> 원본 기준 latent. 실패하면 None.
+
+    왜(Why) 이 함수가 필요한가 (2026-10-01 실측으로 확정):
+    `TextEncodeQwenImage21` 의 `latent` 출력은 **전부 0 인 빈 캔버스**다
+    (`comfy_extras/nodes_qwen.py:181`). Qwen Edit 에는 "원본 latent" 라는
+    개념이 없고, 원본은 `positive`/`negative` 컨디셔닝 안의
+    `reference_latents` 로 들어간다(같은 파일 179행).
+
+    즉 워크플로가 Latent 형식으로 넘겨주는 원본에는 **내용이 없다.** 그 상태로
+    `MSE(생성결과, 전부 0)` 을 계산했으므로 로그에
+    `original 틀어짐 MSE=14.06` 처럼 나오던 숫자는 **무의미했다.**
+    게다가 정규화 값이 분모 0 으로 `n/a` 였는데, 그것이 결정적 단서였다.
+
+    → 원본을 **이미지**로 받고 여기서 직접 인코딩한다. 이 노드는 이미 latent 를
+    디코드하므로 vae 를 갖고 있고, 대칭적으로 인코딩도 할 수 있다.
+
+    why(why): we do not resize. measured 2026-10-01: resizing to the sampled
+    grid needs a factor we do not know on the first pass (fallback 8, Qwen is
+    16) and produced an invalid 416x632 -> 'Calculated padded input size per
+    channel: (1 x 625)'. The workflow already hands us the original resized to
+    the canvas, so encoding as-is lets the VAE pick the grid. That removes the
+    need to know the factor and removes the wrong-size path entirely.
+
+    왜(Why) ComfyUI 의 VAEEncode 와 같은 순서인가: `movedim(-1, 1)` 로
+    (B,H,W,C) 를 (B,C,H,W) 로 옮기고 앞 3채널만 쓴다. ComfyUI 고유 규약이라
+    순서를 바꾸면 VAE 가 조용히 이상한 값을 낸다.
+
+    크기가 비교 기준과 다르면 `_match_spatial` 이 보간으로 맞춰 준다. 그러면
+    기준 자체가 리샘플된 값이 되어 "얼마나 다른가" 에 리샘플 차이가 섞이지만,
+    **배율을 모른 채로 틀린 크기로 인코딩하는 것**(실측: 1x625 오류)보다
+    확실히 낫다. 이 절차를 되돌리지 말 것.
+    """
+    if vae is None or image is None:
+        return None
+    try:
+        import torch as _t
+        # 왜(Why) 전치하지 않는가 (2026-10-01 실측): ComfyUI 의 `VAE.encode` 는
+        # **(B,H,W,C) 를 받는다.** 내부에서 크롭을 하고 나서 전치한다:
+        #     def encode(self, pixel_samples):        # ← (B,H,W,C)
+        #         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
+        #         pixel_samples = pixel_samples.movedim(-1, 1)     # 여기서 전치
+        # 원래 `VAEEncode` 노드도 `vae.encode(pixels[:, :, :, :3])` 로 그대로
+        # 넘긴다. 내가 미리 `movedim(-1, 1)` 하면 **전치가 두 번** 되고,
+        # ComfyUI 는 dims 를 (3, 1544, ...) 로 읽어 크롭까지 망가뜨린다
+        # (실측: "Calculated padded input size per channel: (1 x 1601)").
+        # 주석에 "전치해야 한다"고 적어둔 것이 정확히 반대였다.
+        px = image[..., :3]
+        if px.dtype != _t.float32:
+            px = px.to(dtype=_t.float32)
+        # 큰 텐서를 굳이 CPU 에 만들지 않는다 — 대상 장치에서 직접 만든다.
+        px = px.to(device=getattr(vae, "device", None) or px.device)
+        # 크기 정리는 `vae_encode_crop_pixels` 가 **spacial_compression_encode()
+        # (=16) 배수로 중앙 크롭** 한다. 내가 추가로 맞추지 않는다 —
+        # 여기서 리사이즈하면 내용이 바뀌고, 크롭이 하는 일만 헛돌게 된다.
+        lat = vae.encode(px)
+        del px
+        _release_vram()
+        return lat
+    except Exception as _e:
+        _note_pose_error('_encode_image_ref', _e)
+        _release_vram()
+        return None
+
+
 def _decode_capped(vae, latent, max_pixels=None):
     """VAE 디코드 — 픽셀 수가 상한을 넘으면 latent 를 먼저 줄인다.
 
@@ -160,16 +346,29 @@ def _decode_capped(vae, latent, max_pixels=None):
         import torch as _t
         h = int(latent.shape[-2])
         w = int(latent.shape[-1])
-        # VAE 는 8배 확대하므로 latent 격자 1칸 = 이미지 8x8 픽셀
-        px = float(max(1, h) * max(1, w) * 64)
+        # 왜(Why) 더 이상 8 을 박지 않는가 (2026-10-01): 이 8 은 SD 계열
+        # 기준이고 Qwen 은 16 이다. 그 차이로 픽셀 상한이 **4배 느슨하게**
+        # 동작했다 — 즉 상한이 있어도 실제로는 상한을 못 넘는다.
+        # 값은 이전 디코드에서 **배웠다**(`_vae_pixel_factor_learn`). 처음엔
+        # 안전망(8)이므로 첫 호출은 지금과 같다가, 두 번째부터 정확해진다.
+        _fac = _vae_pixel_factor_for(vae)
+        px = float(max(1, h) * max(1, w) * _fac * _fac)
         cap = _DECODE_MAX_PIXELS if max_pixels is None else int(max_pixels)
         if px <= cap:
-            return vae.decode(latent)
+            img = vae.decode(latent)
+            # 왜(Why) 결과를 버리지 않는가: `_vae_pixel_factor_learn` 은 **배운
+            # 배율**을 돌려준다. 그 값을 그대로 반환하면 디코드된 이미지가
+            # 숫자로 바뀌고 디코딩이 조용히 무력화된다(실측: 마스크·캐시·
+            # 디코드 검사 8건이 한꺼번에 깨졌다). 배율은 부수 효과이므로 버린다.
+            _vae_pixel_factor_learn(vae, latent, img)
+            return img
         scale = (cap / px) ** 0.5
         nh = max(8, int(h * scale))
         nw = max(8, int(w * scale))
         small = _f.interpolate(latent.float(), size=(nh, nw), mode="area")
         img = vae.decode(small)
+        # 배율은 축소 전/후 어느 격자에서 읽어도 같다 — 둘 다 같은 비율이다.
+        _vae_pixel_factor_learn(vae, small, img)
         del small
         _release_vram()
         return img
@@ -1746,8 +1945,13 @@ class GoRiConsistencyKeeper:
             "optional": {
                 "original_latent": ("LATENT",),
                 "camera_latent": ("LATENT",),
-                "vae": ("VAE",),
-                # 판정층 on/off (2026-10-01). 기본 False = 기존 동작 그대로.
+"vae": ("VAE",),
+                # 원본을 **이미지**로 받는다 (2026-10-01 추가). Qwen Edit 의
+                # `TextEncodeQwenImage21.latent` 출력은 전부 0 인 빈 캔버스라
+                # Latent 로 받으면 기준이 비어 있다 — `_encode_image_ref` 참조.
+                # 이게 있으면 그걸 인코딩해서 원본 기준으로 쓴다(우선).
+                "original_image": ("IMAGE",),
+                # 판정 게이트 on/off (2026-10-01). 기본 False = 기존 동작 그대로.
                 # 왜(Why) 기본을 끄는가: 켰을 때 결과물이 달라지는 게 이 위젯의
                 # 존재 이유인데, 꺼놓고 모르고 돌아가는 노드는 "왜 결과가 바뀌지
                 # 않는지"를 설명할 수 없는 노드다. 켜는 쪽이 그 판단을 한다.
@@ -1757,7 +1961,7 @@ class GoRiConsistencyKeeper:
 
     def run(self, sampled_latent, strength_camera=0.2, strength_original=0.2,
             original_latent=None, camera_latent=None, vae=None,
-            trust_gate=False):
+            original_image=None, trust_gate=False):
         sampled = _get_samples(sampled_latent)
         if sampled is None:
             raise ValueError("(GoRi) Consistency Keeper: sampled_latent이 비어 있음")
@@ -1773,6 +1977,27 @@ class GoRiConsistencyKeeper:
         # vae 조건은 아래 마스크/시트 분석 쪽에만 둔다.
         _orig_ref = _get_samples(original_latent)
         _cam_ref = _get_samples(camera_latent)
+        # 왜(Why) original_image 이 우선인가 (2026-10-01 실측):
+        # `TextEncodeQwenImage21` 의 `latent` 출력은 **전부 0** 이다. 그
+        # latent 를 `original_latent` 로 받는 한 원본 기준은 항상 빈 캔버스와
+        # 비교하게 되고 숫자가 무의미하다. 이미지가 오면 그것을 직접 인코딩해
+        # 기준을 세운다. 이미지 없으면 기존 경로(빈 latent) 그대로 둔다 —
+        # 동작을 바꾸지 않기 위함이지, 그 경로가 옳다는 뜻이 아니다.
+        if original_image is not None:
+            _img_ref = _encode_image_ref(vae, original_image)
+            if _img_ref is not None:
+                _orig_ref = _img_ref
+                _orig_from_image = True
+                _log("[GoRi Consistency Keeper] 원본 기준을 이미지에서 직접 "
+                     "인코딩했습니다 — Qwen Edit 의 latent 출력은 빈 캔버스라 "
+                     "그대로 쓰면 비교가 무의미합니다")
+            else:
+                _orig_from_image = False
+                _log("[GoRi Consistency Keeper] ⚠ original_image 인코딩 실패 — "
+                     "original_latent 경로로 진행합니다 (Qwen Edit 에선 빈 "
+                     "캔버스이므로 원본 기준이 사실상 없습니다)")
+        else:
+            _orig_from_image = False
         if not (a or b) or (_orig_ref is None and _cam_ref is None):
             _release_vram()
             return ({"samples": out},)
@@ -1860,10 +2085,15 @@ class GoRiConsistencyKeeper:
                 _log(f"[GoRi Consistency Keeper] {name} 배치·채널 불일치 — 건너뜀")
                 continue
             drift = _drift_mse(sampled, matched)
+            # 정규화 값도 함께 재고 **둘 다** 로그한다. 임계값은 아직
+            # `_drift_norm` docstring 에 적힌 이유로 재측정 전이다. 이번 실행의
+            # 로그가 그 실측값을 준다 — 추측으로 숫자를 박지 않기 위해서.
+            drift_n = _drift_norm(sampled, matched)
             eff = strength
             if drift is not None:
+                _ns = "n/a" if drift_n is None else f"{drift_n:.4f}"
                 _log(f"[GoRi Consistency Keeper] {name} 틀어짐 MSE={drift:.6f} "
-                     f"당김 {strength:.2f}")
+                     f"정규화={_ns} 당김 {strength:.2f}")
             # nan 은 모든 비교가 False 라 `> 0.8` 도 통과해 감쇠를
             # 건너뛴다 → 이후 0*(matched-sampled) 로 nan 이 전파된다.
             # `not (x <= 0.8)` 은 nan 에서 True 가 된다(2026-09-28).
