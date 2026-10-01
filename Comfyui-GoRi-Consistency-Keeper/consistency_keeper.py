@@ -848,8 +848,31 @@ def _person_mask_for_latent(vae, sampled, cache=None):
         return None
 
 
-def _edge_map_from_rgb(arr) -> "object | None":
-    """RGB 배열(H,W,3) → 16x16 에지 밀도 맵. 실패 시 None."""
+_ONCE_SEEN = set()
+
+
+def _note_once(key, msg):
+    """같은 키의 메시지를 **한 번만** 말한다.
+
+    왜(Why) 이게 필요한가: 조용한 실패가 오늘 하루에 세 번(import 실패,
+    구문 오류, 잘못된 디코더) 진단을 가로막았다. 그런데`_local_edge` 는
+    landmark 33개마다 불려서 그냥 로그를 남기면 스팸이 된다. 한 번만.
+    """
+    if key in _ONCE_SEEN:
+        return
+    _ONCE_SEEN.add(key)
+    _log(msg)
+
+
+def _edge_mag_from_rgb(arr) -> "object | None":
+    """RGB 배열(H,W,3) → **전체 해상도** 정규화 에지 크기(H,W). 실패 시 None.
+
+    왜(Why) 이걸 분리했나 (2026-10-01 실측): landmark 별 에지를 재는데
+    16×16 격자 셀을 썼더니 손·다리 landmark 가 대부분 `0` 이 나왔다.
+    셀 하나가 96×64 픽셀의 **평균**이라 매끈한 피부에서는 0 이 되는 게 당연하다.
+    그래서 `detail_boost` 가 부위 하나도 못 골랐다. 평균 대신 **로컬 창**으로
+    재야 landmark 가 서 있는 자리를 본다.
+    """
     try:
         import numpy as _np
         import torch as _t
@@ -873,20 +896,76 @@ def _edge_map_from_rgb(arr) -> "object | None":
         # "디테일 최대"로 읽힌다 → detail_boost 가 전부 반대로 동작한다.
         # 실측: 64x64 평탄 이미지 값 0.5→0.0 / 0.45→1.0 (반전).
         # 해결: 노이즈 바닥을 **입력 대비 상대값**으로 잡는다.
-        # 노이즈는 입력 변동이 아니라 **상쇄 오차**다: 커널 합이 0이라
-        # 수학적으로는 0 이어야 하지만 float32 반올림 오차가 값에 비례해
-        # 남는다(0.45 기준 실측 3e-7 > 기존 임계 1e-8).
         _floor = 1e-5 * (float(lum.mean()) + 1e-3)
         if mx <= max(1e-8, _floor):
             # 완전 평탄 이미지: 에지가 "0"이지 "None"이 아니다. 뭉개진 이미지도
             # 여기에 해당한다. None을 돌려주면 부위 비교가 불가능해져
             # "뭉개진 부위"를 판정할 수 없게 된다(실측에서 확인).
-            return _np.zeros((16, 16), dtype=_np.float32)
-        mag = mag / mx
+            return _np.zeros_like(mag)
+        return mag / mx
+    except Exception as e:
+        # 왜(Why) 조용히 두지 않나: 실패하면 **부위 비교가 전부 무의미**해진다.
+        # 아무 말 없이 None 이면 "상향할 곳 없음" 과 "재지를 못 읽음" 이 구분되지
+        # 않는다(2026-10-01 실제로 한 번 헤맸다).
+        _note_once("edge_mag", f"[GoRi Consistency Keeper] ⚠ 에지 맵 계산 실패 "
+                               f"({type(e).__name__}: {str(e)[:80]})")
+        return None
+
+
+def _edge_map_from_rgb(arr) -> "object | None":
+    """RGB 배열(H,W,3) → 16x16 에지 밀도 맵. 실패 시 None.
+
+    전역 비교용이다. landmark 별 국소 에지는 `_local_edge` 를 쓴다 — 여기서
+    셀 평균을 받으면 매끈한 부위에서 0 이 된다(2026-10-01 실측).
+    """
+    try:
+        import torch as _t
+        import torch.nn.functional as _f
+        mag = _edge_mag_from_rgb(arr)
+        if mag is None:
+            return None
         small = _f.adaptive_avg_pool2d(_t.from_numpy(mag[None, None]), 16)
         return small[0, 0].numpy()
-    except Exception:
+    except Exception as e:
+        # 왜(Why) 조용히 두지 않나: 안쪽 실패는 이미 한 번 말한다. 여기가 조용하면
+        # "풀링만 실패" 와 "에지 자체가 없음" 이 구분되지 않는다.
+        _note_once("edge_map", f"[GoRi Consistency Keeper] ⚠ 16x16 에지 맵 만들기 실패 "
+                               f"({type(e).__name__}: {str(e)[:80]})")
         return None
+
+
+def _local_edge(mag, fx, fy, frac=0.05):
+    """전체 해상도 에지맵에서 landmark 주변 창 평균. 실패 시 0.0.
+
+    frac 은 **이미지 크기에 대한 비율**이다. 원본과 결과물의 해상도가 다를 수
+    있으므로(예 1544x1019 vs 1360x768) 픽셀 수로 잡으면 비교가 **척도**를 타서
+    공정한 비교가 아니다.
+    """
+    try:
+        import numpy as _np
+        m = _np.asarray(mag)
+        if m.ndim != 2:
+            return 0.0
+        h, w = m.shape
+        win = int(frac * min(h, w))
+        if win < 1:
+            return 0.0
+        cx = int(fx * w)
+        cy = int(fy * h)
+        x0 = max(0, cx - win)
+        x1 = min(w, cx + win)
+        y0 = max(0, cy - win)
+        y1 = min(h, cy + win)
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        return float(m[y0:y1, x0:x1].mean())
+    except Exception as e:
+        # 왜(Why) 조용히 두지 않나: 0.0 은 "평평해서 0" 과 "계산 실패" 의
+        # **같은 값**이다. 구분하지 못하면 뭐가 진짜인지 알 수 없다.
+        _note_once("local_edge", f"[GoRi Consistency Keeper] ⚠ landmark 주변 "
+                                f"에지 계산 실패 ({type(e).__name__}: "
+                                f"{str(e)[:80]}) — 0 으로 대체")
+        return 0.0
 
 
 # 2026-09-28 정밀 검토: 여기 있던 `_edge_map(latent, vae)`는 **호출이 0건**인
@@ -928,7 +1007,7 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
             arr = _decode_latent_rgb(vae, lat, cache=cache)
             if arr is None:
                 continue
-            em = _edge_map_from_rgb(arr)
+            em = _edge_mag_from_rgb(arr)
             if em is None:
                 continue
             u8 = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
@@ -941,9 +1020,10 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
                 # xy 는 **2-튜플 그대로** 둔다. `_apply_region_strength` 가
                 # `for (px, py) in xy` 로 엄격 언팩하므로 3-튜플을 넣으면 죽는다.
                 xy.append((px, py))
-                cx = min(15, max(0, int(px * 16)))
-                cy = min(15, max(0, int(py * 16)))
-                edge[i] = float(em[cy, cx])
+                # 왜(Why) `_local_edge` 인가: 예전엔 16×16 격자 셀 평균을 썼고
+                # 손·다리에서 거의 0 이 나와 부위 하나도 못 골랐다(10-24 실측).
+                # 이제 landmark 주변 5% 창을 본다. 5% 는 손 크기쯤이다.
+                edge[i] = _local_edge(em, px, py)
             # pts 는 판정층이 그대로 받는 3-튜플(좌표 + 가시성).
             # 좌표를 다시 맞추는 자리(join)를 두지 않기 위해 원본을 함께 둔다.
             out[name] = {"edge": edge, "xy": xy, "pts": list(pts3[:33])}
@@ -1114,14 +1194,23 @@ def _probe_detail_direction(vae, sampled, orig_ref, out):
          f"⇒ {_verdict}")
 
 
-def _note_no_boost(worst, region, thresh):
+def _note_no_boost(worst, region, thresh, max_r=0.0, max_rg=""):
     """부위별 상향이 없었던 이유를 **한 번만** 말한다 (조용한 무동작 방지)."""
     global _NO_BOOST_NOTED
     if _NO_BOOST_NOTED:
         return
     _NO_BOOST_NOTED = True
     if not region:
-        _log("[GoRi Consistency Keeper] 부위별 복원: 판단 불가 (원본 에지가 0)")
+        if max_r <= 1e-6:
+            _log("[GoRi Consistency Keeper] 부위별 복원: 판단 불가 "
+                 f"(원본 에지 최대 {max_r:.5f} @{max_rg} — 임계 1e-6 미만)")
+        else:
+            # 왜(Why) 이 분기가 필요한가 (2026-10-01 실측): 에지는 있는데
+            # **손실이 0 이다** 는 전혀 다른 상태였다. 예전 코드는 둘을 같은
+            # "에지가 0" 문구로 뭉뚱그려서 한참 잘못된 방향을 봤다.
+            _log(f"[GoRi Consistency Keeper] 부위별 복원: 상향할 곳 없음 "
+                 f"(원본 에지는 있으나 결과물이 더 날카로움 — 원본 에지 최대 "
+                 f"{max_r:.4f} @{max_rg})")
         return
     _log(f"[GoRi Consistency Keeper] 부위별 복원: 상향할 부위 없음 "
          f"(가장 손실 큰 부위 {region} {worst:.0%} < 임계 {thresh:.0%}) — "
@@ -1206,18 +1295,30 @@ def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35,
         # 걸려 있으므로 여기가 조용하면 게이트도 조용하다.
         _worst = 0.0
         _worst_r = ""
+        _max_r = 0.0
+        _max_rg = ""
+        _stats = []
         for _rg, _idxs in PART_REGIONS.items():
             if _rg not in DETAIL_CRITICAL:
                 continue
             _r = sum(ref[i] for i in _idxs) / len(_idxs)
+            _s = sum(samp[i] for i in _idxs) / len(_idxs)
+            _stats.append(f"{_rg} {_r:.4f}->{_s:.4f}")
+            if _r > _max_r:
+                _max_r = _r
+                _max_rg = _rg
             if _r <= 1e-6:
                 continue
-            _s = sum(samp[i] for i in _idxs) / len(_idxs)
             _l = (_r - _s) / _r
             if _l > _worst:
                 _worst = _l
                 _worst_r = _rg
-        _note_no_boost(_worst, _worst_r, thresh)
+        # 왜(Why) 숫자를 붙이나 (2026-10-01): "에지가 0" 이라는 말은
+        # **0 인지 매우 작은 건지** 구분하지 못했다. 16×16 셀 → 5% 창으로
+        # 바꿨는데도 여전히 0 이라 원본 해상도 자체를 의심하게 됐다.
+        _log("[GoRi Consistency Keeper] 부위 에지 실측 (원본->결과): "
+             + " / ".join(_stats))
+        _note_no_boost(_worst, _worst_r, thresh, _max_r, _max_rg)
         return None, ""
     except Exception:
         return None, ""
