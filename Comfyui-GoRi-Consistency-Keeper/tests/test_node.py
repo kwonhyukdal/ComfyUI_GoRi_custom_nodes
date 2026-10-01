@@ -93,17 +93,32 @@ if not HAS_TORCH:
     sys.exit(1 if FAIL else 0)
 
 node = ck.GoRiConsistencyKeeper()
-base = _t.zeros(1, 4, 8, 8)
-cam = _t.ones(1, 4, 8, 8)
-orig = _t.full((1, 4, 8, 8), 0.5)
+# 왜(Why) 픽스처를 0 과 1 로 두지 않나 (2026-10-01): 감쇠가 **정규화 불일치**를
+# 보게되면서 sampled=0 / ref=1 은 정규화 1.0 이 되어 감쇠 0 으로 간다. 그게 옳은
+# 판단이다(0 과 1 은 완전한 불일치). 그런데 이 테스트들은 "정상 실행에서 당김이
+# 동작한다" 를 확인하는 것이므로 픽스처가 **그 상황**을 표현해야 한다.
+# 실제 측정(2026-10-01) 정규화 불일치는 0.222~0.487 이고 무감쇠 끝은 0.50.
+# 기준값 0.5 주변으로 조금 흔들린 값을 쓴다.
+base = _t.full((1, 4, 8, 8), 0.6)
+cam = _t.full((1, 4, 8, 8), 1.2)
+orig = _t.full((1, 4, 8, 8), 0.9)
 
 if True:
+    # 픽스처가 "무감쇠 구간" 인지 먼저 고정한다. 아니면 아래 수식 검사가
+    # 조용히 vacuous(항상 0) 가 된다.
+    _nc = ck._drift_norm(base, cam)
+    _no = ck._drift_norm(base, orig)
+    check("픽스처: camera 가 무감쇠 구간 (검사가 의미 있다)",
+          ck._damp_norm(_nc) == 1.0, "%.4f" % _nc)
+    check("픽스처: original 가 무감쇠 구간 (검사가 의미 있다)",
+          ck._damp_norm(_no) == 1.0, "%.4f" % _no)
+
     (out,) = node.run({"samples": base}, strength_camera=0.5,
                       strength_original=0.5,
                       camera_latent={"samples": cam},
                       original_latent={"samples": orig})
-    _d1 = ck._damp_factor(1.0)
-    _d2 = ck._damp_factor(0.25)
+    _d1 = ck._damp_norm(_nc)
+    _d2 = ck._damp_norm(_no)
     expect = base + 0.5 * _d1 * (cam - base) + 0.5 * _d2 * (orig - base)
     check("블렌드 수식", _t.allclose(out["samples"], expect))
 
@@ -113,14 +128,20 @@ if True:
                        original_latent={"samples": orig})
     check("강도 0은 원본 유지", _t.allclose(out0["samples"], base))
 
-    big = _t.ones(1, 4, 16, 16)
+    big = _t.full((1, 4, 16, 16), 1.0)
     (outr,) = node.run({"samples": base}, strength_camera=1.0,
                        strength_original=0.0,
                        camera_latent={"samples": big})
+    # `_drift_norm` 은 크기가 다르면 None 이다 — 런에서는 `_match_spatial` 이
+    # 먼저 맞춰 주므로 문제없지만, 여기서 직접 부를 때는 정렬이 필요하다.
+    _big_m = ck._match_spatial(big, base)
+    _nb = ck._drift_norm(base, _big_m)
+    check("픽스처: 크기 다른 참조도 무감쇠 구간",
+          _nb is not None and ck._damp_norm(_nb) == 1.0, str(_nb))
     check("크기 달라도 리사이즈 후 당김",
           outr["samples"].shape == (1, 4, 8, 8)
           and _t.allclose(outr["samples"],
-                          _t.ones(1, 4, 8, 8) * ck._damp_factor(1.0)))
+                          _t.ones(1, 4, 8, 8) * ck._damp_norm(_nb)))
 
     bad_batch = _t.ones(2, 4, 8, 8)
     (outb,) = node.run({"samples": base}, strength_camera=1.0,
@@ -137,8 +158,10 @@ if True:
     except ValueError:
         check("빈 입력은 오류", True)
 
-    check("틀어짐 측정", ck._drift_mse(base, cam) == 1.0)
-    check("입력 불변 (원본 미수정)", _t.allclose(base, _t.zeros(1, 4, 8, 8)))
+    check("틀어짐 측정", abs(ck._drift_mse(base, cam) - 0.36) < 1e-6,
+          str(ck._drift_mse(base, cam)))
+    check("입력 불변 (원본 미수정)",
+          _t.allclose(base, _t.full((1, 4, 8, 8), 0.6)))
     grad = _t.zeros(1, 4, 8, 8)
     for _i in range(8):
         grad[:, :, :, _i] = float(_i) / 7.0
@@ -166,8 +189,24 @@ if True:
           and ck._damp_factor(3.0) == 0.0)
     (outd,) = node.run({"samples": base}, strength_camera=1.0,
                        camera_latent={"samples": far})
-    check("큰 틀어짐은 당김 감쇠",
-          _t.allclose(outd["samples"], base, atol=0.05))
+    check("큰 틀어짐에서도 실행은 죽지 않는다",
+          _t.allclose(node.run({"samples": base}, strength_camera=1.0,
+                               camera_latent={"samples": far})[0]["samples"],
+                       outd["samples"]))
+    # 왜(Why) "완전히 어긋남" 의 픽스처가 0 인가 (2026-10-01): 정규화 불일치는
+    # |ref-sample| / |ref| 다. 그래서 **참조가 출력물보다 크면 1.0 을 넘지 못한다**
+    # (극한은 1.0). 완전 소멸의 정의가 "참조가 거속 멀어진다" 에서
+    # "**결과물이 참조 크기에 비해 무(0)로 내려간다**" 로 바뀐다.
+    # 실제 정상 참조는 0.222~0.487 이므로 이 구간과 겹치지 않는다.
+    gone = _t.full((1, 4, 8, 8), 0.0)
+    _ng = ck._drift_norm(gone, base)
+    check("결과물이 무면 정규화 1.0 에 수렴한다 (소멸의 정의)",
+          _ng is not None and _ng > 0.99, str(_ng))
+    (outg,) = node.run({"samples": gone}, strength_camera=1.0,
+                       camera_latent={"samples": base})
+    check("결과물이 무면 당기지 않는다 (완전 어긋남)",
+          _t.allclose(outg["samples"], gone, atol=0.05),
+          str(float(outg["samples"].max())))
     half = _t.full((1, 4, 8, 8), 0.5)
     (outn2,) = node.run({"samples": base}, strength_camera=-0.5,
                         camera_latent={"samples": half})
@@ -818,8 +857,10 @@ _CountVAE.n = 0
 _node.run(_zero, strength_camera=0.3, strength_original=0.3, vae=_CountVAE())
 check("참조 없는 실행도 디코딩 0회", _CountVAE.n == 0, f"decode={_CountVAE.n}")
 # vae 미연결 + 전역 당김 = 여전히 동작해야 한다 (프런트/후버리 회귀)
-_ref = {"samples": t.full((1, 4, 64, 64), 1.0)}
-(outv,) = _node.run(_zero, strength_camera=0.5, camera_latent=_ref)
+# (픽스처는 위와 같은 이유로 현실값 — sampled 0 은 정규화 1.0 이 되어 감쇠된다)
+_real_s = {"samples": t.full((1, 4, 64, 64), 0.5)}
+_ref = {"samples": t.full((1, 4, 64, 64), 0.9)}
+(outv,) = _node.run(_real_s, strength_camera=0.5, camera_latent=_ref)
 check("VAE 미연결에도 전역 당김 동작 (마스크 없이)",
       outv["samples"].shape == (1, 4, 64, 64)
       and float(outv["samples"].abs().max()) > 0.0)
@@ -859,15 +900,31 @@ check("R55: 퇴화 모양 입력은 예외 없이 None",
 # (2) region 보강이 **전역 블렌드를 대체**해버려 strength_original 의 전역
 #     전달량이 15~27% 로 줄었다. 추가분(increment) 계약으로 고쳤고,
 #     region 경로가 켜져도 전역이 남는지 통합 경로로 검증한다.
-_b64 = {"samples": t.zeros(1, 4, 64, 64)}
-_c64 = {"samples": t.full((1, 4, 64, 64), 0.4)}
-_o64 = {"samples": t.full((1, 4, 64, 64), 0.6)}
+# 왜(Why) sampled 가 0 이 아니나 (2026-10-01): 감쇠가 정규화 불일치를 보게 되자
+# sampled=0 / ref=0.6 은 정규화 1.0 → 감쇠 0 으로 간다. 그게 옳은 판단이지만
+# 이 테스트들은 "정상 실행에서 당김이 동작한다" 를 확인하는 것이므로 픽스처가
+# 그 상황을 표현해야 한다. 실제 측정(2026-10-01) 정규화 불일치 0.222~0.487,
+# 무감쇠 끝 0.50. 기준값 0.5 주변으로 흔들린 값을 쓴다.
+# 왜(Why) 원본 참조가 샘플보다 큰가 (2026-10-01): region 은 전역에 **증가분**을
+# 더한다. 그런데 원본이 샘플보다 작으면 증가분이 **음수**가 되어 "region 이
+# 전역을 대체하지 않는다" 는 검사가(region > 전역) 뒤집힌다. 그건 region 경로의
+# 문제가 아니라 픽스처 방향의 문제다 — 당길 방향이 위로 가도록 잡는다.
+_b64 = {"samples": t.full((1, 4, 64, 64), 0.4)}
+_c64 = {"samples": t.full((1, 4, 64, 64), 0.3)}
+_o64 = {"samples": t.full((1, 4, 64, 64), 1.0)}
+# 기대값은 픽스처에서 **계산한다**. 리터럴로 박으면 픽스처를 바꿀 때 조용히
+# 어긋난다 — 실제로 그랬다(2026-10-01). 그리고 감쇠는 현재 규칙인 정규화
+# 불일치를 쓴다. 마스크 없이 실행하므로 전역 블렌드 = base + ea*(cam-base)
+# + eb*(orig-base) 다.
+_bv = float(_b64["samples"].mean())
+_cv = float(_c64["samples"].mean())
+_ov = float(_o64["samples"].mean())
 for _a, _b in ((0.33, 0.0), (0.0, 0.33), (0.33, 0.33), (1.0, 1.0), (-0.5, 0.0)):
     _out = _node.run(_b64, strength_camera=_a, strength_original=_b,
                      camera_latent=_c64, original_latent=_o64)[0]["samples"]
-    _ea = _a * ck._damp_factor(ck._drift_mse(_b64["samples"], _c64["samples"]))
-    _eb = _b * ck._damp_factor(ck._drift_mse(_b64["samples"], _o64["samples"]))
-    _want = _ea * 0.4 + _eb * 0.6
+    _ea = _a * ck._damp_norm(ck._drift_norm(_b64["samples"], _c64["samples"]))
+    _eb = _b * ck._damp_norm(ck._drift_norm(_b64["samples"], _o64["samples"]))
+    _want = _bv + _ea * (_cv - _bv) + _eb * (_ov - _bv)
     check(f"R55: 강도 {_a}/{_b} 전역 반영 정확",
           abs(float(_out.max()) - _want) < 1e-4,
           f"실제 {float(_out.max()):.4f} 기대 {_want:.4f}")
@@ -945,8 +1002,9 @@ check("R55: 정상 강도 보존", ck._safe_strength(0.33, "t") == 0.33
 _nan_out = _node.run(_b64, strength_camera=float("nan"),
                       camera_latent=_c64)[0]["samples"]
 check("R55: nan 강도 실행 → 원본 유지 + nan 없음",
-      float(_nan_out.max()) == 0.0
-      and float(t.isnan(_nan_out).float().mean()) == 0.0)
+      float(_nan_out.max()) == float(_b64["samples"].max())
+      and float(t.isnan(_nan_out).float().mean()) == 0.0,
+      f"max={float(_nan_out.max()):.4f}")
 # nan latent: 게이트가 nan 을 통과해 전파되지 않아야 한다
 _inf = {"samples": t.full((1, 4, 64, 64), float("inf"))}
 _nan_lat = _node.run(_inf, strength_camera=0.5,
@@ -960,8 +1018,8 @@ check("R55: nan drift 는 감쇠를 통과하지 못함 (not <= 비교)",
 print("-- 배치/비용 (2026-09-28 R56) --")
 # (1) 배치>1 브로드캐스트 — 요소 0 의 마스크/랜드마크를 전체 배치에 적용해
 #     2번째 이후 피사자가 엉뚱한 부위를 당겼다. 지금은 전역 당김만 한다.
-_bz = {"samples": t.zeros(2, 4, 32, 32)}
-_br = {"samples": t.ones(2, 4, 32, 32)}
+_bz = {"samples": t.full((2, 4, 32, 32), 0.5)}
+_br = {"samples": t.full((2, 4, 32, 32), 0.9)}
 _vc = _CountVAE()
 _bo = _node.run(_bz, strength_camera=0.0, strength_original=0.3,
                 original_latent=_br, vae=_vc)[0]["samples"]
@@ -971,10 +1029,14 @@ check("R56: 배치>1 은 마스크/부위맵 미실행 (디코딩 0회)",
       len(_vc.sizes) == 0, str(_vc.sizes))
 check("R56: 배치 전체에 전역 당김 적용", bool(
     t.allclose(_bo[0], _bo[1], atol=1e-5)))
-_eff_b = 0.3 * ck._damp_factor(ck._drift_mse(_bz["samples"], _br["samples"]))
+_eff_b = 0.3 * ck._damp_norm(ck._drift_norm(_bz["samples"], _br["samples"]))
+# 기대값을 픽스처에서 계산한다 — 예전처럼 "base=0 이라 max==eff" 우연에 기대지 않는다.
+_bz_v = float(_bz["samples"].mean())
+_br_v = float(_br["samples"].mean())
+_want_b = _bz_v + _eff_b * (_br_v - _bz_v)
 check("R56: 배치>1 강도가 요청값과 일치",
-      abs(float(_bo.max()) - _eff_b) < 1e-4,
-      f"실제 {float(_bo.max()):.4f} 기대 {_eff_b:.4f}")
+      abs(float(_bo.max()) - _want_b) < 1e-4,
+      f"실제 {float(_bo.max()):.4f} 기대 {_want_b:.4f}")
 
 # (2) 디코딩 비용 — 같은 텐서를 실행당 중복 디코딩하지 않는다
 _n = _node
@@ -2248,6 +2310,43 @@ if HAS_TORCH:
     check("R76: 프로브 인코딩 함수는 남아있지 않다 (비용 회피)",
           not hasattr(ck, "_vae_pixel_factor"),
           "_vae_pixel_factor 가 살아있다")
+
+# --- 감쇠 기준을 실측에 맞춘다 (2026-10-01) ---
+    _say("-- 정규화 감쇠 기준: 실측 4건의 정상 범위를 덮는지 --")
+    # 실측값 (WORK_STATUS 10-18): 정상 참조 4건의 정규화 불일치
+    _measured = (0.2221, 0.2585, 0.3148, 0.3932,     # camera
+                 0.2323, 0.2759, 0.4322, 0.4872)     # original
+    for _v in _measured:
+        check(f"R77: 실측 정상값 {_v:.4f} 은 감쇠되지 않는다",
+              ck._damp_norm(_v) == 1.0, str(ck._damp_norm(_v)))
+    check("R77: 무감쇠 끝이 실측 최댓값을 덮는다",
+          ck._DRIFT_NORM_KNEE > max(_measured),
+          "knee=%.2f max=%.4f" % (ck._DRIFT_NORM_KNEE, max(_measured)))
+    check("R77: knee 는 실측 최댓값 바로 위다 (과도한 여유를 남기지 않음)",
+          ck._DRIFT_NORM_KNEE <= max(_measured) * 1.10,
+          "knee=%.2f" % ck._DRIFT_NORM_KNEE)
+    check("R77: knee 위에서만 줄기 시작한다",
+          ck._damp_norm(ck._DRIFT_NORM_KNEE) == 1.0)
+    check("R77: ZERO 지점에서 0 이다",
+          ck._damp_norm(ck._DRIFT_NORM_ZERO) == 0.0,
+          str(ck._damp_norm(ck._DRIFT_NORM_ZERO)))
+    check("R77: ZERO 를 넘으면 0 에 붙는다",
+          ck._damp_norm(99.0) == 0.0)
+    check("R77: 중간값은 knee 와 0 사이",
+          0.0 < ck._damp_norm(0.75) < 1.0, str(ck._damp_norm(0.75)))
+    check("R77: 비교 불가(None) 은 안 건드린다",
+          ck._damp_norm(None) == 1.0)
+    check("R77: nan 은 0 (전파 차단, R71 과 같은 계약)",
+          ck._damp_norm(float("nan")) == 0.0)
+    check("R77: 구 규칙(절대 MSE) 은 그대로 남아 있다",
+          ck._damp_factor(0.5) == 1.0 and ck._damp_factor(5.0) == 0.0)
+    check("R77: 구 규칙과 신 규칙은 다른 함수다 (한 곳에 섞지 않는다)",
+          ck._damp_factor is not ck._damp_norm)
+    # 옛 규칙으로는 정상 참조가 전부 죽었다 — 신 규칙이 그걸 구제하는 이유
+    check("R77: 옛 규칙은 실측 정상값을 전부 0 으로 죽인다 (재발 방지)",
+          ck._damp_factor(4.227) == 0.0 and ck._damp_factor(8.384) == 0.0)
+    check("R77: 신 규칙은 같은 구간에서 살아 있다 (이게 고친 것)",
+          ck._damp_norm(0.3148) == 1.0)
 
     # --- 원본 기준을 이미지에서 직접 인코딩 ---
     class _VFEnc:

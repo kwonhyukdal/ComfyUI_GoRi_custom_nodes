@@ -110,6 +110,50 @@ def _drift_norm(sampled, matched) -> float | None:
         return None
 
 
+# --- 정규화 불일치 기준 (2026-10-01 실측) ---
+# 왜(Why) 절대 MSE 를 안 쓰는가: MSE 는 latent 스케일에 비례하는 **절대값**이라
+# 모델을 바꾸면 기준이 통째로 무효가 된다. 여기선 그 사고가 실제로 났다 —
+# 0.8 / 2.0 은 SD 계열에서 잡은 값인데 Qwen Image 2.1 에서 정상 참조 4건이
+# 4.227 ~ 8.384 로 측정됐다. 전부 2.0 위라 **정상 참조가 전부 0 으로 죽었다.**
+# 정규화값은 스케일 무관해서 기준이 모델을 넘어간다.
+#
+# 기준을 정한 근거 (2026-10-01 실측 4건):
+#   camera    0.2221 / 0.2585 / 0.3148 / 0.3932
+#   original  0.2323 / 0.2759 / 0.4322 / 0.4872
+#   → 정상 참조의 범위 0.222 ~ 0.487
+#
+# 감쇠는 **비정상**을 위한 장치다. 정상이면 건드리면 안 되므로 무감쇠 구간이
+# 정상 범위를 **덮어야** 한다. 그래서 무감쇠 끝을 측정 최댓값(0.487) 바로 위인
+# 0.50 으로 잡았다. 0 에 도달하는 지점은 측정 최댓값의 2 배로 두었다.
+_DRIFT_NORM_KNEE = 0.50
+_DRIFT_NORM_ZERO = 1.00
+
+_DRIFT_NORM_NOTED = False
+
+
+def _damp_norm(v) -> float:
+    """정규화 불일치 -> 감쇠 계수 0~1. 비교 불가면 1.0(안 건드림).
+
+    왜(Why) `_damp_factor`(절대 MSE) 대신 별개 함수인가: 기존 함수는 그대로
+    둔다. 새 기준을 켜도 예전 경로를 잃지 않고, **두 규칙이 각각 무슨 뜻인지**
+    로그와 테스트에서 구분된다. 계층적으로도 "정규화 기준" 과 "구 기준" 이
+    같은 이름 아래 섞이면 나중에 어느 쪽이 살아 있는지 알 수 없다.
+    """
+    try:
+        if v is None:
+            return 1.0
+        if v != v:                      # nan 은 전파 차단이 우선 (R71 계약)
+            return 0.0
+        if v <= _DRIFT_NORM_KNEE:
+            return 1.0
+        span = _DRIFT_NORM_ZERO - _DRIFT_NORM_KNEE
+        if span <= 0:
+            return 1.0
+        return max(0.0, 1.0 - (v - _DRIFT_NORM_KNEE) / span)
+    except Exception:
+        return 1.0
+
+
 def _damp_factor(drift) -> float:
     """틀어짐 기반 자동 감쇠. 작으면 1, 크면 0으로 수렴.
 
@@ -2085,26 +2129,35 @@ class GoRiConsistencyKeeper:
                 _log(f"[GoRi Consistency Keeper] {name} 배치·채널 불일치 — 건너뜀")
                 continue
             drift = _drift_mse(sampled, matched)
-            # 정규화 값도 함께 재고 **둘 다** 로그한다. 임계값은 아직
-            # `_drift_norm` docstring 에 적힌 이유로 재측정 전이다. 이번 실행의
-            # 로그가 그 실측값을 준다 — 추측으로 숫자를 박지 않기 위해서.
+            # 정규화 값도 함께 재고 **둘 다** 로그한다.
             drift_n = _drift_norm(sampled, matched)
             eff = strength
             if drift is not None:
                 _ns = "n/a" if drift_n is None else f"{drift_n:.4f}"
                 _log(f"[GoRi Consistency Keeper] {name} 틀어짐 MSE={drift:.6f} "
                      f"정규화={_ns} 당김 {strength:.2f}")
-            # nan 은 모든 비교가 False 라 `> 0.8` 도 통과해 감쇠를
-            # 건너뛴다 → 이후 0*(matched-sampled) 로 nan 이 전파된다.
-            # `not (x <= 0.8)` 은 nan 에서 True 가 된다(2026-09-28).
-            if drift is not None and not (drift <= 0.8):
+            # 왜(Why) 정규화값으로 감쇠하나 (2026-10-01 실측): 절대 MSE 규칙
+            # (0.8 / 2.0)은 이 워크플로에서 정상 참조 4건이 4.227~8.384 로
+            # 측정돼 **전부 0 으로 죽었다.** 정규화값(0.222~0.487)은 모델을
+            # 넘어가고 정상 범위를 안다. 비교 불가(None, 즉 참조가 퇴화)면
+            # 예전 규칙으로 **떨어진다** — 조용히 "안 건드림" 으로 바뀌면 그게
+            # 또 다른 조용한 실패가 된다.
+            if drift_n is not None:
+                _dn = strength * _damp_norm(drift_n)
+                if _dn < eff:
+                    eff = _dn
+                    _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준과 결과물 "
+                         f"구도가 많이 다름 — 당김 자동 감쇠 {strength:.2f}"
+                         f"→{eff:.2f} (정규화 {drift_n:.4f} > "
+                         f"{_DRIFT_NORM_KNEE:.2f}). 같은 구도 기준 사용 권장")
+            elif drift is not None and not (drift <= 0.8):
+                # nan 은 모든 비교가 False 라 `> 0.8` 도 통과해 감쇠를
+                # 건너뛴다 → 이후 0*(matched-sampled) 로 nan 이 전파된다.
+                # `not (x <= 0.8)` 은 nan 에서 True 가 된다(2026-09-28).
                 eff = strength * _damp_factor(drift)
-
-                _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준과 결과물 구도가 많이 "
-
-                f"다름 — 당김 자동 감쇠 {strength:.2f}→{eff:.2f}. "
-
-                f"같은 구도 기준 사용 권장")
+                _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준 정규화 불가 — "
+                     f"절대 MSE 규칙으로 감쇠 {strength:.2f}→{eff:.2f}. "
+                     f"참조가 퇴화했을 수 있습니다")
 
             mismatch = _lighting_mismatch(sampled, matched)
             if mismatch is not None and not (mismatch <= 1.0):
