@@ -469,7 +469,11 @@ def chat(provider: str, model: str, api_key: str,
             raise LLMError(
                 "API 키 없음 — 외부 엔드포인트로는 요청하지 않습니다 "
                 f"({_host_of(endpoint)}). 키를 넣으면 정상 호출되고, "
-                "automation 을 '자동 (auto)' 로 두면 규칙으로 폴백합니다")
+                # 왜(Why) 여기 라벨을 그대로 적나 (2026-10-01 실측): `automation`
+                # 위젯의 실제 옵션 문자열은 "규칙 (auto)" 다. "자동 (auto)" 는
+                # **프리셋** 위젯의 라벨이라 사용자가 찾으면 없는 값을 고르게 된다.
+                # 상수를 하드코딩하지 않고 노드가 쓰는 값을 그대로 안내한다.
+                "automation 을 '규칙 (auto)' 로 두면 규칙으로 폴백합니다")
         raw = _openai_compatible_chat(
             endpoint, model.strip(), api_key, system, user, image_list, timeout)
     elif provider in _OPENAI_COMPATIBLE_PROVIDERS:

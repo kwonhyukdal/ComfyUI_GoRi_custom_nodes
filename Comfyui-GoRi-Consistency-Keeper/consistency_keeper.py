@@ -269,7 +269,10 @@ _VAE_PIXEL_FACTOR_FALLBACK = 8
 # 6.9GB 모델이 VRAM 에 오른 상태에서 128/256/512 인코딩을 시도하면 ms 가
 # 아니라 초 단위가 걸렸고, 그 여파로 하네스 폴링이 타임아웃났다.
 # 실제 디코드를 **이미 하고 있으니** 거기서 비율을 읽으면 공짜다.
-_VAE_PIXEL_FACTOR_FALLBACK = 8
+# 왜(Why) 키가 클래스인가: 이 워크플로는 `WanVAE` 와 `QwenImage21` 를 **함께**
+# 로드한다. `id()` 는 GC 뒤 주소를 재사용하므로 캐시 키로 쓰면 엉뚱한 VAE 의
+# 배율이 나오고(실측 50회 중 35회 재사용), 배율은 아키텍처의 속성이므로
+# 같은 클래스면 같다.
 _VAE_FACTOR_BY_CLASS = {}
 
 
@@ -755,9 +758,6 @@ def _note_pose_unavailable():
          "맞는지 확인해 주세요. 인물 위치만 쓰는 강도 조절은 계속 동작한다.")
 
 
-_POSE_NOTED = False
-
-
 def _person_mask_from_rgb(u8):
     """uint8 HWC RGB -> (H, W) float 인물 마스크(0~1). 사람 없으면 None.
 
@@ -1039,7 +1039,21 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
     # 이 셋이 구분되지 않았다. 실측에서 `의상 교체1~3`(사람 없는 제품 사진) 이
     # 0점이라 "탐지 실패처럼" 보였고, 그 결과 판정 게이트가 조용히 제한 없이
     # 진행했다. 게이트를 켰는데 판정이 없다는 이유로 완전 통과하는 셈이다.
-    _POSE_WHY = {}
+    #
+    # 왜(Why) `global` 이 필수인가 (2026-10-01 실측): 이 선언이 없으면 아래
+    # 다섯 줄이 **함수 지역 dict** 를 채운다. 함수는 `out` 만 돌려주므로 그
+    # dict 는 버려지고, `run()` 이 읽는 모듈 수준 `_POSE_WHY` 는 영원히 비어
+    # 있어 게이트가 항상 "사유 기록 없음" 을 본다. 사슬이 조용히 끊기면
+    # `_pose_gate_message` 의 ⚠ 승격 경로도 영영 발동하지 않는다.
+    # 8d2fd86("Stop the trust gate from passing in silence") 의 목적이
+    # 정확히 이 경로였는데 `global` 한 줄로 무력화돼 있었다.
+    #
+    # 왜(Why) `_clear()` 가 아니라 키만 지우는가: 같은 dict 에 `_note_pose_why` 의
+    # 중복 방지용 `_said` 도 산다. 통째로 비우면 **매 프레임마다** "한 번만"
+    # 계약이 초기화되어 같은 사유가 스텝 수만큼 되풀이된다. 사유 키만 지운다.
+    global _POSE_WHY
+    for _k in [k for k in _POSE_WHY if k != "_said"]:
+        del _POSE_WHY[_k]
     for name, lat in latents.items():
         if lat is None:
             continue
@@ -1532,24 +1546,44 @@ def _panels_from_profile(profile, width: int, on_ratio: float = _PANEL_ON_RATIO,
         return []
 
 
-# 시트 판별 정규성 임계값. 왜(Why) 실측 보정값이다.
-#   합성 시트(6·4패널): 폭비 1.00 / 간격비 1.00
-#   실사용 사진들      : 폭비 1.55~6.48 / 간격비 0.34~1.00
-# 즉 "패널이 3개 이상 + 폭이 고르게 + 간격이 고르게"가 시트를 가르는 신호다.
-# 왜(Why) 이렇게 빡빡한가: 시트로 잘못 판정하면 6개 뷰를 6명 신원으로
-# 평균내어 **신원 일관성이 오히려 망가진다.** 오탐이 누락보다 훨씬 위험하다.
-SHEET_MIN_PANELS = 3
+# 시트 판별 임계값. 왜(Why) 실측 보정값이다.
+#   실사용 시트 3장 : n=4 / 간격비 0.77~0.95
+#   실사용 사진 10장: n=1~2
+#
+# ⚠ 이 값은 카메라 노드의 `_SHEET_MIN_PANELS` · `_SHEET_MIN_SPACING_RATIO` 와
+# **같은 값이어야 한다.** 2026-10-01 실측: 키퍼만 `SHEET_MIN_PANELS=3`,
+# `SHEET_MAX_WIDTH_RATIO=1.60` 이었고 그 결과 시트 3장 중 **2장**이 "시트 아님"
+# 으로 판정되어 강도 감쇠와 패널 대체가 통째로 건너뛰어졌다. 카메라만 고쳤던
+# 것이었다(8d2fd86 이전). 두 판정이 어긋나면 키퍼만 잘못 동작한다.
+# 크로스 폴더 공용 모듈은 만들지 않는다 — 각 폴더가 **단독 배포 단위**라
+# (CI 가 `cd 폴더 && python tests/test_node.py` 로 독립 실행하고 __init__.py
+# docstring 도 "이 폴더를 복사 후 재시작" 이라고 적었다) 공용 모듈을 두면
+# 단독 설치가 깨진다. 대신 `tests/test_pack.py` 에 교차 검사를 둔다.
+#
+# 왜(Why) 간격만 보는가 (2026-10-01 실측): 예전엔 폭 균일성(`wreg`)까지
+# 요구했는데 **진짜 시트 2장을 놓쳤다.** 원본 시트는 2신세(좁은 패널 2개) +
+# 4얼굴(넓은 패널 4개) 구성이라 패널 폭이 원래 다르다 — 실측 wreg 이
+# 2.47 / 3.22 로 컸고 1.60 선에 걸렸다. 패널 폭은 시트 구성에 따라 본질적으로
+# 다르므로 판정 근거로 쓸 수 없다. 그런데도 반환 dict 와 로그에는 남긴다 —
+# 근거가 사라지면 또 "왜 3이었나" 를 되짚게 된다.
+SHEET_MIN_PANELS = 4
 SHEET_MAX_WIDTH_RATIO = 1.60
+# 왜(Why) 간격선은 카메라(0.45)가 아니라 **0.60 그대로인가**: 카메라와 같게
+# 낮추려면 근거가 있어야 한다. 13장 전수에서 `n>=4` 를 만족하면서 `greg<0.45`
+# 인 표본이 **0개**다 — 즉 낮춰도 이 표본에서 오탐이 늘지 않지만, 그렇다고
+# 낮출 근거가 생긴 것도 아니다. 근거 없는 완화를 하지 않는다(WORK_STATUS 10-6
+# 원칙: 실측이 받쳐주지 않으면 값을 바꾸지 않는다). 실사용 사진이 더 쌓이면
+# 그때 다시 잰다.
 SHEET_MIN_SPACING_RATIO = 0.60
+# 왜(Why) wreg 를 통과 조건에서 빼고 **기록만** 하는가: 위 실측처럼 패널 폭은
+# 시트 구성에 따라 본질적으로 다르므로 판정 근거로 쓸 수 없다. 그런데도
+# 로그와 반환 dict 에는 남긴다 — 근거가 사라지면 또 "왜 3이었나" 를 되짚게 된다.
+SHEET_ENFORCE_WIDTH_RATIO = False
 
 
 def looks_like_sheet(panels) -> dict:
     """패널 구간이 시트인지 판정. {"sheet": bool, "n": int, "wreg": float,
-    "greg": float}. 패널이 2개 이하는 시트로 보지 않는다.
-
-    왜(Why) 2개는 왜(Why) 기준이 엄격한가: 방 2개·두 손·두 피사체가 있는
-    사진은 흔하다. 실사용 표준 시트는 6뷰(정면·후면·상부얼굴 4)라 3개 이상
-    정규 배치로 시작한다.
+    "greg": float}. 패널이 최소 수보다 적으면 시트로 보지 않는다.
     """
     out = {"sheet": False, "n": len(panels or []), "wreg": 0.0, "greg": 0.0}
     try:
@@ -1564,8 +1598,9 @@ def looks_like_sheet(panels) -> dict:
         greg = (min(gaps) / max(gaps)) if gaps and max(gaps) > 0 else 0.0
         out["wreg"] = round(wreg, 2)
         out["greg"] = round(greg, 2)
-        out["sheet"] = (wreg <= SHEET_MAX_WIDTH_RATIO
-                        and greg >= SHEET_MIN_SPACING_RATIO)
+        out["sheet"] = (greg >= SHEET_MIN_SPACING_RATIO
+                        and (not SHEET_ENFORCE_WIDTH_RATIO
+                             or wreg <= SHEET_MAX_WIDTH_RATIO))
         return out
     except Exception:
         return out
@@ -1925,7 +1960,17 @@ def judge_region_allowance(verdict):
 
 
 def judge_reference_trust(u8):
-    """uint8 HWC RGB 원본 -> 판정 dict. 검출 실패도 미판정으로 친다."""
+    """uint8 HWC RGB 원본 -> 판정 dict. 검출 실패도 미판정으로 친다.
+
+    왜(Why) 프로덕션 경로가 이 함수를 **부르지 않는가** (2026-10-01 실측):
+    `run()` 은 이미 `_part_detail_map` 이 디코드하며 얻은 landmark 를 가지고
+    있어서 `judge_points(_pm["original"]["pts"])` 를 직접 부른다(R75). 이
+    래퍼를 부르면 **VAE 디코드를 한 번 더** 하게 되어
+    `new_vae_decode_in_per_frame_path` 와 같은 낭비가 된다.
+    그래서 판정의 **진입점은 `judge_points`** 이고 이건 u8 -> 판정 변환이다.
+    지우지 않는 이유: 테스트가 `u8` 입력에서 판정까지 한 번에 확인한다.
+    판정 규칙 자체(`judge_points`)를 두 번 실행시키지 않고 검증하는 경로다.
+    """
     return judge_points(_pose_landmarks_from_tasks(u8, with_visibility=True))
 
 
@@ -2082,11 +2127,11 @@ def analyze_reference_sheet(vae, ref_latent, sampled, cache=None) -> dict:
     try:
         ref_arr = _decode_small(vae, ref_latent, 0.5)
         if ref_arr is None:
-            # 없이(Why) 또 말하는가: 여기 론 마을 실패
-            # ("시트니다") 와 구부할 수 없을 딜다. _decode_small 이
-            # 예외를 실패하고 사인 일 사람이라서
-            # 상여가 보이면 사용자ꊔ "패널 0개" 를 보고
-            # 누 상여를 확인한다.
+            # 왜(Why) 여기서 또 말하나: 이 분기는 조용한 실패 두 가지("시트가
+            # 아니다" 와 "디코드가 실패했다") 를 구분해 주는 유일한 자리다.
+            # `_decode_small` 이 예외를 삼키고 None 을 돌려주므로, 로그가
+            # 없으면 사용자가 "패널 0개" 를 보고 원본 문제를 의심하게 된다.
+            # 디코드 경로 자체가 이미 사유를 남기므로 여기서는 경고만 준다.
             _note_pose_error('analyze_reference_sheet.decode', None)
             return out
         raw = detect_panels(ref_arr)

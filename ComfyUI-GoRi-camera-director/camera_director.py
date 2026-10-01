@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """camera_director.py — Camera Director 노드 본체.
 
 주제 한 줄(한글 OK) + 프리셋/자동화(tier) → 카메라 조항이 포함된
@@ -6,7 +6,9 @@
 
 합의된 규칙:
 - 텍스트 경로만 관여 (model/latent 경로 무관)
-- 자동화 tier: llm(기본) / auto(규칙) / manual(수동) — llm 실패 시 auto 폴백
+- 자동화 tier: auto(규칙, **기본**) / llm(AI 판단) / manual(수동) — llm 실패 시 auto 폴백
+  왜(Why) 기본이 auto 인가: LLM 을 쓰면 키가 필요하고 원본 이미지가 외부로
+  나간다. 기본값을 llm 으로 두면 API 키 없는 사람이 매 실행마다 실패한다.
 - 프리셋 우선순위: 특정 프리셋 > 직접 설정(드롭다운) > 자동(auto: tier 판정)
 - 출력 영문, 라벨 한글, 콘솔 로그 한글
 """
@@ -41,6 +43,28 @@ def _log(msg: str) -> None:
         enc = getattr(sys.stdout, "encoding", None) or "utf-8"
         print(msg.encode(enc, "replace").decode(enc, errors="replace"),
               flush=True)
+
+
+_ONCE_SEEN = set()
+
+
+def _note_once(key: str, msg: str) -> None:
+    """같은 키의 메시지를 **한 번만** 말한다.
+
+    왜(Why) 조용한 실패에 로그를 붙이면서도 스팸을 피하는가 (2026-10-01):
+    `except Exception: return None` 이 이 파일에 **45곳** 있다. 전부 로그를
+    남기면 사용자가 읽을 수 없다 — 그래서 "그냥 한 번" 이 정답이다.
+    키퍼의 `_note_once` 와 같은 계약이며, 그쪽이 먼저 있었다.
+
+    왜(Why) 조용한 실패가 문제인가: numpy 부재도 `except Exception` 에 걸려
+    "시트 아님" 이 되고, 그 결과 시트 참조가 **조용히 withheld** 된다
+    (2026-10-01 실측: 카메라 노드가 한 장짜리 사진을 시트로 오판해 기준
+    latent 를 의도적으로 뺐고, 키퍼는 "camera 기준 없음" 으로 죽었다).
+    """
+    if key in _ONCE_SEEN:
+        return
+    _ONCE_SEEN.add(key)
+    _log(msg)
 
 
 def _load(name: str, fallback):
@@ -1077,7 +1101,7 @@ ANIMAL_ANATOMY_NEGATIVE = (
 )
 
 
-# 한국어 명사 뒤에 붙는 조사·수량사 ��들만 "그 단어를 썼다"로 인정한다.
+# 한국어 명사 뒤에 붙는 조사·수량사 어미들만 "그 단어를 썼다"로 인정한다.
 # 왜(Why) 이 목록이 필요한가: 한국어는 어절이 공백으로 분리되지 않아
 # `keyword in text` 로는 "소파/태양/양옆" 이 "소/양" 으로 잡힌다(2026-09-28 실측).
 # 사람이 있는 장면이 동물로 분류되면 인체 가드가 전부 사라진다.
@@ -1467,7 +1491,7 @@ POSE_ROLE_PATTERNS = _role_patterns(_KO_POSE_WORDS, _EN_POSE_WORDS) + (
     # "이미지 2의 포즈"(뒤에 온다)만 커버해서 자연스러운 표현을 놓쳤다.
     # 슬롯 번호는 반드시 캡처 그룹이어야 한다(_collect_role_slots 계약).
     r"(\d{1,2})\s*(?:번|번째|번의)?\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*(?:" + _KO_POSE_WORDS + r")",
-    # "3번과 7번 이미지의 포즈" — 접���으로 나열하면 앞 번호가 뒤 번호 창에
+    # "3번과 7번 이미지의 포즈" — 접두·접미로 나열하면 앞 번호가 뒤 번호 창에
     # 밀려 잡히지 않았다. 나열 멤버마다 캡처 그룹을 두어 전부 수집한다.
     r"(\d{1,2})\s*(?:번|번째)\s*(?:와|과|and|,|，)\s*(\d{1,2})\s*(?:번|번째)?\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*(?:" + _KO_POSE_WORDS + r")",
     # 2026-09-29 추가: "2번은 포즈만" / "2번 포즈만" — 이미지 라벨 없이
@@ -2726,7 +2750,7 @@ def subject_spacing(image) -> dict:
             return out
         # 두 겹 기준: core(50%)는 덩어리 중심, edge(15%)는 덩어리 경계.
         # 간격은 core가 아니라 **edge 기준으로 끊긴 두 덩어리 사이의 폭**으로 잰다.
-        # (core로 재면 경계 셀이 통과해 간격이 0으로 계��된다 — 실측 오류)
+        # (core로 재면 경계 셀이 통과해 간격이 0으로 계산된다 — 실측 오류)
         edge_thr = max(0.4, cmax * 0.15)
         runs, cur = [], None
         for i, v in enumerate(col):
@@ -3132,7 +3156,15 @@ def _column_profile(arr, width: int = _SHEET_PROFILE_W):
         if prof.size < 8:
             return None
         return prof.astype(_np.float32)
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) 여기서 말하나 (2026-10-01): 이 함수가 None 을 주면 `_looks_like_sheet`
+        # 가 `{"sheet": False}` 로 조용히 물러난다. numpy 미설치·입력 타입 불일치가
+        # **환경 문제** 인데 **판정 결과(시트 아님)** 로 보이므로, 원인 찾기가 이틀
+        # 걸렸다. 원인은 로그로만 알 수 있다.
+        _note_once("camera.column_profile",
+                   "[Camera Director] 열 프로파일 계산 실패 — 시트를 "
+                   "판정하지 못했습니다(환경 문제일 수 있음): "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return None
 
 
@@ -3154,7 +3186,11 @@ def _row_profile(arr, height: int = _SHEET_PROFILE_W):
         if prof.size < 8:
             return None
         return prof.astype(_np.float32)
-    except Exception:
+    except Exception as _e:
+        _note_once("camera.row_profile",
+                   "[Camera Director] 행 프로파일 계산 실패 — 세로 시트를 "
+                   "판정하지 못했습니다(환경 문제일 수 있음): "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return None
 
 
@@ -3274,7 +3310,15 @@ def _cell_similarity(arr) -> float:
         dots = [(sigs[i] * sigs[j]).sum()
                 for i in range(len(sigs)) for j in range(i + 1, len(sigs))]
         return float(_np.mean(dots))
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) 예외만 남기고 0.0 은 그대로인가 (2026-10-01): 0.0 은 **정상적인
+        # 판정 결과** 이기도 하다(다른 장면이면 실제로 0 근처다). 그래서 "0.0 이라
+        # 판정과 실패를 구분 못 한다" 는 문제지만, 값을 바꾸면 임계값 비교가
+        # 깨진다. 해법은 로그다 — 실패는 예외 종류로 드러낸다.
+        _note_once("camera.cell_similarity",
+                   "[Camera Director] 셀 유사도 계산 실패 — 시트 판정이 "
+                   "0 근처로 내려가 '시트 아님' 이 됩니다(환경 문제일 수 있음): "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return 0.0
 
 
@@ -3315,7 +3359,15 @@ def _sheet_normalize(arr):
             _xx = _np.clip((_np.arange(_nw) * (w / float(_nw))).astype(int), 0, w - 1)
             a = a[_yy][:, _xx, :]
         return a
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) 여기서 말하나 (2026-10-01): 이 함수가 None 을 주면
+        # `_looks_like_sheet` 는 즉시 `{"sheet": False}` 를 돌려준다. 즉 **환경
+        # 문제가 판정 결과처럼 보인다.** 시트인지 아닌지를 결정하는 첫 관문이라
+        # 조용히 넘어가면 원인 없이 "시트 아님" 이 굳는다.
+        _note_once("camera.sheet_normalize",
+                   "[Camera Director] 시트 정규화 실패 — 시트 여부를 판정하지 "
+                   "못했습니다(환경 문제일 수 있음): "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return None
 
 
@@ -3328,19 +3380,43 @@ def _looks_like_sheet(arr) -> dict:
     try:
         a = _sheet_normalize(arr)
         if a is None:
+            # `_sheet_normalize` 가 이미 사유를 남겼다. 여기서 또 남기지 않는다.
             return out
         bands, greg = _best_axis(a)
+        out["n"] = len(bands)
         if len(bands) < _SHEET_MIN_PANELS:
+            # 왜(Why) 이 탈락을 말하나 (2026-10-01 실측): 이 줄이 **조용한
+            # 실패의 중심**이었다. "시트가 아닌데 기준 latent 를 뺐다" 는 결론만
+            # 남고, 그 원인이 패널 개수 부족인지 간격 불일치인지 아무도 알 수 없었다.
+            # 그래서 탈락 조건을 **그대로 문장으로** 남긴다. 판단은 하지 않는다 —
+            # sim 이 낮아서인지 n 이 부족한지만 사용자가 읽고 결정한다.
+            _note_once("camera.sheet_bands_%d" % len(bands),
+                       f"[Camera Director] 시트로 판정하지 않음 — 패널 {len(bands)}개"
+                       f"(최소 {_SHEET_MIN_PANELS}개 필요). 이미지 안에 반복 뷰가 "
+                       "보이지 않습니다.")
             return out
         sim = _cell_similarity(a)
-        out["n"] = len(bands)
         out["greg"] = round(greg, 2)
         out["sim"] = round(sim, 3)
         out["sheet"] = (greg >= _SHEET_MIN_SPACING_RATIO
                         and sim >= _SHEET_MIN_CELL_SIMILARITY)
+        if not out["sheet"]:
+            # 여기서도 **어느 선에 걸렸는지**를 말한다. 둘 다 0 에 가까우면
+            # "패널은 잡혔지만 내용이 서로 다르다" 즉 시트가 아니다.
+            _note_once("camera.sheet_reject_g%.2f_s%.2f" % (greg, sim),
+                       f"[Camera Director] 시트로 판정하지 않음 — 간격 균일도 "
+                       f"{round(greg, 2)}(기준 {_SHEET_MIN_SPACING_RATIO}) / "
+                       f"내용 유사도 {round(sim, 3)}(기준 "
+                       f"{_SHEET_MIN_CELL_SIMILARITY}). 패널은 "
+                       f"{len(bands)}개 잡혔지만 시트 조건을 못 채웠습니다.")
         return out
-    except Exception:
+    except Exception as _e:
+        _note_once("camera.looks_like_sheet",
+                   "[Camera Director] 시트 판정 실패 — 환경 문제일 수 있음: "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return out
+
+
 def sheet_like_slots(image_items) -> list:
     """연결된 참조 중 캐릭터 시트로 판별된 슬롯 번호 목록.
 
