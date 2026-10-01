@@ -7,6 +7,7 @@
 import os
 import sys
 import json
+import time
 import weakref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -2054,12 +2055,30 @@ try:
     check("R25: Custom payload 모델명",
           _probe25.payload.get("model") == "my-model", str(_probe25.payload)[:120])
 
-    # 키 없는 게이트웨이: Authorization 헤더 생략
+    # 키 없는 게이트웨이: **로컬만** Authorization 없이 보낸다.
+    # 2026-10-01 변경: 예전에는 `https://api.example.com` 으로 빈 키 요청을
+    # 보내 Authorization 생략을 검증했다. 그것이 **지침상 금지된 외부 전송을
+    # 그대로 허용하는 경로**였고, 실환경에서 base_url=openrouter + 빈 키로
+    # 401(No cookie auth credentials found)을 받고 45초를 버렸다.
+    # 로컬 게이트웨이(LM Studio/Ollama 대역)는 키가 필요 없으므로 유지한다.
     llm_client.clear_cache()
     llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
-                    base_url="https://api.example.com/v1")
-    check("R25: Custom 키 없으면 Authorization 헤더 생략",
+                    base_url="http://127.0.0.1:8080/v1")
+    check("R25: 로컬 Custom 키 없으면 Authorization 헤더 생략",
           "Authorization" not in (_probe25.headers or {}), str(_probe25.headers))
+
+    # 외부 Custom + 키 없음 → 아예 요청하지 않는다(R80).
+    llm_client.clear_cache()
+    _ext_blocked = False
+    _ext_msg = ""
+    try:
+        llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
+                        base_url="https://api.example.com/v1")
+    except llm_client.LLMError as _e:
+        _ext_blocked = True
+        _ext_msg = str(_e)
+    check("R25: 외부 Custom 키 없으면 요청을 보내지 않는다", _ext_blocked,
+          _ext_msg[:80])
 
     # localhost Base URL → 로컬 타임아웃 상향
     llm_client.clear_cache()
@@ -2069,8 +2088,10 @@ try:
           _probe25.timeout == llm_client.LOCAL_TIMEOUT, f"timeout={_probe25.timeout}")
 
     # 원격 Base URL → 기본 타임아웃 유지
+    # 키를 **넣는다** — 검증 대상은 타임아웃이지 "키가 없으면 되는지" 가
+    # 아니므로. 키 없는 원격 호출은 R80 에서 차단되며 그건 위에서 확인했다.
     llm_client.clear_cache()
-    llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "SECRET", "sys", "user text",
                     base_url="https://api.example.com/v1")
     check("R25: Custom 원격은 기본 타임아웃(45초)",
           _probe25.timeout == llm_client.DEFAULT_TIMEOUT, f"timeout={_probe25.timeout}")
@@ -2086,6 +2107,8 @@ try:
               "model" in str(e).lower(), str(e))
 
     # 캐시 분리: 같은 model·텍스트라도 다른 엔드포인트는 재호출된다
+    # 주소를 **로컬**로 둔다 — 검증 대상은 캐시 키 분리이지 외부 전송이
+    # 아니므로, 키 없는 외부 Custom 은 R80 에서 막힌다(2026-10-01 변경).
     llm_client.clear_cache()
     _calls25 = {"n": 0}
 
@@ -2095,14 +2118,14 @@ try:
 
     llm_client._post = _counting_post25
     llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
-                    base_url="https://api.one.com/v1")
+                    base_url="http://127.0.0.1:9101/v1")
     llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
-                    base_url="https://api.two.com/v1")
+                    base_url="http://127.0.0.1:9102/v1")
     check("R25: 다른 엔드포인트는 캐시 공유 안 함 (2회 호출)",
           _calls25["n"] == 2, f"calls={_calls25['n']}")
     _calls25["n"] = 0
     llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
-                    base_url="https://api.one.com/v1")
+                    base_url="http://127.0.0.1:9101/v1")
     check("R25: 같은 엔드포인트 재호출은 캐시 히트 (0회 호출)",
           _calls25["n"] == 0, f"calls={_calls25['n']}")
 finally:
@@ -4387,6 +4410,52 @@ else:
     # 임시 산출물이 저장소에 남으면 안 된다.
     check("R68: 테스트가 임시 산출물을 남기지 않음",
           not os.path.exists(os.path.join(HERE, ".gori_frontend_under_test.mjs")))
+
+# ── R80. 키가 없으면 외부로 요청하지 않는다 ──────────────────────────
+# 왜(Why) 이 테스트가 있는가 (2026-10-01 실측): `and not is_custom` 때문에
+# 키 검사를 통째로 건너뛰고 **빈 키로 openrouter 에 요청이 나갔다**:
+#   HTTP 401: {"error":{"message":"No cookie auth credentials found"}}
+# 지침상 금지된 외부 전송이 매 실행마다 일어나 45초를 버렸다. 이 검사는
+# "나가지 않는다" 를 고정한다. 성공만 확인하면 **차단**을 실수로 지울 수 있다.
+_remote69 = [
+    ("https://openrouter.ai/api/v1", True),
+    ("https://api.openai.com/v1", True),
+    ("https://generativelanguage.googleapis.com/v1beta", True),
+    ("http://localhost:1234/v1", False),
+    ("http://127.0.0.1:8000/v1", False),
+    ("http://0.0.0.0:5000/v1", False),
+    ("", False),
+]
+for _u69, _want69 in _remote69:
+    check(f"R80: 원격 판정 [{_u69[:26] or '(빈값)'}]",
+          llm_client._is_remote_endpoint(_u69) == _want69,
+          "원격=%s" % llm_client._is_remote_endpoint(_u69))
+
+check("R80: 외부 Custom 은 로컬이 아니다",
+      not llm_client.is_local_provider("Custom (OpenAI 호환)",
+                                       "https://openrouter.ai/api/v1"))
+check("R80: 로컬 Custom 은 로컬이다",
+      llm_client.is_local_provider("Custom (OpenAI 호환)",
+                                   "http://localhost:1234/v1"))
+
+# 실제로 요청이 **나가지 않는지** — 시간을 재면 통째로 쓸지 안다.
+_t69 = time.perf_counter()
+_blocked69 = False
+_msg69 = ""
+try:
+    llm_client.chat("Custom (OpenAI 호환)", "space-bunny-alpha", "",
+                    "sys", "user", base_url="https://openrouter.ai/api/v1")
+except llm_client.LLMError as _e69:
+    _blocked69 = True
+    _msg69 = str(_e69)
+except Exception as _e69:
+    _msg69 = "%s: %s" % (type(_e69).__name__, _e69)
+_el69 = time.perf_counter() - _t69
+check("R80: 키 없는 외부 Custom 요청이 차단된다", _blocked69, _msg69[:80])
+check("R80: 차트가 즉시 일어난다 (네트워크 지연 없음)", _el69 < 1.0,
+      "%.3f초" % _el69)
+check("R80: 안내가 치환 방법을 말한다", "자동 (auto)" in _msg69
+      or "자동" in _msg69, _msg69[:90])
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 

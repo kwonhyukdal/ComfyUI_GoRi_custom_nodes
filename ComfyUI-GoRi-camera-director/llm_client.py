@@ -354,8 +354,32 @@ def is_local_provider(provider: str, base_url: str = "") -> bool:
     if (provider or "") in _LOCAL_PROVIDERS:
         return True
     return bool((provider or "").startswith("Custom")
-                and any(h in (base_url or "").lower()
-                        for h in ("localhost", "127.0.0.1")))
+                and not _is_remote_endpoint(base_url))
+
+
+def _is_remote_endpoint(url: str) -> bool:
+    """주소가 같은 머신 밖인가. 로컬 엔드포인트는 키 없이도 되므로 구분한다.
+
+    왜(Why) 필요한가 (2026-10-01 실측): `is_local_provider` 가 "Custom + 키 없음"
+    을 그냥 통과시켰다. 그 결과 base_url=https://openrouter.ai/api/v1 로
+    **키 없는 요청이 그대로 나갔다**(401 No cookie auth credentials found).
+    로컬 대 Custom 는 키가 필요 없으므로, "로컬인가" 로 갈라야 한다.
+    """
+    u = (url or "").lower()
+    if not u:
+        return False
+    return not any(h in u for h in ("localhost", "127.0.0.1", "0.0.0.0",
+                                   "::1", "[::1]", "host.docker.internal"))
+
+
+def _host_of(url: str) -> str:
+    """사람이 읽을 수 있는 호스트명. 실패하면 원본을 짧게."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url or "").hostname
+        return host or (url or "")[:48]
+    except Exception:
+        return (url or "")[:48]
 
 
 def effective_timeout(provider: str, base_url: str = "",
@@ -428,6 +452,20 @@ def chat(provider: str, model: str, api_key: str,
             raise LLMError(
                 "Custom (OpenAI 호환): model 칸이 비어 있음 — 엔드포인트가 제공하는 "
                 "모델명을 입력하세요 (예: qwen2.5-vl)")
+        # 왜(Why) 여기서 막는가 (2026-10-01 실측): `and not is_custom` 때문에
+        # 키 검사를 통째로 건너뛰고 **빈 키로 외부 서버에 요청을 보냈다.**
+        # 실측 로그:
+        #   HTTP 401: {"error":{"message":"No cookie auth credentials found"}}
+        # provider=Custom (OpenAI 호환)  base_url=https://openrouter.ai/api/v1
+        # 즉 지침상 금지된 외부 전송이 매 실행마다 일어났고 45초를 버렸다.
+        # **키가 없으면 애초에 요청하지 않는 게 옳다.** 로컬 엔드포인트는 키가
+        # 필요 없을 수 있으니 "주소가 같은 머신인가" 로 구분한다.
+        # 순서는 model 검사 다음이다 — 더 구체적인 안내를 먼저 준다.
+        if not api_key and _is_remote_endpoint(endpoint):
+            raise LLMError(
+                "API 키 없음 — 외부 Custom 엔드포인트로는 요청하지 않습니다 "
+                f"({_host_of(endpoint)}). 지침상 외부 전송은 금지이므로 규칙으로 "
+                "폴백합니다. 키를 넣거나 automation 을 '자동 (auto)' 로 바꾸세요")
         raw = _openai_compatible_chat(
             endpoint, model.strip(), api_key, system, user, image_list, timeout)
     elif provider in _OPENAI_COMPATIBLE_PROVIDERS:
