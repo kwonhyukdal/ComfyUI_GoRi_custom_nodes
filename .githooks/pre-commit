@@ -19,10 +19,15 @@
 # A blocked commit is a prompt to write down what changed, not a wall.
 
 STATUS_DOC="WORK_STATUS.md"
+# Each logic doc is personal and gitignored, so it is checked by modification time
+# rather than by staging, and it only guards the folder it documents.
 LOGIC_DOC="Keeper_Logic.md"
-# Keeper_Logic.md documents the keeper only, so rule 2 covers the keeper folder
-# alone. A camera-only change has nothing to update there.
-KEEPER_DIR="Comfyui-GoRi-Consistency-Keeper"
+LOGIC_DIR="Comfyui-GoRi-Consistency-Keeper"
+CAMERA_LOGIC_DOC="camera_Logic.md"
+# Why the odd casing: git matches pathspecs case-sensitively even on Windows, and
+# a wrong-case directory silently matches nothing - the rule then never fires and
+# reports success. Both directory names below are copied from `git ls-files`.
+CAMERA_DIR="ComfyUI-GoRi-camera-director"
 
 staged="$(git diff --cached --name-only)"
 [ -z "$staged" ] && exit 0
@@ -48,33 +53,40 @@ if ! echo "$staged" | grep -qx "$STATUS_DOC"; then
   fi
 fi
 
-# Rule 2. If the doc does not exist - fresh clone, or someone who does not keep
-# it - the rule does not apply. A gate that fires for everyone over a file
-# nobody has is a gate people learn to bypass.
-if [ -f "$LOGIC_DOC" ]; then
-  for f in $(echo "$staged" | grep "^$KEEPER_DIR/.*\.py$"); do
-    if [ "$f" -nt "$LOGIC_DOC" ]; then
+# Rule 2. If a doc does not exist - fresh clone, or someone who does not keep it
+# - the rule does not apply. A gate that fires for everyone over a file nobody has
+# is a gate people learn to bypass.
+check_freshness() {
+  _doc="$1"
+  _dir="$2"
+  [ -f "$_doc" ] || return 0
+  for _f in $(echo "$staged" | grep "^$_dir/.*\.py$"); do
+    if [ "$_f" -nt "$_doc" ]; then
       {
         echo ""
-        echo "BLOCKED: keeper code is newer than $LOGIC_DOC."
+        echo "BLOCKED: code is newer than $_doc."
         echo ""
-        echo "  $f   (edited after the doc)"
-        echo "  $LOGIC_DOC"
+        echo "  $_f   (edited after the doc)"
+        echo "  $_doc"
         echo ""
-        echo "$LOGIC_DOC documents every function, constant and decision in the"
-        echo "keeper. A code change that does not update it leaves the document"
+        echo "$_doc documents every function, constant and decision in this"
+        echo "folder. A code change that does not update it leaves the document"
         echo "describing code that no longer exists."
         echo ""
         echo "Read it, update it, then mark it newer than the code:"
-        echo "  touch $LOGIC_DOC"
+        echo "  touch $_doc"
         echo ""
         echo "If this change genuinely needs no doc update, bypass on purpose:"
         echo "  git commit --no-verify"
         echo ""
       } >&2
-      exit 1
+      return 1
     fi
   done
-fi
+  return 0
+}
+
+check_freshness "$LOGIC_DOC" "$LOGIC_DIR" || exit 1
+check_freshness "$CAMERA_LOGIC_DOC" "$CAMERA_DIR" || exit 1
 
 exit 0

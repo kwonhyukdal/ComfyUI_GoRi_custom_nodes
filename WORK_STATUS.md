@@ -23,7 +23,8 @@ ComfyUI 커스텀 노드 3종이 **하나의 클론**에 들어 있다 (`custom_
 | `jev-pref.json` | 저장소별 Jev 의미 규칙. **있으면 게이트가 자동 동작** |
 | `run_tests.bat` | 테스트 실행기. ComfyUI 내장 Python 3.12로 돌린다 |
 | `install_hook.bat` | 커밋 게이트 설치 (clone 맨 처음 1회) |
-| `Keeper_Logic.md` | **(개인, gitignore 됨)** 키퍼 로직 전체 해설. 위치를 아는 사람이 쓴다 |
+| `Keeper_Logic.md` | **(개인, gitignore 됨)** 키퍼 로직 해설 |
+| `camera_Logic.md` | **(개인, gitignore 됨)** 카메라 로직 해설 |
 
 카메라 디렉터와 키퍼는 **항상 세트로 함께** 쓰인다. 카메라만 있으면 키퍼가 기준을 못 받고,
 키퍼만 있으면 카메라 연출이 없다.
@@ -181,23 +182,30 @@ WORK_STATUS.md   진행상황·설계 결정·미해결·실측 수치의 단일
 ```
 설치        install_hook.bat 실행 (clone 마다 1회)
 규칙 1      .py 가 stage 면 WORK_STATUS.md 도 stage 되어야 커밋 통과
-규칙 2      키퍼 폴더의 .py 가 stage 면 Keeper_Logic.md 가 코드보다 최신이어야 통과
+규칙 2      각 폴더의 .py 가 stage 면 그 폴더의 해설서가 코드보다 최신이어야 통과
 무시        git commit --no-verify   ← 의도적으로 우회할 때
 ```
 `.git/hooks` 는 git 이 추적하지 않아 fresh clone 에는 훅이 없다 → `install_hook.bat` 필요.
 
-**`Keeper_Logic.md` 는 개인 문서라 gitignore 로 저장소에서 뺐다.**
+**개념 해설서 2종은 개인 문서라 gitignore 로 저장소에서 뺐다.**
 stage 대상이 아니므로 규칙 2 는 **수정 시각**으로 신선도를 잰다.
 문서가 없으면(fresh clone) 규칙 2 는 적용되지 않는다 — 아무도 안 가진 파일에
 게이트를 걸면 결국 우회당하기 때문이다.
 
-**검증 완료 (실측 5케이스)**
+> **대소문자 함정 (2026-10-01 실측)**: git 은 Windows 에서도 pathspec 을
+> **대소문자를 구분**합니다. `git add "Comfyui-GoRi-Camera-Director/..."` 는
+> exit=0 인데 **아무것도 stage 하지 않습니다**. 그래서 훅의 폴더명은
+> `git ls-files` 출력에서 그대로 복사했습니다. 틀리면 규칙이 조용히 발동 안 합니다.
+
+**검증 완료 (실측 7케이스)**
 ```
-.py 만 stage                          → 차단 (exit 1)  ✅
-WORK_STATUS + 키퍼 .py (문서가 오래됨) → 차단 (exit 1)  ✅
-WORK_STATUS + 키퍼 .py (문서가 최신)   → 통과 (exit 0)  ✅
-WORK_STATUS + 문서 없음 + 키퍼 .py    → 통과 (exit 0)  ✅ 규칙2 미적용
-git commit --no-verify                → 통과 (exit 0)  ✅
+키퍼 .py + WORK_STATUS, 해설서 오래됨   → 차단 (exit 1)  ✅
+카메라 .py + WORK_STATUS, 해설서 오래됨 → 차단 (exit 1)  ✅
+두 해설서 모두 최신                     → 통과 (exit 0)  ✅
+해설서 하나가 없음                      → 통과 (exit 0)  ✅ 규칙2 미적용
+WORK_STATUS 없이 .py 만                → 차단 (exit 1)  ✅
+카메라만 바꿔도 키퍼 해설서는 요구 안 함  → 통과 (exit 0)  ✅
+git commit --no-verify                 → 통과 (exit 0)  ✅
 ```
 
 ---

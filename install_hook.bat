@@ -37,5 +37,6 @@ if errorlevel 1 (
 
 echo [install-hook] installed %DST%
 echo [install-hook] commits touching a .py file now require WORK_STATUS.md.
+echo [install-hook] keeper and camera code additionally require their logic doc.
 echo [install-hook] bypass on purpose with: git commit --no-verify
 exit /b 0

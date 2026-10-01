@@ -232,8 +232,10 @@ GoRi-Wireless-Engine/
 run_tests.bat
 
 # 개인 참고 문서 — 공개 저장소에 올리지 않는다.
-# 키퍼 코드의 함수·상수·판정 근거를 한국어로 풀어쓴 개인 해설서다.
-# commit 게이트는 이 파일이 키퍼 코드보다 오래지지 않았는지 **로컬에서** 검사한다
-# (`.githooks/pre-commit` 규칙 2). gitignore 에 있으므로 stage 대상이 아니다.
+# 노드 코드의 함수·상수·판정 근거를 한국어로 풀어쓴 개인 해설서다.
+# commit 게이트는 각 문서가 자기 폴더의 코드보다 오래지지 않았는지
+# **로컬에서** 검사한다(`.githooks/pre-commit` 규칙 2). gitignore 에 있으므로
+# stage 대상이 아니다.
 Keeper_Logic.md
+camera_Logic.md
 
