@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """camera_director.py — Camera Director 노드 본체.
 
 주제 한 줄(한글 OK) + 프리셋/자동화(tier) → 카메라 조항이 포함된
@@ -6,12 +6,24 @@
 
 합의된 규칙:
 - 텍스트 경로만 관여 (model/latent 경로 무관)
-- 자동화 tier: llm(기본) / auto(규칙) / manual(수동) — llm 실패 시 auto 폴백
+- 자동화 tier: auto(규칙, **기본**) / llm(AI 판단) / manual(수동) — llm 실패 시 auto 폴백
+  왜(Why) 기본이 auto 인가: LLM 을 쓰면 키가 필요하고 원본 이미지가 외부로
+  나간다. 기본값을 llm 으로 두면 API 키 없는 사람이 매 실행마다 실패한다.
 - 프리셋 우선순위: 특정 프리셋 > 직접 설정(드롭다운) > 자동(auto: tier 판정)
 - 출력 영문, 라벨 한글, 콘솔 로그 한글
 """
 
 from __future__ import annotations
+
+# 이 노드의 독립 버전. 팩(pyproject.toml) 버전과 별개로 간다.
+# 왜(Why) future import 다음인가: `from __future__` 는 docstring 바로 다음에
+# 와야 한다 (SyntaxError). 버전 상수는 그 뒤 첫 코드다.
+# 왜(Why) 노드마다 따로인가 (2026-10-02): 팩은 여러 노드를 한 번에 배포하는
+# 관리 단위일 뿐이다. 카메라만 고쳤는데 팩 버전을 올리면 키퍼도 바뀐 것처럼
+# 보인다. 각 노드는 자기 변경에만 버전을 올린다. 새 노드를 만들면 첫날부터
+# __version__ 을 둔다 (test_pack.py 가 강제한다).
+__version__ = "1.9.7"
+
 
 import json
 import os
@@ -41,6 +53,28 @@ def _log(msg: str) -> None:
         enc = getattr(sys.stdout, "encoding", None) or "utf-8"
         print(msg.encode(enc, "replace").decode(enc, errors="replace"),
               flush=True)
+
+
+_ONCE_SEEN = set()
+
+
+def _note_once(key: str, msg: str) -> None:
+    """같은 키의 메시지를 **한 번만** 말한다.
+
+    왜(Why) 조용한 실패에 로그를 붙이면서도 스팸을 피하는가 (2026-10-01):
+    `except Exception: return None` 이 이 파일에 **45곳** 있다. 전부 로그를
+    남기면 사용자가 읽을 수 없다 — 그래서 "그냥 한 번" 이 정답이다.
+    키퍼의 `_note_once` 와 같은 계약이며, 그쪽이 먼저 있었다.
+
+    왜(Why) 조용한 실패가 문제인가: numpy 부재도 `except Exception` 에 걸려
+    "시트 아님" 이 되고, 그 결과 시트 참조가 **조용히 withheld** 된다
+    (2026-10-01 실측: 카메라 노드가 한 장짜리 사진을 시트로 오판해 기준
+    latent 를 의도적으로 뺐고, 키퍼는 "camera 기준 없음" 으로 죽었다).
+    """
+    if key in _ONCE_SEEN:
+        return
+    _ONCE_SEEN.add(key)
+    _log(msg)
 
 
 def _load(name: str, fallback):
@@ -133,6 +167,18 @@ ANGLE = {
     "개미눈 (worm's eye)": "worm's-eye view from ground level",
     "어깨뒤 (OTS)": "over-the-shoulder framing",
     "측면 (side profile)": "side profile framing",
+    # 아래 5종은 MIT 라이선스 자료를 규격에 맞게 변형한 것이다 (2026-10-02).
+    # 출처: xoxxel/camera-prompts (MIT) — 40종 카메라 앵글의 영어 키워드와
+    # 효과 서술. 한글 라벨 + 영어 절(clause) 형식으로 맞추고, 서술은 우리
+    # 프롬프트 톤(짧은 절, 마침표 없음)에 맞게 줄였다. 원문 예시는 자동차
+    # 기준이라 인물·장면에 통용되는 부분만 취했다.
+    # 왜(Why) 새로 넣나: POV·반사·파노라마·후면3/4·히어로는 기존 8종에 없고
+    # 사용자가 topic 에 써도 매칭이 안 됐다. 드롭다운에 나오게 한다.
+    "일인칭 (POV)": "first-person point of view shot, immersive eye-level presence",
+    "반사 (reflection)": "reflection shot with mirrored surface, symmetric depth",
+    "파노라마 (panoramic)": "ultra-wide panoramic shot, expansive horizon and scale",
+    "후면 3/4 (three-quarter rear)": "three-quarter rear view, back and side visible",
+    "와이드 히어로 (wide hero)": "wide hero shot from low angle, subject monumental in environment",
 }
 
 COMPOSITION = {
@@ -304,10 +350,14 @@ def _release_vram() -> None:
     왜(Why) MPS도 같이 비우는가: macOS(M1/M2/M3)는 CUDA가 아니라 MPS 메모리
     파서를 쓴다. cuda만 비우면 맥에서는 이 함수가 아무것도 안 해서, 통합
     캐시 정리 의도가 그대로 전달되지 않는다. hasattr 가드로 CPU/MPS 없는
-    환경에서도 예외 없이 통과한다."""
+    환경에서도 예외 없이 통과한다.
+    왜(Why) gc.collect(0) 인가 (2026-10-02 실측): 풀 collect 는 106ms 걸리고
+    0개를 수집한다 — ComfyUI 프로세스 전체 힙(수백만 객체)을 스캔하는 비용만
+    낸다. gen 0은 0.5ms에 단기 순환을 잡는다. 장기 순환은 파이썬이 알아서 한다.
+    """
     try:
         import gc as _gc
-        _gc.collect()
+        _gc.collect(0)
         try:
             import torch as _t
             if hasattr(_t, "cuda") and _t.cuda.is_available():
@@ -1077,7 +1127,7 @@ ANIMAL_ANATOMY_NEGATIVE = (
 )
 
 
-# 한국어 명사 뒤에 붙는 조사·수량사 ��들만 "그 단어를 썼다"로 인정한다.
+# 한국어 명사 뒤에 붙는 조사·수량사 어미들만 "그 단어를 썼다"로 인정한다.
 # 왜(Why) 이 목록이 필요한가: 한국어는 어절이 공백으로 분리되지 않아
 # `keyword in text` 로는 "소파/태양/양옆" 이 "소/양" 으로 잡힌다(2026-09-28 실측).
 # 사람이 있는 장면이 동물로 분류되면 인체 가드가 전부 사라진다.
@@ -1467,7 +1517,7 @@ POSE_ROLE_PATTERNS = _role_patterns(_KO_POSE_WORDS, _EN_POSE_WORDS) + (
     # "이미지 2의 포즈"(뒤에 온다)만 커버해서 자연스러운 표현을 놓쳤다.
     # 슬롯 번호는 반드시 캡처 그룹이어야 한다(_collect_role_slots 계약).
     r"(\d{1,2})\s*(?:번|번째|번의)?\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*(?:" + _KO_POSE_WORDS + r")",
-    # "3번과 7번 이미지의 포즈" — 접���으로 나열하면 앞 번호가 뒤 번호 창에
+    # "3번과 7번 이미지의 포즈" — 접두·접미로 나열하면 앞 번호가 뒤 번호 창에
     # 밀려 잡히지 않았다. 나열 멤버마다 캡처 그룹을 두어 전부 수집한다.
     r"(\d{1,2})\s*(?:번|번째)\s*(?:와|과|and|,|，)\s*(\d{1,2})\s*(?:번|번째)?\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*(?:" + _KO_POSE_WORDS + r")",
     # 2026-09-29 추가: "2번은 포즈만" / "2번 포즈만" — 이미지 라벨 없이
@@ -1535,6 +1585,95 @@ def _has_outfit_apply_verb(text: str) -> bool:
     """의장 교체/적용 동사가 있는 문장인지(대상 슬롯 오염 교정용)."""
     t = (text or "").lower()
     return bool(re.search(_OUTFIT_VERB, t))
+
+
+# 텍스트 단독 의상 교체의 영어 의류 어휘. 왜(Why) 슬롯 패턴과 분리하나:
+# `_clothing_role_slots` 는 "이미지 N 의 옷" 처럼 슬롯 번호를 요구한다.
+# 그런데 "red evening dress 로 교체" 처럼 **옷 자체를 지목**하는 경우는
+# 슬롯이 없다. 슬롯을 요구하면 텍스트 단독 교체를 영영 못 잡는다.
+_EN_GARMENT_WORDS = (
+    r"outfit|clothing|clothes|dress|gown|sweater|skirt|shirt|blouse|"
+    r"pants|trousers|jeans|jacket|coat|suit|uniform|wardrobe|garment|"
+    r"apparel|top|bottoms|knit|denim"
+)
+
+
+def _is_text_outfit_change(text: str) -> bool:
+    """의상 참조 이미지 없이 텍스트만으로 옷 교체를 명시했는가.
+
+    왜(Why) 이 함수가 필요한가 (2026-10-02 실측): 카메라가 명시적 교체 요청에도
+    "same outfit" 을 함께 내보냈다. 같은 프롬프트에 "red evening dress" 와
+    "same outfit" 이 공존하자 모델은 참조 이미지를 보고 원본을 택했다.
+    0.00(키퍼 미동작)에서도 같은 옷이 나와 키퍼 문제가 아님을 확인했다.
+
+    왜(Why) 슬롯을 요구하지 않나: `_is_outfit_transfer` 는 "이미지 N 의 옷" 처럼
+    슬롯 번호를 요구한다. "빨간 드레스로 갈아입혀" 처럼 옷 자체를 지목하면
+    슬롯이 없어서 영영 못 잡는다. 이 함수는 슬롯 없이 옷 교체 의사만 본다.
+
+    왜(Why) 명시 유지가 우선하나: "same outfit", "keep the outfit" 처럼 유지를
+    명시하면 교체로 보지 않는다. 모순된 지시에서 유지를 택한 것은 모델이 아니라
+    코드가 먼저 정리해야 한다 — 둘 다 내보내면 모델이 참조 이미지를 보고
+    원본을 택한다(실측).
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    # 명시 유지는 교체가 아니다 — 먼저 제외한다.
+    if re.search(r"\b(?:same|keep|preserve|maintain)\b[^.]{0,24}?\b(?:outfit|clothing|clothes|dress)\b", low):
+        return False
+    if re.search(r"(?:같은|원래|기존)\s*(?:옷|의상|드레스|차림)", t):
+        return False
+    # 영어: 교체 동사 + 의류 ("replace A with B dress", "change into ...")
+    # 왜(Why) 굴절형을 넣나: `\bwearing\b` 은 `\bwear\b` 에 안 걸린다.
+    # "wearing a red dress" 처럼 현재진행형이 가장 흔한 교체 표현이다.
+    if re.search(r"\b(?:replac(?:e[sd]?|ing)|chang(?:e[sd]?|ing)|"
+                 r"swap(?:ped|ping)?|wear(?:ing|s)?|wore|worn|"
+                 r"dress(?:ed)? in)\b", low) and re.search(
+            r"\b(?:" + _EN_GARMENT_WORDS + r")\b", low):
+        return True
+    # 영어: 형용사 + 의류 ("different outfit", "new dress", "red evening dress"
+    # 뒤에 교체 맥락이 있을 때 — 단독 "red dress" 는 묘사일 수 있다)
+    if re.search(r"\b(?:different|new|another|completely different)\b[^.]{0,32}?\b(?:"
+                 + _EN_GARMENT_WORDS + r")\b", low):
+        return True
+    # 한국어: 교체 동사 + 의류 (슬롯 불필요)
+    if re.search(_OUTFIT_VERB, low) and re.search(
+            r"(?:의상|옷|옷차림|드레스|셔츠|블라우스|바지|원피스|코트|재킷|자켓|슈트|정장|한복|"
+            r"outfit|clothing|dress|clothes)", low):
+        return True
+    # 한국어: "다른 옷", "새 드레스" (명시 교체)
+    if re.search(r"(?:다른|새|새로운|완전히 다른)\s*(?:옷|의상|드레스|차림|outfit|dress)", t):
+        return True
+    return False
+
+
+def _is_empty_scene(text: str) -> bool:
+    """참조에 사람이 없음을 명시했는가 (빈 배경·가구·풍경).
+
+    왜(Why) 명시만 보나: 빈 문자열은 사람이 있을 수 있다 (설명 생략).
+    "사람 없음" 이라고 써야 identity 문구를 뺀다. 오탐이면 신원 보존이
+    꺼져서 더 나쁘다 — 누락은 기존 동작 그대로라 안전하다.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    # 영어: empty / no person / background only
+    if re.search(r"\b(?:empty|vacant|unoccupied)\b[^.]{0,24}?\b(?:scene|bench|chair|bed|room|background)\b", low):
+        return True
+    if re.search(r"\bno\s+(?:person|one|people|human)\b", low):
+        return True
+    if re.search(r"\bbackground\s+only\b|\blandscape\s+only\b|\bstill\s+life\b", low):
+        return True
+    # 한국어: 빈 / 사람 없음 / 배경만
+    if re.search(r"(?:빈|비어\s*있는)\s*(?:벤치|의자|침대|방|배경|풍경|장면)", t):
+        return True
+    if re.search(r"사람\s*(?:없|없음|없이)|아무도\s*없", t):
+        return True
+    if re.search(r"(?:배경|풍경)만", t):
+        return True
+    return False
 
 
 def _outfit_target_slots(text: str) -> set:
@@ -1904,6 +2043,14 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
     """단일/다중 레퍼런스 이미지용 positive guard 문구를 반환한다."""
     if image_count <= 0:
         return ""
+    # 왜(Why) 빈 장면이면 빈 문자열인가 (2026-10-02 실측): 참조에 사람이 없는데
+    # "same person" 을 내보내면 모델이 누구를 만들지 몰라 유령(반투명 인물)을
+    # 만든다 — 의자·침대 참조에서 실측. pose 0점으로 게이트는 알지만 카메라는
+    # 몰랐다. 명시적 빈 장면 지시가 있으면 identity 문구를 내지 않는다.
+    # 빈 문자열 topic 은 해당 없음 (사람 사진에 설명 없을 수 있음) — 명시적
+    # 언급만 본다. 오탐보다 누락이 안전하다 (누락이면 기존 동작 그대로).
+    if _is_empty_scene(topic or ""):
+        return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
     plan = _person_object_plan(topic, labels)
     main = str(plan["main"])
@@ -1921,6 +2068,16 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
                 f"proportions), do not humanize it, do not give it human hands "
                 f"or facial features")
     if image_count == 1:
+        # 왜(Why) 의상 교체 명시면 "same outfit" 을 빼나 (2026-10-02 실측):
+        # 명시 요청("red evening dress 로 교체")에도 이 줄이 함께 나가면 같은
+        # 프롬프트에 교체 지시와 유지 지시가 공존한다. 모델은 참조 이미지를 보고
+        # 원본을 택하므로 교체가 일어나지 않는다 — 0.00(키퍼 미동작)에서도 같은
+        # 옷이 나와 키퍼 문제가 아님을 확인했다. 얼굴·헤어·체형 유지는 그대로
+        # 두고 옷만 뺀다. 신원은 유지하되 의상은 바꾸는 것이 요청의 의미다.
+        if _is_text_outfit_change(topic or ""):
+            return (f"preserve the same subject identity as reference image {main}, "
+                    "same facial structure, same hairstyle, "
+                    "same body proportions, same overall color identity")
         return (f"preserve the same subject identity as reference image {main}, "
                 "same facial structure, same hairstyle, same outfit, "
                 "same body proportions, same overall color identity")
@@ -2143,7 +2300,8 @@ ANATOMY_COUNT_NEGATIVE = (
     "middle, double thumbs, extra fingers, missing fingers, fingers merging "
     "into the palm, fused toes, split toes, extra toes, missing toes, "
     "feet merged into a single blob, arms fused to the torso, legs fused "
-    "together, three arms, three legs, asymmetric limbs, one arm, one leg"
+    "together, three arms, three legs, three feet, extra feet, "
+    "asymmetric limbs, one arm, one leg"
 )
 
 
@@ -2291,10 +2449,14 @@ def _num_or_zero(v) -> float:
         return 0
 
 
-def preflight_warnings(topic: str, camera: dict, latent_mp=None,
+def preflight_warnings(_topic: str, camera: dict, latent_mp=None,
                        steps: int = 0, cfg: float = 0.0,
                        denoise: float = 0.0) -> list:
     """출발 전 점검. 깨질 조합이면 경고 문구 목록 (0·빈값은 검사 안 함).
+
+    왜(Why) 첫 인자가 `_topic` 인가: 시그니처 호환용으로 받지만 본문에서 쓰지
+    않는다 (경고는 카메라·수치 조합만 본다). 호출부가 전부 positional 이라
+    안전하다. 지우면 호출부 14곳을 함께 고쳐야 해서 남긴다.
 
     왜(Why): 얼굴 클로즈업+저해상도, 극단 CFG/스텝, 과다 denoise는 실행 전에
     알 수 있는 확정 실패다. 모델 천장·시드 운은 여기서 못 잡는다.
@@ -2507,7 +2669,7 @@ PHYSICS_CONTACT_RULES = (
      "leans into them, overlapping silhouettes, weight visibly transferred",
      "standing apart, empty space between the two people, both standing upright "
      "and separate, no contact"),
-    (("안고", "안는", "안은", "안키", "안김", "품에", "감싸", "拥抱", "hold",
+    (("안고", "안는", "안은", "안키", "안김", "품에", "감싸", "hold",
       "hug", "embrace", "carried"),
      "close hold: arms wrapped around the other person's body, bodies pressed "
      "together, the held person lifted with feet clear of the ground",
@@ -2726,7 +2888,7 @@ def subject_spacing(image) -> dict:
             return out
         # 두 겹 기준: core(50%)는 덩어리 중심, edge(15%)는 덩어리 경계.
         # 간격은 core가 아니라 **edge 기준으로 끊긴 두 덩어리 사이의 폭**으로 잰다.
-        # (core로 재면 경계 셀이 통과해 간격이 0으로 계��된다 — 실측 오류)
+        # (core로 재면 경계 셀이 통과해 간격이 0으로 계산된다 — 실측 오류)
         edge_thr = max(0.4, cmax * 0.15)
         runs, cur = [], None
         for i, v in enumerate(col):
@@ -3091,7 +3253,13 @@ def _is_character_sheet_request(text: str) -> bool:
 # 고정 격자 블록 평균(linspace 인덱스)으로 바꾼다 — 해상도 무관하게 같은
 # 결과를 낸다.
 # ---------------------------------------------------------------------------
-_SHEET_MIN_PANELS = 3
+# 최소 패널 밴드 수. 왜 4인가 (2026-10-01 실측): 3 은 **세로 문틀 2개 +
+# 사람** 같은 등간격 세로 3구조를 시트로 잡았다. 실측 표:
+#   케릭터 시트1 n=4 sim=0.422 / 시트2 n=4 sim=0.587 / 시트3 n=4 sim=0.263
+#   인물 서있는 자세1(문 앞 한 장) n=3 sim=0.243  ← 오탐
+# sim 은 0.24 vs 0.26 으로 겹쳐서 올릴 수 없다(시트3 이 깨진다). n 만 확실히
+# 갈리므로 여기서 선을 긋는다.
+_SHEET_MIN_PANELS = 4
 # 간격 균일성 하한 0.45: 사용자 실제 시트는 0.95, 실사용 사진은 0.38~0.71.
 _SHEET_MIN_SPACING_RATIO = 0.45
 # 셀 평균 유사도 하한 0.20: 실제 시트 0.414, 실사용 사진 0.109 이하.
@@ -3117,7 +3285,7 @@ def _column_profile(arr, width: int = _SHEET_PROFILE_W):
         a = _np.asarray(arr, dtype=_np.float32)
         if a.shape[0] < 8 or a.shape[1] < 8:
             return None
-        h, w = a.shape[0], a.shape[1]
+        w = a.shape[1]
         if w > width:                       # 축소해 비용을 제한한다
             step = max(1, w // width)
             a = a[:, ::step, :]
@@ -3126,7 +3294,15 @@ def _column_profile(arr, width: int = _SHEET_PROFILE_W):
         if prof.size < 8:
             return None
         return prof.astype(_np.float32)
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) 여기서 말하나 (2026-10-01): 이 함수가 None 을 주면 `_looks_like_sheet`
+        # 가 `{"sheet": False}` 로 조용히 물러난다. numpy 미설치·입력 타입 불일치가
+        # **환경 문제** 인데 **판정 결과(시트 아님)** 로 보이므로, 원인 찾기가 이틀
+        # 걸렸다. 원인은 로그로만 알 수 있다.
+        _note_once("camera.column_profile",
+                   "[Camera Director] 열 프로파일 계산 실패 — 시트를 "
+                   "판정하지 못했습니다(환경 문제일 수 있음): "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return None
 
 
@@ -3139,7 +3315,7 @@ def _row_profile(arr, height: int = _SHEET_PROFILE_W):
         a = _np.asarray(arr, dtype=_np.float32)
         if a.shape[0] < 8 or a.shape[1] < 8:
             return None
-        h, w = a.shape[0], a.shape[1]
+        h = a.shape[0]
         if h > height:
             step = max(1, h // height)
             a = a[::step, :, :]
@@ -3148,7 +3324,11 @@ def _row_profile(arr, height: int = _SHEET_PROFILE_W):
         if prof.size < 8:
             return None
         return prof.astype(_np.float32)
-    except Exception:
+    except Exception as _e:
+        _note_once("camera.row_profile",
+                   "[Camera Director] 행 프로파일 계산 실패 — 세로 시트를 "
+                   "판정하지 못했습니다(환경 문제일 수 있음): "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return None
 
 
@@ -3268,7 +3448,15 @@ def _cell_similarity(arr) -> float:
         dots = [(sigs[i] * sigs[j]).sum()
                 for i in range(len(sigs)) for j in range(i + 1, len(sigs))]
         return float(_np.mean(dots))
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) 예외만 남기고 0.0 은 그대로인가 (2026-10-01): 0.0 은 **정상적인
+        # 판정 결과** 이기도 하다(다른 장면이면 실제로 0 근처다). 그래서 "0.0 이라
+        # 판정과 실패를 구분 못 한다" 는 문제지만, 값을 바꾸면 임계값 비교가
+        # 깨진다. 해법은 로그다 — 실패는 예외 종류로 드러낸다.
+        _note_once("camera.cell_similarity",
+                   "[Camera Director] 셀 유사도 계산 실패 — 시트 판정이 "
+                   "0 근처로 내려가 '시트 아님' 이 됩니다(환경 문제일 수 있음): "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return 0.0
 
 
@@ -3291,22 +3479,33 @@ def _sheet_normalize(arr):
             return None
         if max(h, w) <= _SHEET_PROFILE_W:
             return a
-        # **양쪽 축에 같은 step** (2026-09-29 실측). 축마다 다른 step 을
-        # 쓰면(내 첫 교정안) 종횡비가 깨진다: 4296x7696 이 (513, 537) 로
-        # 뭉개져 1.79:1 이 0.96:1 이 됐다. 한 step 을 양쪽에 적용해야
-        # 종횡비가 보존된다(513x286 = 1.79:1).
-        # 이 step 은 위 _np_as_rgb 의 PIL 경로가 쓰는
-        # `max(w, h) // _SHEET_PROFILE_W` 와 **같은 값**이라, 두 경로의
-        # 배열 크기까지 동일해진다 → 판정이 경로에 무관해진다.
-        step = max(1, max(h, w) // _SHEET_PROFILE_W)
-        a = a[::step, ::step, :]
-        # **올림을 버림으로 맞춰야 한다** (2026-09-29 실측). a[::step] 은
-        # 마지막 행/열을 **올림해서** 포함하므로(4296/15 → 287) PIL 경로의
-        # resize((w//step, h//step)) = 286 과 1픽셀 어긋난다. 그 1픽셀이
-        # 패널 경계를 밀어 포즈 사진을 시트로 오인시켰다(sim 0.209 vs 0.023).
-        # PIL 과 정확히 같은 크기로 잘라야 좌표가 일치한다.
-        return a[:max(1, h // step), :max(1, w // step), :]
-    except Exception:
+        # **정수 스트라이드를 쓰면 안 된다 (2026-10-01 실측).**
+        # 왜(Why): `max(h, w) // _SHEET_PROFILE_W` 는 정수 나눗셈이라 정규화
+        # 크기가 입력 크기에 따라 1.5배까지 흔들렸다 —
+        #   1019x1544 -> step 3 -> 514x339   (시트로 오인)
+        #    995x1508 -> step 2 -> 754x497   (정상으로 판정)
+        # 같은 사진이 1024x1024 로 늘리기만 해도 '시트' 로 뒤집혔다. 프로파일
+        # 분석이 정규화 배열 크기에 의존하므로 판정까지 뒤집혔다. 그래서
+        # **최대 변을 정확히 _SHEET_PROFILE_W 로 맞춘다**: 정규화 크기가
+        # 종횡비만의 함수가 되고, 같은 사진이면 크기와 무관하게 같은 판정이 나온다.
+        _ratio = max(h, w) / float(_SHEET_PROFILE_W)
+        _nh = max(1, int(h / _ratio))
+        _nw = max(1, int(w / _ratio))
+        if (_nh, _nw) != (h, w):
+            # 실수 비율 근삿값 인덱스로 줄인다. 컴피 의존 없이 항상 동작한다.
+            _yy = _np.clip((_np.arange(_nh) * (h / float(_nh))).astype(int), 0, h - 1)
+            _xx = _np.clip((_np.arange(_nw) * (w / float(_nw))).astype(int), 0, w - 1)
+            a = a[_yy][:, _xx, :]
+        return a
+    except Exception as _e:
+        # 왜(Why) 여기서 말하나 (2026-10-01): 이 함수가 None 을 주면
+        # `_looks_like_sheet` 는 즉시 `{"sheet": False}` 를 돌려준다. 즉 **환경
+        # 문제가 판정 결과처럼 보인다.** 시트인지 아닌지를 결정하는 첫 관문이라
+        # 조용히 넘어가면 원인 없이 "시트 아님" 이 굳는다.
+        _note_once("camera.sheet_normalize",
+                   "[Camera Director] 시트 정규화 실패 — 시트 여부를 판정하지 "
+                   "못했습니다(환경 문제일 수 있음): "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return None
 
 
@@ -3319,19 +3518,46 @@ def _looks_like_sheet(arr) -> dict:
     try:
         a = _sheet_normalize(arr)
         if a is None:
+            # `_sheet_normalize` 가 이미 사유를 남겼다. 여기서 또 남기지 않는다.
             return out
         bands, greg = _best_axis(a)
+        out["n"] = len(bands)
         if len(bands) < _SHEET_MIN_PANELS:
+            # 왜(Why) 이 탈락을 말하나 (2026-10-01 실측): 이 줄이 **조용한
+            # 실패의 중심**이었다. "시트가 아닌데 기준 latent 를 뺐다" 는 결론만
+            # 남고, 그 원인이 패널 개수 부족인지 간격 불일치인지 아무도 알 수 없었다.
+            # 그래서 탈락 조건을 **그대로 문장으로** 남긴다. 판단은 하지 않는다 —
+            # sim 이 낮아서인지 n 이 부족한지만 사용자가 읽고 결정한다.
+            _note_once("camera.sheet_bands_%d" % len(bands),
+                       f"[Camera Director] 시트로 판정하지 않음 — 패널 {len(bands)}개"
+                       f"(최소 {_SHEET_MIN_PANELS}개 필요). 이미지 안에 반복 뷰가 "
+                       "보이지 않습니다.")
             return out
         sim = _cell_similarity(a)
-        out["n"] = len(bands)
         out["greg"] = round(greg, 2)
         out["sim"] = round(sim, 3)
         out["sheet"] = (greg >= _SHEET_MIN_SPACING_RATIO
                         and sim >= _SHEET_MIN_CELL_SIMILARITY)
+        if not out["sheet"]:
+            # 여기서도 **어느 선에 걸렸는지**를 말한다. 둘 다 0 에 가까우면
+            # "패널은 잡혔지만 내용이 서로 다르다" 즉 시트가 아니다.
+            # 왜(Why) 키가 고정인가: 실수(float)로 키를 만들면 서로 다른 값마다
+            # 새 키가 생겨 "한 번만" 계약이 깨지고 _ONCE_SEEN 이 무제한으로 큰다.
+            # 값은 메시지 안에 넣는다.
+            _note_once("camera.sheet_reject",
+                       f"[Camera Director] 시트로 판정하지 않음 — 간격 균일도 "
+                       f"{round(greg, 2)}(기준 {_SHEET_MIN_SPACING_RATIO}) / "
+                       f"내용 유사도 {round(sim, 3)}(기준 "
+                       f"{_SHEET_MIN_CELL_SIMILARITY}). 패널은 "
+                       f"{len(bands)}개 잡혔지만 시트 조건을 못 채웠습니다.")
         return out
-    except Exception:
+    except Exception as _e:
+        _note_once("camera.looks_like_sheet",
+                   "[Camera Director] 시트 판정 실패 — 환경 문제일 수 있음: "
+                   f"{type(_e).__name__}: {str(_e)[:80]}")
         return out
+
+
 def sheet_like_slots(image_items) -> list:
     """연결된 참조 중 캐릭터 시트로 판별된 슬롯 번호 목록.
 
@@ -3513,7 +3739,9 @@ def llm_system() -> str:
         ' "camera": {"shot": "<label>", "lens": "<label>", "angle": "<label>",'
         ' "composition": "<label>", "lighting": "<label>", "grade": "<label>",'
         ' "motion": "<label>", "motion2": "<label>", "speed": "<label>", "amplitude": "<label>"},'
-        ' "negative": "<optional extra English negative phrases>"}\n'
+        ' "negative": "<optional extra English negative phrases>",'
+        ' "anatomy": "<ONLY if you see wrong limb counts in the attached image(s):'
+        ' e.g. three feet, extra hand, six fingers, missing leg. Otherwise OMIT this key>"}\n'
         "Rules:\n"
         "- Every camera value MUST be copied EXACTLY from the allowed labels below "
         "(or \"자동 (auto)\" when unsure).\n"
@@ -3592,10 +3820,15 @@ def scene_camera_mismatch(scene: str, camera: dict) -> str | None:
 # 노드
 # ---------------------------------------------------------------------------
 
-def resolve_guard_plan(subject_text, camera, image_count, image_labels,
-                       image_items, primary_image, reference_images,
+def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
+                       image_items, primary_image, _reference_images,
                        tier="", llm_hint=""):
     """한 실행의 가드 판정을 **한 곳에서** 모아서 돌려준다.
+
+    왜(Why) `_camera`·`_reference_images` 는 받기만 하나: 예전 리팩터 전에는
+    여기서 썼다. 지금 본문은 subject_text·개수·라벨·tier·hint 만 본다.
+    호출부가 전부 positional 이라 안전하다. 시그니처를 줄이면 호출부 2곳과
+    테스트 5곳을 함께 고쳐야 해서 남긴다.
 
     왜(Why) 이 함수를 만드는가(2026-09-29):
     `run()` 과 `run_prompt()` 가 같은 가드 판정을 각자 반복하면서 결과를
@@ -3612,7 +3845,6 @@ def resolve_guard_plan(subject_text, camera, image_count, image_labels,
     """
     text = subject_text or ""
     is_human = _is_human_subject(text)
-    is_animal = _is_animal_subject(text)
     labels = list(image_labels or [])
 
     # 다중 참조(2장 이상)면 믹스 변형 가드를 양쪽에 자동 첨부.
@@ -3633,7 +3865,10 @@ def resolve_guard_plan(subject_text, camera, image_count, image_labels,
     phys_pos, phys_neg = physics_contact_guard(text)
     # 픽셀 공간 측정: topic에 접촉 동사가 없어도 참조에서 거리를 읽는다.
     # 거리 지사는 topic 동사가 있을 때 중복되므로 생략하고 negative 만 보강.
-    spacing_pos, spacing_neg = "", ""
+    # 왜(Why) spacing_neg 이 없는가(2026-10-02 실측): 거리 negative 는 이미
+    # phys_neg 에 합쳐진다(아래 3줄). 여기 다시 담으면 같은 문구가 두 벌로
+    # 들어가고, 반환 dict 에는 조각이 없어 읽을 곳이 없다 — write-only 였다.
+    spacing_pos = ""
     spacing_measure = None
     if image_count >= 2:
         spacing_measure = subject_spacing(primary_image)
@@ -3693,6 +3928,11 @@ class CameraDirector:
     RETURN_TYPES = ("STRING", "STRING", "IMAGE")
     RETURN_NAMES = ("positive", "negative", "image_out")
     FUNCTION = "run"
+    # 되돌린 이유(2026-09-30): "GoRi/Camera" 로 바꿨다가 되돌렸다. Jev 가 이
+    # 변경을 public_api_impact=breaking P=0.43 으로 봤다(신뢰도 0.24 — 낮다).
+    # 게다가 CATEGORY 는 메뉴 묶음 문자열일 뿐 기능 이득이 0 이고, 1.9.7 이
+    # 배포 전이라 되돌릴 비용이 아직 0 이다. publisher 별 분류가 필요해지면
+    # 그때 한 번에 한다.
     CATEGORY = "HF Skills/Camera"
     DESCRIPTION = ("주제 한 줄(한글 OK) + 프리셋/자동화 → 카메라 조항이 포함된 "
                    "영문 positive/negative 2줄. CLIPTextEncode.text에 연결하세요. "
@@ -4124,11 +4364,31 @@ class CameraDirector:
         # 3) 장면: llm 성공 시 영문 확장, 그 외 주제 원문
         scene, scene_src = topic, "주제 원문"
         llm_extra = ""
+        llm_anatomy = ""
         if tier == "llm" and isinstance(llm_obj, dict):
             s = clean_scene_text(str(llm_obj.get("scene") or ""))
             if s:
                 scene, scene_src = s, "LLM 확장"
             llm_extra = str(llm_obj.get("negative") or "")
+            # 왜(Why) anatomy 를 여기서 읽나 (2026-10-02): LLM 이 참조 이미지에서
+            # 잘못된 사지 개수(발 3개, 손 6가락 등)를 보면 보고하게 했다.
+            # 포즈 33점은 3번째 발을 못 보고, segmentation 은 SIGABRT 로 못 쓴다.
+            # VLM 이 유일한 발/발가락 검출 수단이다. 있으면 ⚠ 로 알리고 negative 에
+            # 합쳐 다음 생성이 피하게 한다. 없으면(키 생략) 조용히 넘어간다.
+            llm_anatomy = str(llm_obj.get("anatomy") or "").strip()
+            # 왜(Why) 200자로 자르고 영문·숫자·기본 구두점으로만 남기나:
+            # LLM 출력이 통째로 negative(diffusion 프롬프트)에 들어간다.
+            # 장황하거나 탈주한 응답이 프롬프트를 오염시킨다. 로그(위)와
+            # 텔레메트리(아래)는 자르기 전 길이를 알 수 있게 별도 표기 없이 둔다.
+            llm_anatomy = re.sub(r"[^A-Za-z0-9 ,.\-()]+", " ", llm_anatomy).strip()[:200]
+            if llm_anatomy:
+                _log(f"[Camera Director] ⚠ LLM이 참조 이미지에서 해부학 이상을 "
+                     f"보고했습니다: {llm_anatomy[:150]}")
+                # negative 에 합쳐 다음 생성이 피하게 한다. llm_extra 와 같은
+                # 경로(L4421 build_negative)로 간다 — 둘 다 LLM 이 준 회피 지시라
+                # 합치는 게 맞다. 로그는 위에서 따로 남겼으므로 추적 가능하다.
+                llm_extra = (llm_extra.rstrip("., ") + ", " + llm_anatomy
+                             if llm_extra.strip() else llm_anatomy)
 
         if not topic:
             _log("[Camera Director] ⚠ 주제가 비어 있습니다 — 카메라 조항만 출력됩니다.")
@@ -4275,6 +4535,13 @@ class CameraDirector:
                 "attempted": llm_attempted,
                 "used": bool(llm_obj),
                 "provider": provider, "model": resolved_model,
+                # 왜(Why) 캐시 지표를 넣나 (2026-10-02 실측): 캐시 히트는
+                # 네트워크 호출 0회라 `used=True` 인데 시간이 안 걸린다. 지표가
+                # 없으면 "작동을 안 하는데?" 를 구분할 방법이 없다 — 로그로도.
+                "cache": llm_client.cache_stats()[1],
+                # 왜(Why) anatomy 를 넣나 (2026-10-02): LLM 이 본 사지 이상이
+                # 있으면 기록해야 다음에 "언제 처음 봤나" 를 추적할 수 있다.
+                "anatomy": llm_anatomy[:200] if llm_anatomy else "",
             },
             elapsed_ms=int((time.perf_counter() - _t0) * 1000))
         _release_vram()
@@ -4294,7 +4561,21 @@ class CameraDirector:
 QWEN_REF_MAX_PIXELS = 1024 * 1024  # reference conditioning 1MP 상한
 _QWEN_REF_CACHE: dict = {}
 _QWEN_REF_CACHE_ORDER: list = []
-_QWEN_REF_CACHE_MAX = 8
+# (왜) 12 인가 (2026-10-02 실측): 노드가 받는 참조 이미지는 `image_1` ~ `image_10`
+# 으로 **최대 10장**(L4906-4915)인데 용량이 8 이었다. L4805 가 라벨 순서로
+# 매 실행 순차 접근하므로, working set(10) > 용량(8) 이면 LRU 이 매 실행
+# 전부 미스가 된다 — 순차 스캔은 LRU 최악 패턴이다. 측정한 계단:
+#   1~8장  → 매 실행 0 encodes (정상 동작)
+#   9장    → 매 실행 9/9 encodes  (적중률 0%)
+#   10장   → 매 실행 10/10 encodes (적중률 0%)
+# 즉 지원 설정 10개 중 2개에서 캐시가 영영 이득이 없다. 용량은 한 실행의
+# 서로 다른 키 수(10) 이상이어야 한다. 여유 2칸은 이미지를 갈아끼운 직후의
+# 혼합 구간용이다.
+# (왜) 12 면 되는가: latent 는 put 에서 `.cpu()` 로 내려간다(L4695) — 그래서
+# VRAM 이 아니라 시스템 RAM 을 쓴다. 1MP 기준 한 장 0.25MB, 12장 3MB.
+# (왜) 무한대 는 아닌가: 키가 VAE weakref 로 검증되므로 죽은 VAE 항목은
+# 걸러지지만, dict 는 자라기만 하므로 상한이 있어야 evict 규칙이 성립한다.
+_QWEN_REF_CACHE_MAX = 12
 _QWEN_REF_LOCK = threading.Lock()
 
 
@@ -4329,8 +4610,17 @@ def _default_telemetry_sender(record: dict) -> None:
 
 
 def _post_telemetry(**record) -> None:
-    """실행 1회를 허브로 전송. 절대 노드 실행을 막지 않는다."""
+    """실행 1회를 허브로 전송. 절대 노드 실행을 막지 않는다.
+
+    왜(Why) 기본 꺼짐인가 (2026-10-02 실측): 매 실행마다 데몬 스레드 1개 +
+    DNS(getaddrinfo 74ms) + 소켓을 쓰고 받는 서버가 없다. ComfyUI 로그에
+    엔드포인트가 없고, 이 저장소에도 수신 코드가 없다. 켜려면
+    `GORI_TELEMETRY=1` 환경변수를 둔다. 테스트 주입(`_TELEMETRY_SENDER`)은
+    환경변수와 무관하게 항상 동작한다.
+    """
     try:
+        if _TELEMETRY_SENDER is None and os.environ.get("GORI_TELEMETRY", "0") != "1":
+            return
         record["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         record["node"] = "camera_director"
         if _TELEMETRY_SENDER is not None:
@@ -4348,16 +4638,54 @@ def _thumb_digest(image, length: int = 16):
     왜(Why): _thumb_sig와 _qwen_ref_cache_key가 동일한 축소+해시 블록을
     중복로 가지고 있어 한쪽만 수정되는 퇴행 위험이 있었다.
     (..., H, W, C) 형태의 ComfyUI IMAGE 텐서/배열을 전제로 한다.
+
+    (왜) **블록 평균**인가, 점 샘플이 아닌가 (2026-10-02 실측): 이전에는
+    `image[::h//16, ::w//16]` 로 **점**을 골랐다. 1024x1024 면 64px 간격이라
+    샘플 사이 63x63 px 가 해시에서 사라진다. 실측 결과 8x8 워터마크 200개 중
+    **199개(100%)가 해시를 못 바꿨다** — 1024px 이미지 위 8px 표식은 흔한
+    작업이다. 캐시가 "바뀐 이미지에 옛 latent" 를 조용히 돌려주므로 캐시가
+    없느니 나빴다. 오프셋 그리드 3장은 100% → 98%로effect가 거의 없었다
+    (격자가 너무 성깁니다). 블록 평균(adaptive_avg_pool2d, 64x64)은 **0/200**.
+    비용은 이미지당 약 1.4ms — VAE 인코딩 1회(수십~수백 ms)보다 작고,
+    첫 캐시 적중에서 회수된다.
+    (왜) 64 인가: 16/32/64 모두 0/200 이라 가장 싼 16 을 고르면 되지만,
+    그물코가 촘촘할수록 국소 변경이 여러 셀에 걸려 더 안전하다. 64x64x3 =
+    12KB 해시. 32 는 측정값이 같아도 여유를 두지 않았다 — 근거 없는 상수
+    늘리기를 피했다.
+
+    (왜) list 같은 입력도 해시를 얻나: 이전엔 실패해 `noid:{id(image)}`
+    키로 내려갔고, CPython 은 GC 뒤 주소를 재배정한다(실측 299/300 = 100%).
+    그 키로 서로 다른 입력이 같은 캐시 항목을 맞는다. numpy 로 한 번 더
+    변환해 해시를 얻도록 했고, 이제 `noid` 로 내려가는 것은 shape 조회가
+    불가능한 값(예: None)뿐이다.
     """
     try:
-        shape = tuple(int(d) for d in image.shape)
-        h, w = shape[-3], shape[-2]
-        step_h, step_w = max(1, h // 16), max(1, w // 16)
-        thumb = image[0, ::step_h, ::step_w, :3] if len(shape) == 4 else image[::step_h, ::step_w, :3]
         import hashlib as _hl
         import numpy as _np
-        raw = thumb.detach().cpu() if hasattr(thumb, "detach") else thumb
-        return shape, _hl.sha1(_np.asarray(raw, dtype=_np.float32).tobytes()).hexdigest()[:length]
+        import torch as _t
+        import torch.nn.functional as _tf
+        # (왜) shape 를 원본에서 읽지 않는가: list 를 넘기면 `.shape` 가 없어
+        # 여기서 죽는다. numpy 로 먼저 바꿔야 list·numpy·tensor 가 한 갈래로
+        # 합쳐진다 — 이전엔 list 가 `noid:` 키로 내려갔다.
+        raw = image.detach().cpu() if hasattr(image, "detach") else image
+        x = _np.asarray(raw, dtype=_np.float32)
+        shape = tuple(int(d) for d in x.shape)
+        if x.ndim == 4:
+            x = x[0]
+        if x.ndim != 3 or x.shape[0] < 4 or x.shape[1] < 4:
+            if x.ndim < 3:
+                # 3차원이 아닌 값(예: None, 스칼라)은 식별할 수 없다.
+                return shape, None
+            # 너무 작아 블록 평균이 불가능하면 있는 범위만 해시한다.
+            return shape, _hl.sha1(_np.ascontiguousarray(
+                x[:, :, :3]).tobytes()).hexdigest()[:length]
+        t = _t.from_numpy(_np.ascontiguousarray(x[:, :, :3]))
+        pooled = _tf.adaptive_avg_pool2d(
+            t.permute(2, 0, 1)[None], (64, 64))[0]
+        return shape, _hl.sha1(
+            _np.ascontiguousarray(
+                pooled.permute(1, 2, 0).numpy()).tobytes()
+        ).hexdigest()[:length]
     except Exception:
         return None, None
 
@@ -4463,10 +4791,15 @@ class CameraDirectorEncode(CameraDirector):
         base = CameraDirector.INPUT_TYPES()
         required = dict(base["required"])
         required["clip"] = ("CLIP",)
-        required["vae"] = ("VAE",)
         optional = dict(base.get("optional", {}))
         optional.pop("image", None)
         optional.pop("extra_negative", None)
+        # 왜(Why) vae 가 required 가 아니나: reference conditioning 캐시용이라
+        # 선택이다 — run_prompt 도 vae=None 을 기본값으로 받고, _prepare_qwen_
+        # image_data 도 vae=None 이면 latent 변환을 건너뛴다. required 로 두면
+        # VAE 없이 쓰는 프롬프트 전용 경로(README 가 권장하는 KREA 2 ·
+        # MiniMax H3 용도)가 UI 에서 아예 막힌다.
+        optional["vae"] = ("VAE",)
         optional["latent_image"] = ("LATENT", {"optional": True})
         optional["positive"] = ("CONDITIONING",)
         optional["negative"] = ("CONDITIONING",)

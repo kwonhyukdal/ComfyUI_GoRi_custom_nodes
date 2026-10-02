@@ -406,4 +406,5 @@ GEMINI_API_KEY=...
 ## 10. 출처·라이선스
 
 - 카메라 프롬프트 구성 규칙 출처: `higgsfield-ai/skills` (MIT) — prompt-engineering / thumbnail house-structure / video explainer blocks
+- 카메라 앵글 5종(POV·반사·파노라마·후면 3/4·와이드 히어로) 출처: `xoxxel/camera-prompts` (MIT) — 영어 키워드와 효과 서술을 본 노드 규격(한글 라벨 + 영어 절)에 맞게 변형
 - 본 노드: MIT (근거 자료와 동일)

@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -43,10 +44,23 @@ _API_KEY_ENV = {
 _cache: dict = {}
 _cache_lock = threading.Lock()
 _CACHE_MAX = 256  # LLM 응답 캐시 상한 (장시간 세션의 무제한 성장 방지)
+# 캐시 히트 횟수. `cache_stats()` 가 이걸 돌려준다.
+# 미스 카운터는 두지 않는다 — 읽는 곳이 없어 write-only 가 된다(2026-10-02 실측).
+_cache_hits = 0
+# 캐시 히트 로그를 **키마다 한 번만** 찍기 위한 집합. 같은 입력이 스텝 수만큼
+# 되풀이돼도 로그가 한 줄로 유지된다.
+_cache_logged = set()
 
 # ComfyUI 루트 .env 폴백 (표준 방식). 노드 폴더 밖이라 폴더째 압축 공유에도
 # 키가 딸려가지 않는다. 우선순위: 위젯 입력 > .env 파일 > OS 환경변수.
 _ENV_FILE_OVERRIDE = None  # 테스트 주입용 (None이면 자동 탐색)
+
+
+# ComfyUI 루트를 몇 단계까지 위로 찾을지. 예전엔 **정확히 2단계**로 고정했는데,
+# Registry 배포는 `custom_nodes/<팩>/<노드>/llm_client.py` 로 한 단계 더 깊다.
+# 2단계로는 `custom_nodes` 까지만 올라가서 .env 를 못 찾고, 키 저장·조회가
+# 조용히 죽었다(2026-09-30 실측). 깊이를 세는 대신 main.py 를 찾는다.
+_ENV_ROOT_SEARCH_DEPTH = 6
 
 
 def _env_file_path():
@@ -54,17 +68,22 @@ def _env_file_path():
 
     왜(Why) realpath인가: macOS/Linux 개발에서는 `custom_nodes/노드폴더`를
     개발 폴더로 **심볼릭 링크**하는 것이 흔하다. abspath는 링크 경로를 그대로
-    쓰기 때문에 ComfyUI 루트를 2단계 위로 잘못 올라가 .env를 못 찾는다 →
+    쓰기 때문에 ComfyUI 루트를 잘못 올라가 .env를 못 찾는다 →
     사용자는 "키가 저장 안 된다"는 메시지만 보고 원인을 알 수 없다.
     realpath는 링크를 따라가 실제 위치를 준다.
+
+    왜(Why) 깊이를 세지 않는가: 노드 폴더 깊이는 배포 형태에 따라 달라진다
+    (단독 설치 = 1단계, Registry 팩 = 2단계). 고정 깊이는 형태가 바뀔 때마다
+    조용히 깨진다. **main.py 를 처음 만나는 폴더**가 루트라는 성질로 바꿨다.
     """
     if _ENV_FILE_OVERRIDE is not None:
         return _ENV_FILE_OVERRIDE
     try:
-        here = os.path.dirname(os.path.realpath(__file__))
-        root = os.path.dirname(os.path.dirname(here))
-        if os.path.isfile(os.path.join(root, "main.py")):
-            return os.path.join(root, ".env")
+        root = os.path.dirname(os.path.realpath(__file__))
+        for _ in range(_ENV_ROOT_SEARCH_DEPTH):
+            root = os.path.dirname(root)
+            if os.path.isfile(os.path.join(root, "main.py")):
+                return os.path.join(root, ".env")
         # 압축(portable) 설치는 ComfyUI 루트에 main.py가 없을 수 있다.
         # 조용히 실패하면 "설정이 안 먹힌 것처럼" 보이므로 이유를 남긴다.
         _warn_env_root_once(root)
@@ -74,6 +93,26 @@ def _env_file_path():
 
 
 _ENV_ROOT_WARNED = set()
+
+
+def _log(msg: str) -> None:
+    """Windows(cp949 등) 콘솔에서도 인코딩 오류로 프로세스가 죽지 않게 한다.
+
+    왜(Why) 이 파일에 자체 로거가 없었나: 카메라 노드의 `_log` 을 빌려 쓰면
+    순환 임포트(카메라 → llm_client → 카메라)가 생긴다. 표준 print 한 줄로
+    처리한다 — `UnicodeEncodeError` 는 이 저장소가 가장 자주 만나는 죽음 원인이다.
+    """
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            print(msg.encode(enc, "replace").decode(enc, errors="replace"),
+                  flush=True)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _warn_env_root_once(root):
@@ -342,8 +381,32 @@ def is_local_provider(provider: str, base_url: str = "") -> bool:
     if (provider or "") in _LOCAL_PROVIDERS:
         return True
     return bool((provider or "").startswith("Custom")
-                and any(h in (base_url or "").lower()
-                        for h in ("localhost", "127.0.0.1")))
+                and not _is_remote_endpoint(base_url))
+
+
+def _is_remote_endpoint(url: str) -> bool:
+    """주소가 같은 머신 밖인가. 로컬 엔드포인트는 키 없이도 되므로 구분한다.
+
+    왜(Why) 필요한가 (2026-10-01 실측): `is_local_provider` 가 "Custom + 키 없음"
+    을 그냥 통과시켰다. 그 결과 base_url=https://openrouter.ai/api/v1 로
+    **키 없는 요청이 그대로 나갔다**(401 No cookie auth credentials found).
+    로컬 대 Custom 는 키가 필요 없으므로, "로컬인가" 로 갈라야 한다.
+    """
+    u = (url or "").lower()
+    if not u:
+        return False
+    return not any(h in u for h in ("localhost", "127.0.0.1", "0.0.0.0",
+                                   "::1", "[::1]", "host.docker.internal"))
+
+
+def _host_of(url: str) -> str:
+    """사람이 읽을 수 있는 호스트명. 실패하면 원본을 짧게."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url or "").hostname
+        return host or (url or "")[:48]
+    except Exception:
+        return (url or "")[:48]
 
 
 def effective_timeout(provider: str, base_url: str = "",
@@ -396,9 +459,37 @@ def chat(provider: str, model: str, api_key: str,
     # 다른 게이트웨이의 응답은 다를 수 있다).
     cache_provider = f"Custom|{endpoint}" if is_custom else provider
     key = _cache_key(cache_provider, model, system, user, image_b64, image_sig, image_list)
+    global _cache_hits
+    # 왜(Why) 로그는 락 밖에서 하나: _log 가 print I/O 라 락 안에서 부르면
+    # 캐시 히트 스레드 전부가 print 직렬화에 묶인다. 플래그만 락 안에서 세우고
+    # 출력은 내놓고 한다.
+    _log_hit = None
+    _hit_obj = None
+    _hit = False
     with _cache_lock:
         if key in _cache:
-            return _cache[key]
+            _cache_hits += 1
+            _hit_obj = _cache[key]
+            _hit = True
+            # 왜(Why) 여기에 로그가 있나 (2026-10-02 실측): 캐시 히트는 네트워크
+            # 호출 0회라 **몇 초 만에 끝난다.** 초록불은 켜지는데 시스템 자원도
+            # 시간도 안 쓰는 현상을 사용자가 "작동을 안 하는데?" 로 읽었다.
+            # `cam_source` 가 "LLM 판단" 인데 20ms 만에 찍힌 실측이 그 근거다
+            # (카메라 노드 preflight→요약 로그 구간 19~25ms × 3회).
+            # 히트 수가 telemetry 로도 보고되므로 여기서 같은 사실을 한 번만
+            # 말해둔다. **같은 키는 한 번만** — 스텝 수만큼 되풀이되면 못 읽는다.
+            if key not in _cache_logged:
+                _cache_logged.add(key)
+                _log_hit = (cache_provider, model)
+    if _log_hit is not None:
+        try:
+            _log(f"[GoRi Camera Director] LLM 캐시 히트 — 같은 입력의 "
+                 f"이전 응답을 재사용했습니다 (네트워크 호출 0회). "
+                 f"provider={_log_hit[0]} model={_log_hit[1] or '없음'}")
+        except Exception:
+            pass
+    if _hit:
+        return _hit_obj
 
     api_key = (api_key or "").strip()
     if not api_key and provider not in ("Ollama", "LM Studio") and not is_custom:
@@ -416,6 +507,28 @@ def chat(provider: str, model: str, api_key: str,
             raise LLMError(
                 "Custom (OpenAI 호환): model 칸이 비어 있음 — 엔드포인트가 제공하는 "
                 "모델명을 입력하세요 (예: qwen2.5-vl)")
+        # 왜(Why) 여기서 막는가 (2026-10-01 실측): `and not is_custom` 때문에
+        # 키 검사를 통째로 건너뛰고 **빈 키로 외부 서버에 요청을 보냈다.**
+        # 실측 로그:
+        #   HTTP 401: {"error":{"message":"No cookie auth credentials found"}}
+        # provider=Custom (OpenAI 호환)  base_url=https://openrouter.ai/api/v1
+        # 즉 키가 없는데 45초를 버리고 실패했다. **키가 없으면 애초에 요청하지
+        # 않는 게 옳다.** 로컬 엔드포인트는 키가 필요 없을 수 있으니 "주소가
+        # 같은 머신인가" 로 구분한다.
+        #
+        # **중요**: 외부 LLM 자체를 금지하는 게 아니다. 키를 넣으면 정상 호출한다.
+        # 막는 것은 "키가 없는 채로 나가는 요청" 뿐이다. 같은 머신으로 되돌릴
+        # 방법이 없는 실수이므로, 관측 가능성을 남기는 게 낫다.
+        # 순서는 model 검사 다음이다 — 더 구체적인 안내를 먼저 준다.
+        if not api_key and _is_remote_endpoint(endpoint):
+            raise LLMError(
+                "API 키 없음 — 외부 엔드포인트로는 요청하지 않습니다 "
+                f"({_host_of(endpoint)}). 키를 넣으면 정상 호출되고, "
+                # 왜(Why) 여기 라벨을 그대로 적나 (2026-10-01 실측): `automation`
+                # 위젯의 실제 옵션 문자열은 "규칙 (auto)" 다. "자동 (auto)" 는
+                # **프리셋** 위젯의 라벨이라 사용자가 찾으면 없는 값을 고르게 된다.
+                # 상수를 하드코딩하지 않고 노드가 쓰는 값을 그대로 안내한다.
+                "automation 을 '규칙 (auto)' 로 두면 규칙으로 폴백합니다")
         raw = _openai_compatible_chat(
             endpoint, model.strip(), api_key, system, user, image_list, timeout)
     elif provider in _OPENAI_COMPATIBLE_PROVIDERS:
@@ -492,17 +605,36 @@ def chat(provider: str, model: str, api_key: str,
     obj = extract_json(_content_from(provider, raw))
     with _cache_lock:
         if key not in _cache and len(_cache) >= _CACHE_MAX:
-            _cache.pop(next(iter(_cache)), None)  # 가장 오래된 항목 퇴거
+            # 왜(Why) _cache_logged 도 함께 비우나: _cache 는 256개로 묶이는데
+            # 로그 기억 집합은 퇴거를 몰랐다. 식별 키마다 쌓여 장시간 세션에서
+            # 무제한으로 큰다. 퇴거된 키는 다시 히트하면 다시 말한다 — 로그가
+            # 한 번 더 나오는 대가로 메모리를 묶는다.
+            _evicted = next(iter(_cache))
+            _cache.pop(_evicted, None)
+            _cache_logged.discard(_evicted)
         _cache[key] = obj
     return obj
 
 
 def cache_stats() -> tuple[int, int]:
-    """(캐시 항목 수, 히트 판정용 총 호출 시도 횟수는 별도) — 디버그용."""
+    """(캐시 항목 수, **캐시 히트 횟수**) — 디버그용.
+
+    왜(Why) 둘째 값을 '히트'가 아니라 예전엔 len 을 그대로 돌려줬다 (2026-10-02):
+    docstring 이 "히트 판정용 총 호출 시도 횟수는 별도" 라고 적어놓고 실제로는
+    `return len(_cache), len(_cache)` 였다. 즉 **히트 수를 알 방법이 없었다.**
+    그래서 "초록불이 켜졌는데 안 도는 거냐" 를 로그로 확인할 수 없었다.
+    테스트는 `cache_stats()[0]` (항목 수)만 사용하므로 둘째 값은 안전하다.
+    """
     with _cache_lock:
-        return len(_cache), len(_cache)
+        return len(_cache), _cache_hits
 
 
 def clear_cache() -> None:
+    # 왜(Why) `global` 이 필수인가: 없으면 아래 두 줄이 **함수 지역변수** 가 되어
+    # 모듈 수준 카운터가 리셋되지 않는다. 테스트가 `clear_cache()` 를 수십 번
+    # 호출하므로 카운터가 누적되면 히트 수가 뒤섞인다(2026-10-02 실측).
+    global _cache_hits
     with _cache_lock:
         _cache.clear()
+        _cache_hits = 0
+        _cache_logged.clear()

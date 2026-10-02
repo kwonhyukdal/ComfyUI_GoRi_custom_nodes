@@ -36,6 +36,22 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 _web_dirs = []
 
 
+def _log(msg: str) -> None:
+    """Windows(cp949/cp1252) 콘솔에서도 인코딩 오류로 팩 로드가 죽지 않게 한다.
+
+    왜(Why) 이게 없으면 안 되나: 아래 실패 로그와 웹 폴더 경고는 `except`
+    안에서 나온다. 예외 처리 중 print 가 UnicodeEncodeError 를 던지면 그
+    예외가 load 실패를 덮어써서 **팩 전체가 조용히 로드되지 않는다**(노드 0개).
+    실제로 cp1252 환경에서 재현했다. 하위 모듈의 _log 와 같은 처리다.
+    """
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(msg.encode(enc, "replace").decode(enc, errors="replace"),
+              flush=True)
+
+
 def _load_subpackage(name):
     """하위 폴더를 패키지로 로드한다. 실패하면 예외."""
     sub_dir = os.path.join(_PKG_DIR, name)
@@ -62,7 +78,7 @@ for _name in sorted(os.listdir(_PKG_DIR)):
     try:
         _mod = _load_subpackage(_name)
     except Exception as e:  # 한 노드가 실패해도 다른 노드는 로드된다
-        print(f"[GoRi] '{_name}' 로드 실패: {type(e).__name__}: {e}")
+        _log(f"[GoRi] '{_name}' 로드 실패: {type(e).__name__}: {e}")
         sys.modules.pop(_name, None)
         continue
     NODE_CLASS_MAPPINGS.update(getattr(_mod, "NODE_CLASS_MAPPINGS", {}) or {})
@@ -74,6 +90,6 @@ for _name in sorted(os.listdir(_PKG_DIR)):
 # ComfyUI는 팩당 웹 폴더 하나만 지원하므로 첫 항목을 사용한다.
 WEB_DIRECTORY = _web_dirs[0] if _web_dirs else None
 if len(_web_dirs) > 1:
-    print(f"[GoRi] 웹 폴더가 여러 개({', '.join(_web_dirs)}) — 첫 항목만 등록됨")
+    _log(f"[GoRi] 웹 폴더가 여러 개({', '.join(_web_dirs)}) — 첫 항목만 등록됨")
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

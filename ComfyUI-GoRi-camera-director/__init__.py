@@ -6,6 +6,14 @@
 """
 
 from .camera_director import CameraDirectorEncode
+from .camera_director import __version__
+
+# 로드 시 버전을 남긴다. 여러 노드가 섞여 있을 때 어느 버전이 떴는지
+# 로그로 알 수 있다. print 가 아니라 ComfyUI 로거가 있으면 그것을 쓴다.
+try:
+    print("[GoRi] Camera Director v%s loaded" % (__version__,), flush=True)
+except Exception:
+    pass
 
 # 사용자에게 노출되는 노드는 하나뿐이다.
 # CameraDirector는 내부 계산/테스트 호환용 베이스 클래스로 남겨 둔다.
@@ -23,4 +31,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 # 다루므로 기존 링크와 워크플로 호환성이 유지된다.
 WEB_DIRECTORY = "./web"
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY",
+           "__version__"]

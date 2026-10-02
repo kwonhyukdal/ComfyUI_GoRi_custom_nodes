@@ -115,6 +115,52 @@ if _wd:
           os.path.isfile(os.path.join(PKG, _wd, "progressive_image_inputs.js")),
           str(os.listdir(os.path.join(PKG, _wd)) if os.path.isdir(os.path.join(PKG, _wd)) else "없음"))
 
+# 회귀(2026-09-30): 하위 모듈 로드 실패 로그는 `except` 안에서 나온다. 그 로그가
+# 가드 없는 print 면, cp1252 콘솔에서 print 자체가 UnicodeEncodeError 를 던져
+# load 실패를 덮어쓴다 → **팩 전체가 조용히 로드되지 않는다**(노드 0개). 실측했다.
+# 그래서 정적 문자열 검사 대신, 실제로 깨진 하위 모듈을 붙여 cp1252 로 돌려본다.
+# 로딩 방식은 ComfyUI 의 load_custom_node 와 같은 spec_from_file_location +
+# submodule_search_locations 다(python <디렉터리> 로는 __main__ 이 없다고 실패한다).
+import shutil as _sh
+import subprocess as _sp
+import tempfile as _tf
+
+_DRIVE = """import importlib.util, sys
+d = sys.argv[1].rstrip("\\\\/")
+spec = importlib.util.spec_from_file_location(
+    "gori_pack_probe", d + "/__init__.py", submodule_search_locations=[d])
+m = importlib.util.module_from_spec(spec)
+sys.modules["gori_pack_probe"] = m
+spec.loader.exec_module(m)
+print("NODES=" + ",".join(sorted(m.NODE_CLASS_MAPPINGS)))
+"""
+
+_td = _tf.mkdtemp(prefix="gori_pack_")
+try:
+    _sh.copyfile(os.path.join(PKG, "__init__.py"), os.path.join(_td, "__init__.py"))
+    # AAbroken 이 ZZgood 보다 정렬상 먼저 온다. 즉 실패가 먼저 나도 뒤 패키지가
+    # 등록돼야 한다 — "하위 모듈 로더가 한 곳에서 멈추지 않는다" 의 진짜 증거.
+    for _name, _body in (("AAbroken", "raise RuntimeError('intentional failure')\n"),
+                         ("ZZgood", "NODE_CLASS_MAPPINGS = {'GoRi_Probe_Ok': object}\n")):
+        _d = os.path.join(_td, _name)
+        os.makedirs(_d)
+        with open(os.path.join(_d, "__init__.py"), "w", encoding="utf-8") as _fh:
+            _fh.write(_body)
+    _drive = os.path.join(_td, "_drive.py")
+    with open(_drive, "w", encoding="utf-8") as _fh:
+        _fh.write(_DRIVE)
+    _env = dict(os.environ, PYTHONIOENCODING="cp1252")
+    _cp = _sp.run([sys.executable, _drive, _td], capture_output=True, env=_env)
+    _txt = ((_cp.stdout or b"").decode("cp1252", errors="replace")
+            + ( _cp.stderr or b"").decode("cp1252", errors="replace"))
+    check("cp1252 콘솔에서 실패 로그가 죽지 않는다 (팩 무음 로드 방지)",
+          _cp.returncode == 0 and "AAbroken" in _txt,
+          f"exit={_cp.returncode} " + _txt.strip()[-160:])
+    check("깨진 하위 모듈 뒤에도 나머지 노드가 등록된다",
+          "GoRi_Probe_Ok" in _txt, _txt.strip()[-160:])
+finally:
+    _sh.rmtree(_td, ignore_errors=True)
+
 # 상대 임포트가 실제로 동작하는지 — 하위 __init__.py 가
 # `from .consistency_keeper import ...` 를 쓰기 때문이다.
 # 폴더명을 하드코딩하지 않는다: 로컬은 `GoRi-*`, Registry 배포본은
@@ -147,8 +193,13 @@ check("하위 모듈의 내부 모듈도 로드됨 (consistency_keeper 등)",
 _docs = {}
 for _n in _subpkgs:
     _docs[_n] = open(os.path.join(PKG, _n, "__init__.py"), encoding="utf-8").read()
-_cam = next((v for v in _docs.values() if "camera-director" in v.lower()), "")
-_kep = next((v for v in _docs.values() if "consistency-keeper" in v.lower()), "")
+# 왜(Why) 이름이 아니라 docstring 으로 폴더를 찾나: 배포 폴더명과 개발 폴더명의
+# 대소문자가 일부러 다르다(`ComfyUI-GoRi-camera-director` vs `GoRi-Camera-Director`).
+# 문자열로 하드코딩하면 조용히 엉뚱한 곳을 본다 — 이 파일 전체가 그 실측 기록이다.
+_cam_dir = next((n for n, v in _docs.items() if "camera-director" in v.lower()), None)
+_kep_dir = next((n for n, v in _docs.items() if "consistency-keeper" in v.lower()), None)
+_cam = _docs.get(_cam_dir, "")
+_kep = _docs.get(_kep_dir, "")
 check("Camera docstring 이 설치 폴더명을 안내 (사용자에게 맞는 안내)",
       "GoRi-camera-director" in _cam, _cam[:80].replace("\n", " "))
 check("Keeper docstring 이 설치 폴더명을 안내",
@@ -158,6 +209,88 @@ check("Keeper docstring 이 설치 폴더명을 안내",
 for _n in _subpkgs:
     check(f"{_n} 는 단독 설치 가능 (__init__.py 보유)",
           os.path.isfile(os.path.join(PKG, _n, "__init__.py")))
+
+# ── 노드별 독립 버전: 각 하위 패키지는 __version__ 을 둔다 ──
+# 왜(Why) 팩 버전(pyproject.toml)만으로는 안 되나 (2026-10-02):
+# 팩은 여러 노드를 한 번에 배포하는 관리 단위일 뿐이다. 카메라만 고쳤는데
+# 팩 버전을 올리면 키퍼도 바뀐 것처럼 보인다. 각 노드는 자기 변경에만
+# 버전을 올린다. 새 노드를 만들면 첫날부터 __version__ 을 둔다 —
+# 이 검사가 없으면 빠뜨리고 지나간다.
+_say("-- 노드별 독립 버전 --")
+for _n in _subpkgs:
+    _mod = sys.modules.get(_n)
+    _ver = getattr(_mod, "__version__", None) if _mod is not None else None
+    import re as _re
+    _ok = isinstance(_ver, str) and bool(_re.match(r"^\d+\.\d+\.\d+$", _ver))
+    check(f"{_n} 는 독립 버전 보유 (__version__ x.y.z)",
+          _ok, str(_ver)[:20])
+# 팩 버전과 노드 버전이 같은 출발선에 있는지 (발산 감지용, 강제 아님)
+# 팩이 릴리스될 때 노드 버전을 따라잡는다. 어긋나면 로그로만 남긴다.
+
+# ── 크로스 폴더 교차 검사: 시트 판정 임계값이 두 노드에서 어긋나면 안 된다 ──
+# 왜(Why) 여기서 하나만 같게 강제하는가 (2026-10-01 실측): 두 노드는 **각각
+# 단독 배포 단위**다(CI 가 `cd 폴더 && python tests/test_node.py` 로 각자 돌고,
+# `__init__.py` docstring 도 "이 폴더를 복사 후 재시작" 이라고 명시한다). 그래서
+# 크로스 폴더 공용 모듈을 만들면 단독 설치가 깨진다 — 그래서 **복제**하고,
+# 어긋나는 것을 여기서 잡는다.
+#
+# 실제로 어긋난 적이 있다: 키퍼만 `SHEET_MIN_PANELS=3` + 폭 균일성 통과 조건을
+# 갖고 있어서, 카메라가 시트로 보는 시트 3장 중 **2장**을 키퍼는 "시트 아님"
+# 으로 놓쳤다. 강도 감쇠와 패널 대체가 통째로 건너뛰어진다. 한쪽만 고친
+# 사고였고, 아무도 눈치채지 못했다 — 그래서 이 검사를 둔다.
+_say("-- 시트 판정 임계값 교차 검사 (두 노드가 같은 판정을 내야 한다) --")
+
+
+def _consts_of(relpath, names):
+    """대상 파일을 **ast** 로 파싱해 모듈 수준 상수만 뽑는다.
+
+    왜(Why) import 하지 않고 ast 인가 (2026-10-01 실측, WORK_STATUS 10-24):
+    import 하면 mediapipe·torch 로드를 유발하고, 이 파일은 "환경 없이도" 돌아야
+    한다. ast 는 값을 문장으로 읽을 뿐 부작용이 없다.
+    """
+    import ast
+    tree = ast.parse(open(os.path.join(PKG, relpath), encoding="utf-8").read())
+    found = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id in names:
+                try:
+                    found[t.id] = ast.literal_eval(node.value)
+                except ValueError:
+                    pass
+    return found
+
+
+try:
+    _cam_c = _consts_of(
+        os.path.join(_cam_dir, "camera_director.py"),
+        {"_SHEET_MIN_PANELS", "_SHEET_MIN_SPACING_RATIO"})
+    _kep_c = _consts_of(
+        os.path.join(_kep_dir, "consistency_keeper.py"),
+        {"SHEET_MIN_PANELS", "SHEET_MIN_SPACING_RATIO"})
+    check("카메라 시트 최소 패널 수를 읽었다", bool(_cam_c), str(_cam_c))
+    check("키퍼 시트 최소 패널 수를 읽었다", bool(_kep_c), str(_kep_c))
+    if _cam_c and _kep_c:
+        # 최소 패널 수: 3장 전수에서 진짜 시트 3장이 전부 n=4 이고 오탐은
+        # n=1~2 였다. 한쪽만 다르면 그쪽만 시트를 놓친다.
+        check("시트 최소 패널 수가 두 노드에서 같다 (2026-10-01 회귀)",
+              _cam_c["_SHEET_MIN_PANELS"] == _kep_c["SHEET_MIN_PANELS"],
+              "camera=%s keeper=%s" % (_cam_c.get("_SHEET_MIN_PANELS"),
+                                       _kep_c.get("SHEET_MIN_PANELS")))
+        # 간격선: 의도적으로 0.60 vs 0.45 다름. 근거 없는 완화를 막기 위해
+        # **차이가 낫다** 를 고정한다 — 13장에 greg<0.45 표본이 0개라 낮출 근거가
+        # 없다. 나중에 실사용 사진이 쌓여 값을 바꾸려면 이 검사를 함께 고친다.
+        check("시트 간격선 차이가 키퍼 0.60 / 카메라 0.45 로 유지된다 "
+              "(근거 없이 낮추지 않기)",
+              _kep_c["SHEET_MIN_SPACING_RATIO"] == 0.60
+              and _cam_c["_SHEET_MIN_SPACING_RATIO"] == 0.45,
+              "camera=%s keeper=%s" % (_cam_c.get("_SHEET_MIN_SPACING_RATIO"),
+                                       _kep_c.get("SHEET_MIN_SPACING_RATIO")))
+except Exception as _e:
+    check("시트 임계값 교차 검사 (구문 오류 없음)", False,
+          "%s: %s" % (type(_e).__name__, _e))
 
 _say(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

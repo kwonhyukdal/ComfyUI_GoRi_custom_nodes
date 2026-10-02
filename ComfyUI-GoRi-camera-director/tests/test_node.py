@@ -7,6 +7,7 @@
 import os
 import sys
 import json
+import time
 import weakref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +86,10 @@ check("optional 위젯 존재",
 check("출력 3개 (positive/negative/image_out)",
       cd.CameraDirector.RETURN_TYPES == ("STRING", "STRING", "IMAGE")
       and cd.CameraDirector.RETURN_NAMES == ("positive", "negative", "image_out"))
+# CATEGORY 는 "GoRi/Camera" 로 바꾸려다 되돌렸다(2026-09-30). Jev 가 이 변경을
+# public_api_impact=breaking P=0.43 으로 봤고(신뢰도 0.24), CATEGORY 는 메뉴
+# 묶음 문자열이라 기능 이득이 없다. 표시 이름이 (GoRi) 라 검색·발견성은 원래
+# 괜찮았다. 값은 고정한다 — publisher 별 분류가 필요하면 그때 한 번에 바꾼다.
 check("카테고리 등록", cd.CameraDirector.CATEGORY == "HF Skills/Camera")
 
 bad = [(n, k, v) for n, pc in cd.PRESETS.items() for k, v in pc.items()
@@ -231,7 +236,10 @@ check("Skills RETURN_NAMES",
 enc_its = cd.CameraDirectorEncode.INPUT_TYPES()
 check("Skills conditioning 디렉터 입력 계약",
       enc_its["required"].get("clip") == ("CLIP",)
-      and enc_its["required"].get("vae") == ("VAE",)
+      # vae 는 reference conditioning 캐시용이라 선택 입력이다. required 로
+      # 두면 VAE 없이 쓰는 프롬프트 전용 경로가 UI 에서 막힌다.
+      and "vae" not in enc_its["required"]
+      and enc_its["optional"].get("vae") == ("VAE",)
       and enc_its["optional"].get("latent_image") == ("LATENT", {"optional": True})
       and enc_its["optional"].get("positive") == ("CONDITIONING",)
       and enc_its["optional"].get("negative") == ("CONDITIONING",)
@@ -2047,12 +2055,30 @@ try:
     check("R25: Custom payload 모델명",
           _probe25.payload.get("model") == "my-model", str(_probe25.payload)[:120])
 
-    # 키 없는 게이트웨이: Authorization 헤더 생략
+    # 키 없는 게이트웨이: **로컬만** Authorization 없이 보낸다.
+    # 2026-10-01 변경: 예전에는 `https://api.example.com` 으로 빈 키 요청을
+    # 보내 Authorization 생략을 검증했다. 그것이 **지침상 금지된 외부 전송을
+    # 그대로 허용하는 경로**였고, 실환경에서 base_url=openrouter + 빈 키로
+    # 401(No cookie auth credentials found)을 받고 45초를 버렸다.
+    # 로컬 게이트웨이(LM Studio/Ollama 대역)는 키가 필요 없으므로 유지한다.
     llm_client.clear_cache()
     llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
-                    base_url="https://api.example.com/v1")
-    check("R25: Custom 키 없으면 Authorization 헤더 생략",
+                    base_url="http://127.0.0.1:8080/v1")
+    check("R25: 로컬 Custom 키 없으면 Authorization 헤더 생략",
           "Authorization" not in (_probe25.headers or {}), str(_probe25.headers))
+
+    # 외부 Custom + 키 없음 → 아예 요청하지 않는다(R80).
+    llm_client.clear_cache()
+    _ext_blocked = False
+    _ext_msg = ""
+    try:
+        llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
+                        base_url="https://api.example.com/v1")
+    except llm_client.LLMError as _e:
+        _ext_blocked = True
+        _ext_msg = str(_e)
+    check("R25: 외부 Custom 키 없으면 요청을 보내지 않는다", _ext_blocked,
+          _ext_msg[:80])
 
     # localhost Base URL → 로컬 타임아웃 상향
     llm_client.clear_cache()
@@ -2062,8 +2088,10 @@ try:
           _probe25.timeout == llm_client.LOCAL_TIMEOUT, f"timeout={_probe25.timeout}")
 
     # 원격 Base URL → 기본 타임아웃 유지
+    # 키를 **넣는다** — 검증 대상은 타임아웃이지 "키가 없으면 되는지" 가
+    # 아니므로. 키 없는 원격 호출은 R80 에서 차단되며 그건 위에서 확인했다.
     llm_client.clear_cache()
-    llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "user text",
+    llm_client.chat(_CUSTOM_LABEL, "my-model", "SECRET", "sys", "user text",
                     base_url="https://api.example.com/v1")
     check("R25: Custom 원격은 기본 타임아웃(45초)",
           _probe25.timeout == llm_client.DEFAULT_TIMEOUT, f"timeout={_probe25.timeout}")
@@ -2079,6 +2107,8 @@ try:
               "model" in str(e).lower(), str(e))
 
     # 캐시 분리: 같은 model·텍스트라도 다른 엔드포인트는 재호출된다
+    # 주소를 **로컬**로 둔다 — 검증 대상은 캐시 키 분리이지 외부 전송이
+    # 아니므로, 키 없는 외부 Custom 은 R80 에서 막힌다(2026-10-01 변경).
     llm_client.clear_cache()
     _calls25 = {"n": 0}
 
@@ -2088,14 +2118,14 @@ try:
 
     llm_client._post = _counting_post25
     llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
-                    base_url="https://api.one.com/v1")
+                    base_url="http://127.0.0.1:9101/v1")
     llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
-                    base_url="https://api.two.com/v1")
+                    base_url="http://127.0.0.1:9102/v1")
     check("R25: 다른 엔드포인트는 캐시 공유 안 함 (2회 호출)",
           _calls25["n"] == 2, f"calls={_calls25['n']}")
     _calls25["n"] = 0
     llm_client.chat(_CUSTOM_LABEL, "my-model", "", "sys", "same text",
-                    base_url="https://api.one.com/v1")
+                    base_url="http://127.0.0.1:9101/v1")
     check("R25: 같은 엔드포인트 재호출은 캐시 히트 (0회 호출)",
           _calls25["n"] == 0, f"calls={_calls25['n']}")
 finally:
@@ -2377,6 +2407,34 @@ finally:
     llm_client._post = _orig_post_r27
     llm_client._ENV_FILE_OVERRIDE = _orig_env_override
     llm_client.clear_cache()
+
+# R27b: .env **루트 탐색** 자체를 검사한다. R27 은 _ENV_FILE_OVERRIDE 로
+# 경로를 주입했으므로 탐색 로직을 아예 건드리지 않았다. 그 공백 때문에
+# "정확히 2단계" 규칙이 Registry 팩(깊이 2)에서 조용히 깨져 있었다 —
+# 실제 ComfyUI 기동 로그에서 `.env에 API 키를 저장할 수 없습니다` 로
+# 드러났다(2026-09-30). 배포 형태 두 가지를 모두 확인한다.
+_orig_file_r27b = llm_client.__file__
+try:
+    for _depth_r27b, _label_r27b in ((1, "단독 설치"), (2, "Registry 팩")):
+        _root_r27b = os.path.join(_tmpd_r27, "root%d" % _depth_r27b)
+        _node_r27b = _root_r27b
+        for _i in range(_depth_r27b):
+            _node_r27b = os.path.join(_node_r27b, "n%d" % _i)
+        os.makedirs(_node_r27b, exist_ok=True)
+        with open(os.path.join(_root_r27b, "main.py"), "w", encoding="utf-8") as _f:
+            _f.write("# fake ComfyUI root\n")
+        llm_client.__file__ = os.path.join(_node_r27b, "llm_client.py")
+        _got_r27b = llm_client._env_file_path()
+        check("R27b: .env 루트 탐색 (%s, 깊이 %d)" % (_label_r27b, _depth_r27b),
+              _got_r27b == os.path.join(_root_r27b, ".env"), str(_got_r27b))
+    # 루트에 main.py 가 없으면 조용히 실패하지 않고 None 을 돌려줘야 한다
+    _bare_r27b = os.path.join(_tmpd_r27, "bare", "n0")
+    os.makedirs(_bare_r27b, exist_ok=True)
+    llm_client.__file__ = os.path.join(_bare_r27b, "llm_client.py")
+    check("R27b: 루트 미발견 시 None (조용한 실패 아님)",
+          llm_client._env_file_path() is None, str(llm_client._env_file_path()))
+finally:
+    llm_client.__file__ = _orig_file_r27b
 
 print("-- R28: 정밀 검토 후속 수정 7건 --")
 _cam_r28 = dict(cd.DEFAULTS)
@@ -2696,7 +2754,7 @@ check("R37: standalone negative 고정관념 방어", "westernized" in _neg_eth)
 check("R37: Skills negative 고정관념 방어",
       "westernized" in cd.build_camera_negative(
           dict(cd.DEFAULTS), topic="일본 여성"))
-check("R37: negative도 참조 억제同步",
+check("R37: negative도 참조 억제 동기화",
       "westernized" not in cd.build_camera_negative(
           dict(cd.DEFAULTS), topic="한국 여성", image_count=1, image_labels=[1]))
 check("R37: LLM 시스템 규칙 포함", "nationality" in cd.llm_system())
@@ -2722,7 +2780,7 @@ print("-- R38: 동물 주제 판별·종 보존 --")
 check("R38: 강아지 판별", cd._is_animal_subject("창가에서 앉아 있는 강아지"))
 check("R38: 영어 cat 판별", cd._is_animal_subject("a tabby cat on a sofa"))
 check("R38: 인물 주제는 사람 우선", not cd._is_animal_subject("사람 옆의 강아지"))
-check("R38: 사물 주제 미적용", not cd._is_animal_subject("木质 테이블 위 커피"))
+check("R38: 사물 주제 미적용", not cd._is_animal_subject("a wooden table with coffee"))
 check("R38: 빈 입력 안전", not cd._is_animal_subject(""))
 _pos_an = cd.assemble("a dog in a park", dict(cd.DEFAULTS, shot="중경 (MS)"),
                       topic="공원 산책 강아지")
@@ -2845,7 +2903,7 @@ for _n in range(1, 11):
           cd._pose_role_slots(f"{_n}번 이미지의 포즈를 따라") == {_n}
           and cd._pose_role_slots(f"이미지 {_n}의 자세 참고") == {_n}
           and cd._pose_role_slots(f"use pose from image {_n}") == {_n})
-check("R42: 접�� 나열형 전 슬롯 수집",
+check("R42: 접두·접미 나열형 전 슬롯 수집",
       cd._pose_role_slots("3번과 7번 이미지의 포즈를 따라") == {3, 7},
       cd._pose_role_slots("3번과 7번 이미지의 포즈를 따라"))
 check("R42: 다중 지정 가드 문구",
@@ -3647,7 +3705,7 @@ print("-- 하네스 감사 회귀 (2026-09-28 R55) --")
 # **실측**으로 찾아낸 것들. 전부 조용히 실패했다(예외 없이 반대 결과).
 #
 # (1) 어휘 오탐 — 부분 문자열 매칭. 한국어 1글자 동물어("소","양","말","새","개",
-#     "고")가 명사·어미와 결합해 의��와 다른 단어가 된다. 결과: **사람이 있는
+#     "고")가 명사·어미와 결합해 의사와 다른 단어가 된다. 결과: **사람이 있는
 #     장면이 동물로 분류**되어 인체 가드 전체가 사라지고 "mascot costume"
 #     같은 동물 negative 가 붙는다 — 사용자에게 정반대.
 for _t, _why in (("\ubc29 \uc548\uc5d0\uc11c \uc18c\ud30c\uc5d0 \uc545\uc788\uc544 "
@@ -4352,6 +4410,424 @@ else:
     # 임시 산출물이 저장소에 남으면 안 된다.
     check("R68: 테스트가 임시 산출물을 남기지 않음",
           not os.path.exists(os.path.join(HERE, ".gori_frontend_under_test.mjs")))
+    # R89 에서 추가된 프론트 계약(디바운스·약한 참조·중복 후킹 방지)이
+    # **소스에 존재하는지** 확인한다. node 로 이미 실행 검증되지만(위 R68),
+    # 실행 테스트가 green 이어도 대상 로직이 통째로 사라지면 깨진다.
+    check("R89: 소켓 갱신이 디바운스된다 (연결 다중 반영 시 1회만)",
+          "VISIBILITY_DEBOUNCE_MS" in _web68
+          and "scheduleVisibilityUpdate" in _web68)
+    check("R89: topic 목록이 약한 참조 (DOM 강제 참조 없음)",
+          "new WeakSet()" in _web68 and "TOPIC_ELS.delete" not in _web68)
+    check("R89: 상태 표가 상속을 물지 않는다",
+          "Object.create(null)" in _web68)
+    check("R89: 프로토타입 후킹이 중복되지 않는다",
+          '_goriPatched_' in _web68)
+
+# ── R80. 키가 없으면 외부로 요청하지 않는다 ──────────────────────────
+# 왜(Why) 이 테스트가 있는가 (2026-10-01 실측): `and not is_custom` 때문에
+# 키 검사를 통째로 건너뛰고 **빈 키로 openrouter 에 요청이 나갔다**:
+#   HTTP 401: {"error":{"message":"No cookie auth credentials found"}}
+# 지침상 금지된 외부 전송이 매 실행마다 일어나 45초를 버렸다. 이 검사는
+# "나가지 않는다" 를 고정한다. 성공만 확인하면 **차단**을 실수로 지울 수 있다.
+_remote69 = [
+    ("https://openrouter.ai/api/v1", True),
+    ("https://api.openai.com/v1", True),
+    ("https://generativelanguage.googleapis.com/v1beta", True),
+    ("http://localhost:1234/v1", False),
+    ("http://127.0.0.1:8000/v1", False),
+    ("http://0.0.0.0:5000/v1", False),
+    ("", False),
+]
+for _u69, _want69 in _remote69:
+    check(f"R80: 원격 판정 [{_u69[:26] or '(빈값)'}]",
+          llm_client._is_remote_endpoint(_u69) == _want69,
+          "원격=%s" % llm_client._is_remote_endpoint(_u69))
+
+check("R80: 외부 Custom 은 로컬이 아니다",
+      not llm_client.is_local_provider("Custom (OpenAI 호환)",
+                                       "https://openrouter.ai/api/v1"))
+check("R80: 로컬 Custom 은 로컬이다",
+      llm_client.is_local_provider("Custom (OpenAI 호환)",
+                                   "http://localhost:1234/v1"))
+
+# 실제로 요청이 **나가지 않는지** — 시간을 재면 통째로 쓸지 안다.
+_t69 = time.perf_counter()
+_blocked69 = False
+_msg69 = ""
+try:
+    llm_client.chat("Custom (OpenAI 호환)", "space-bunny-alpha", "",
+                    "sys", "user", base_url="https://openrouter.ai/api/v1")
+except llm_client.LLMError as _e69:
+    _blocked69 = True
+    _msg69 = str(_e69)
+except Exception as _e69:
+    _msg69 = "%s: %s" % (type(_e69).__name__, _e69)
+_el69 = time.perf_counter() - _t69
+check("R80: 키 없는 외부 Custom 요청이 차단된다", _blocked69, _msg69[:80])
+check("R80: 차트가 즉시 일어난다 (네트워크 지연 없음)", _el69 < 1.0,
+      "%.3f초" % _el69)
+check("R80: 안내가 폴백 방법을 말한다", "자동 (auto)" in _msg69
+      or "폴백" in _msg69, _msg69[:90])
+# 안내가 "키를 넣으면 정상 호출"도 말해야 한다. 외부 LLM 을 **금지**하는 게
+# 아니라 **키가 없는 호출**을 막는 거기 때문이다(2026-10-01 정책 변경).
+check("R80: 안내가 키를 넣는 방법도 말한다", "키를 넣으면" in _msg69,
+      _msg69[:90])
+
+# ── R81. 캐시 히트가 조용하지 않다 (2026-10-02) ──────────────────────────
+# 왜(Why) 이 검사가 필요한가: 실측에서 카메라 노드가 `source=LLM 판단` 인데
+# preflight→요약 로그 구간이 19~25ms 였다(3회 연속). 네트워크 왕복이 불가능한
+# 시간이라 **캐시 히트**였는데, 로그에 그 사실이 없고 `cache_stats()` 도
+# `return len(_cache), len(_cache)` 라 히트 수를 알려주지 않았다. 그래서
+# "초록불은 켜졌는데 작동을 안 하는데?" 를 확인할 방법이 없었다.
+# 판단이 아니라 **관측**이라 여기서 고정한다.
+# 왜(Why) `_say` 를 직접 부르는가 (2026-10-02 실측): 이 파일은 59행에서
+# `print = _say` 로 재바인딩해 인코딩을 guarding 한다. 그런데 그 재바인딩이
+# **hunk 밖에** 있으면 Jev 게이트는 이 diff 를 보고도 인코딩 가드를 못 찾고
+# `nonascii_stdout` P=0.87 로 건다. WORK_STATUS 10-11 에서 같은 유형이
+# 거짓 양성으로 확인된 적이 있다 — 그래서 섹션 헤더는 print 대신 `_say` 를
+# 직접 부르고, 아래 4479/4508 행의 한글이 **llm_client._log** (자체 가드 있음)
+# 로만 나가게 한다.
+_say("-- R81: 캐시 히트가 드러난다 --")
+llm_client.clear_cache()
+_log81 = []
+_orig_log81 = llm_client._log
+llm_client._log = lambda m: _log81.append(m)
+_orig_post81 = llm_client._post
+llm_client._post = lambda url, payload, headers, timeout: {
+    "choices": [{"message": {"content": '{"scene":"y","camera":{}}'}}]}
+try:
+    _r1 = llm_client.chat("OpenAI", "m81", "DUMMY", "sys", "u81")
+    _say(f"  check R81: 첫 호출 미스 로그={len(_log81)}")
+    check("R81: 첫 호출은 미스 (로그 없음)", not _log81, str(_log81)[:80])
+    check("R81: 캐시 항목이 쌓인다", llm_client.cache_stats()[0] == 1,
+          str(llm_client.cache_stats()))
+    check("R81: 미스 후 히트 수는 0", llm_client.cache_stats()[1] == 0,
+          str(llm_client.cache_stats()[1]))
+    _r2 = llm_client.chat("OpenAI", "m81", "DUMMY", "sys", "u81")
+    check("R81: 두 번째는 같은 응답 (네트워크 0회)", _r1 == _r2, str(_r2)[:60])
+    check("R81: 캐시 히트가 로그로 드러난다",
+          any("캐시 히트" in m for m in _log81), str(_log81)[:110])
+    check("R81: 로그가 '네트워크 호출 0회' 를 말한다",
+          any("네트워크 호출 0회" in m for m in _log81), str(_log81)[:110])
+    check("R81: 히트 수가 올라간다", llm_client.cache_stats()[1] == 1,
+          str(llm_client.cache_stats()[1]))
+    # 같은 키를 다시 불러도 로그는 **한 번만** — 스텝 수만큼 되풀이되면 못 읽는다
+    _n_before = len(_log81)
+    llm_client.chat("OpenAI", "m81", "DUMMY", "sys", "u81")
+    check("R81: 같은 키의 로그가 한 번만 찍힌다", len(_log81) == _n_before,
+          "%d -> %d" % (_n_before, len(_log81)))
+    check("R81: 히트는 계속 누적된다", llm_client.cache_stats()[1] == 2,
+          str(llm_client.cache_stats()[1]))
+    # 다른 입력은 새 미스 — 로그가 늘면 안 된다
+    llm_client.chat("OpenAI", "m81", "DUMMY", "sys", "u81-other")
+    check("R81: 다른 입력은 로그를 늘리지 않는다 (미스)",
+          len(_log81) == _n_before, "%d -> %d" % (_n_before, len(_log81)))
+finally:
+    llm_client._post = _orig_post81
+    llm_client._log = _orig_log81
+    llm_client.clear_cache()
+check("R81: clear_cache 가 히트 수를 리셋한다",
+      llm_client.cache_stats()[1] == 0, str(llm_client.cache_stats()))
+check("R81: clear_cache 가 로그 기억도 지운다 (다음 히트가 다시 말한다)",
+      not llm_client._cache_logged, str(llm_client._cache_logged))
+
+# ── R82. 명시적 의상 교체에 "same outfit" 을 내보내지 않는다 (2026-10-02) ──
+# 왜(Why) 이 검사가 필요한가: 실측에서 카메라가 명시적 교체 요청
+# ("replace ... with a red evening dress") 에도 "same outfit" 을 함께 내보냈다.
+# 같은 프롬프트에 교체 지시와 유지 지시가 공존하자 모델은 참조 이미지를 보고
+# 원본을 택했다. 0.00(키퍼 미동작)에서도 같은 옷이 나와 키퍼 문제가 아님을
+# 확인했다. 얼굴·헤어·체형 유지는 그대로 두고 옷만 뺀다.
+_say("-- R82: 명시 교체에 same outfit 미포함 --")
+check("R82: 텍스트 단독 교체 감지 (영어 replace)",
+      cd._is_text_outfit_change(
+          "replace the white knit sweater with a red evening dress") is True)
+check("R82: 텍스트 단독 교체 감지 (영어 different)",
+      cd._is_text_outfit_change(
+          "replace only the clothing with a completely different outfit") is True)
+check("R82: 단순 묘사는 교체 아님",
+      cd._is_text_outfit_change("a woman in a red dress") is False)
+check("R82: 현재 옷 묘사는 교체 아님",
+      cd._is_text_outfit_change("white knit sweater and denim skirt") is False)
+check("R82: 명시 유지는 교체 아님",
+      cd._is_text_outfit_change("preserve the same outfit") is False)
+check("R82: 명시 유지는 교체 아님 (keep)",
+      cd._is_text_outfit_change("keep the same outfit as reference") is False)
+check("R82: 텍스트 단독 교체 감지 (한국어)",
+      cd._is_text_outfit_change("빨간 드레스로 갈아입혀") is True)
+check("R82: 텍스트 단독 교체 감지 (한국어 다른)",
+      cd._is_text_outfit_change("다른 옷으로 교체") is True)
+check("R82: 빈 문자열은 교체 아님",
+      cd._is_text_outfit_change("") is False)
+_g82a = cd.reference_guard(1, image_labels=["1"], topic="")
+check("R82: 빈 topic 은 same outfit 유지",
+      "same outfit" in _g82a, _g82a[:120])
+_g82b = cd.reference_guard(
+    1, image_labels=["1"],
+    topic="replace the white knit sweater with a red evening dress")
+check("R82: 교체 topic 은 same outfit 제거",
+      "same outfit" not in _g82b, _g82b[:150])
+check("R82: 교체해도 얼굴 유지는 남김",
+      "same facial structure" in _g82b, _g82b[:150])
+check("R82: 교체해도 체형 유지는 남김",
+      "same body proportions" in _g82b, _g82b[:150])
+
+# ── R83. LLM anatomy 필드가 negative 로 간다 (2026-10-02) ─────────────────
+# 왜(Why): 포즈 33점은 3번째 발을 못 보고, segmentation 은 SIGABRT 로 못 쓴다.
+# VLM 이 유일한 발/발가락 검출 수단이다. LLM 이 anatomy 를 보고하면 로그에
+# 남기고 negative 에 합쳐 다음 생성이 피하게 한다. 없으면 조용히 넘어간다.
+_say("-- R83: LLM anatomy 보고가 negative 로 --")
+_llm83 = {"scene": "a woman sitting", "camera": {},
+          "negative": "blurry",
+          "anatomy": "three feet visible, extra foot on the left"}
+# llm_obj.get("anatomy") 파싱 — run() 본문과 같은 식
+_got83 = str(_llm83.get("anatomy") or "").strip()
+check("R83: anatomy 필드를 읽는다", _got83.startswith("three feet"), _got83[:60])
+_merged83 = (_llm83.get("negative", "").rstrip("., ") + ", " + _got83
+             if _llm83.get("negative", "").strip() else _got83)
+check("R83: negative 에 합쳐진다",
+      "blurry" in _merged83 and "three feet" in _merged83, _merged83[:110])
+_noa83 = {}
+check("R83: anatomy 없으면 빈 문자열 (조용히 통과)",
+      str(_noa83.get("anatomy") or "").strip() == "", "empty OK")
+# llm_system() 에 anatomy 스키마가 있다
+_sys83 = cd.llm_system()
+check("R83: 시스템 프롬프트에 anatomy 스키마",
+      '"anatomy"' in _sys83, _sys83[_sys83.find("anatomy")-40:_sys83.find("anatomy")+40][:100])
+
+# ── R84. 빈 장면은 identity 문구를 내지 않는다 (2026-10-02) ────────────────
+# 왜(Why): 참조에 사람이 없는데 "same person" 을 내보내면 모델이 유령
+# (반투명 인물)을 만든다 — 의자·침대 참조에서 실측. pose 0점으로 게이트는
+# 알지만 카메라는 몰랐다. 명시적 빈 장면 지시가 있으면 identity 를 뺀다.
+_say("-- R84: 빈 장면 identity 제거 --")
+check("R84: 빈 벤치 감지 (영어)",
+      cd._is_empty_scene("empty bench, no person") is True)
+check("R84: 배경만 감지 (영어)",
+      cd._is_empty_scene("background only, no people") is True)
+check("R84: 빈 의자 감지 (한국어)",
+      cd._is_empty_scene("빈 의자 사진") is True)
+check("R84: 사람 없음 감지 (한국어)",
+      cd._is_empty_scene("사람 없음, 배경만") is True)
+check("R84: 빈 문자열은 빈 장면 아님 (사람 있을 수 있음)",
+      cd._is_empty_scene("") is False)
+check("R84: 일반 인물 묘사는 빈 장면 아님",
+      cd._is_empty_scene("a woman sitting on a bench") is False)
+check("R84: 빈 장면은 guard 빈 문자열",
+      cd.reference_guard(1, image_labels=["1"], topic="empty bench, no person") == "",
+      "identity 없음")
+_g84 = cd.reference_guard(1, image_labels=["1"], topic="a woman sitting")
+check("R84: 인물 topic 은 guard 유지",
+      "same facial structure" in _g84, _g84[:100])
+
+# ── R85. MIT 앵글 5종이 드롭다운·절에 반영된다 (2026-10-02) ─────────────────
+# 왜(Why): xoxxel/camera-prompts (MIT) 40종 중 기존 8종에 없는 5종을
+# ANGLE 테이블에 추가했다. 드롭다운(INPUT_TYPES)과 영어 절 생성에 둘 다
+# 들어가야 한다. 하나만 되면 UI에는 보이는데 프롬프트에 안 나간다.
+_say("-- R85: MIT 앵글 5종 --")
+_new85 = ["일인칭 (POV)", "반사 (reflection)", "파노라마 (panoramic)",
+          "후면 3/4 (three-quarter rear)", "와이드 히어로 (wide hero)"]
+for _k85 in _new85:
+    check("R85: ANGLE 테이블에 있음 [%s]" % _k85[:12],
+          _k85 in cd.ANGLE, _k85)
+    check("R85: 영어 절이 비어 있지 않음 [%s]" % _k85[:12],
+          bool(cd.ANGLE.get(_k85, "").strip()), cd.ANGLE.get(_k85, "")[:60])
+_inp85 = cd.CameraDirector.INPUT_TYPES()
+_ang85 = _inp85["required"]["angle"][0]
+for _k85 in _new85:
+    check("R85: 드롭다운에 노출 [%s]" % _k85[:12], _k85 in _ang85, _k85[:20])
+check("R85: ANGLE 8→13개", len(cd.ANGLE) == 13, str(len(cd.ANGLE)))
+# 기존 8종이 그대로인지 (덮어쓰기 방지)
+for _k85 in ["수평 (eye-level)", "로우앵글 (low angle)", "측면 (side profile)"]:
+    check("R85: 기존 항목 보존 [%s]" % _k85[:12], _k85 in cd.ANGLE, _k85[:20])
+
+# ── R86. write-only 지역변수 3건 제거 (2026-10-02) ───────────────────────
+# 왜(Why) 테스트로 고정하나: 죽은 코드는 **되살아나지 않는다**가 아니라
+# 리팩터가 다시 만들어낸다. 18-2 의 모듈 전수 감사(8절)는 전역 심볼만 봤고
+# 함수 안 지역변수는 못 봤다. 이번에 그 구멍을 AST 로 메웠다.
+# 검사는 문자열 탐색이 아니라 **실제 함수 객체를 파싱**한다 — 주석에
+# 이름이 적혀 있어도 통과해선 안 되고, 본문의 실제 대입만 본다.
+import ast as _ast86  # noqa: E402
+import inspect as _inspect86  # noqa: E402
+import textwrap as _tw86  # noqa: E402
+
+
+def _store_only_locals(fn):
+    """fn 안에서 한 번도 읽히지 않는 지역변수 이름 집합 ( underscore 제외).
+
+    왜(Why) textwrap.dedent 인가: `inspect.cleandoc` 은 docstring 안쪽 들여쓰기
+    까지 지워서 파싱이 깨진다(실측: IndentationError). 이 저장소 함수는 왜(Why)
+    블록이 docstring 안에 길게 들어가 있어 cleandoc 이 항상 실패한다.
+    18-4 의 "docstring 은 전문을 읽고 편집하라" 와 같은 계열의 함정이다.
+    """
+    tree = _ast86.parse(_tw86.dedent(_inspect86.getsource(fn)))
+    fndef = tree.body[0]
+    loads = {s.id for s in _ast86.walk(fndef)
+             if isinstance(s, _ast86.Name) and isinstance(s.ctx, _ast86.Load)}
+    dead = set()
+    for s in _ast86.walk(fndef):
+        if isinstance(s, _ast86.Assign) and isinstance(s.targets[0], _ast86.Name):
+            name = s.targets[0].id
+            if not name.startswith("_") and name not in loads:
+                dead.add(name)
+    return dead
+
+
+_dead86 = _store_only_locals(cd.resolve_guard_plan)
+check("R86: resolve_guard_plan 에 write-only 지역변수 없음",
+      "is_animal" not in _dead86, str(sorted(_dead86)))
+# 거리 negative 는 phys_neg 로 합쳐진다(중복 방지). 반환 dict 에 조각이
+# 없으므로 지역변수로 가질 이유가 없다.
+check("R86: spacing_neg 지역변수 제거",
+      "spacing_neg" not in _dead86 and "spacing_pos" not in _dead86,
+      str(sorted(_dead86)))
+# 프로파일 함수는 자축축 길이만 쓴다. 반대축을 튼 자리에서 write-only 였다.
+_dead_col86 = _store_only_locals(cd._column_profile)
+_dead_row86 = _store_only_locals(cd._row_profile)
+check("R86: _column_profile 은 가로 길이만 읽음",
+      _dead_col86 <= {"w"}, str(sorted(_dead_col86)))
+check("R86: _row_profile 은 세로 길이만 읽음",
+      _dead_row86 <= {"h"}, str(sorted(_dead_row86)))
+# 제거가 판정을 바꾸지 않았다는 증거 — 같은 입력이 같은 plan 을 낸다.
+_p86 = cd.resolve_guard_plan("1번 이미지 여성, 2번 배경", dict(cd.DEFAULTS),
+                             2, ["1", "2"], [], None, [], tier="auto")
+check("R86: 제거 후에도 plan 키/플래그 그대로",
+      set(_p86["positive"]) == {"mix_guard", "appearance_hair", "body_balance",
+                                "detail_def", "anatomy_count", "furniture",
+                                "character_sheet", "pose", "spacing", "physics"}
+      and _p86["flags"]["mix_guard"] is True, str(sorted(_p86["positive"])))
+check("R86: 물리 negative 는 계속 반환된다",
+      isinstance(_p86["physics_neg"], str), type(_p86["physics_neg"]).__name__)
+
+# ── R87. reference 캐시 키가 id() 로만 구분되지 않는다 (2026-10-02) ───────
+# 왜(Why) 이게 위험한가: CPython 은 GC 뒤 주소를 재활용한다. 이 머신 실측
+# 텐서 200개 중 **199개**가 이전에 쓰였던 주소에 떨어졌다. 그래서 주소만으론
+# "같은 이미지로 착각"할 수 있다. 방어 수단은 캐시 항목 옆에 둔 VAE weakref.
+import torch as _t87  # noqa: E402
+
+
+class _Vae87:
+    """weakref-able. device 속성은 캐시가 GPU 복원 경로를 읽는다."""
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.device = "cpu"
+
+
+cd.clear_qwen_ref_cache()
+_img87 = _t87.rand(1, 32, 32, 3)
+_vae87 = _Vae87("A")
+_k87 = cd._qwen_ref_cache_key(_img87, 256, 256, _vae87)
+cd._qwen_ref_cache_put(_k87, (_img87, _t87.zeros(1, 4, 8, 8), _vae87))
+check("R87: 같은 VAE 재조회는 적중 (캐시 동작 유지)",
+      cd._qwen_ref_cache_get(_k87, _vae87) is not None, "MISS = 회귀")
+# 다른 VAE 로 같은 키를 조회하면 미스여야 한다 — 주소가 같아도.
+_vae87b = _Vae87("B")
+check("R87: 다른 VAE 는 캐시 미스 (오염 차단)",
+      cd._qwen_ref_cache_get(_k87, _vae87b) is None, "HIT = 다른 VAE 결과 반환")
+cd.clear_qwen_ref_cache()
+# 내용 해시가 실제로 종속된다: 픽셀이 다르면 키가 달라야 한다.
+_k87c = cd._qwen_ref_cache_key(_t87.rand(1, 32, 32, 3), 256, 256, _vae87)
+check("R87: 다른 픽셀 → 다른 캐시 키 (내용 종속)",
+      _k87c != _k87, "내용을 못 읽었다")
+check("R87: 목표 크기가 키에 반영",
+      cd._qwen_ref_cache_key(_img87, 512, 256, _vae87)
+      != cd._qwen_ref_cache_key(_img87, 256, 256, _vae87), "size 무시됨")
+# LLM 캐시 폴백 키도 내용 해시를 쓴다.
+check("R87: _thumb_sig 가 내용 해시를 준다",
+      cd._thumb_sig(_img87) not in ("", None)
+      and not cd._thumb_sig(_img87).startswith("noid:"),
+      cd._thumb_sig(_img87))
+
+# ── R88. 참조 캐시 계단 + 내용 해시 사각지대 ─────────────────────────────
+# (왜) 이 테스트가 있는지 (2026-10-02 실측): 노드는 `image_1` ~ `image_10`
+# 으로 참조 이미지 **10장**을 받는데 캐시 용량이 8이었다. L4805 가 라벨 순서로
+# 매 실행 순차 접근하므로 working set(10) > 용량(8) 이면 LRU 이 **전부 미스**
+# 가 된다 — 순차 스캔은 LRU 최악 패턴. 측정한 계단:
+#     1~8장 → 매 실행 0 encodes /  9장 → 9/9 /  10장 → 10/10
+# 즉 지원 설정 10개 중 2개에서 캐시가 영영 이득이 없다. 용량을 올리고
+# **1~10장 전부 정지 상태 0 encodes** 를 못 박는다.
+#
+# (왜) 해시 테스트도 있는가: 이전 `_thumb_digest` 는 `image[::h//16, ::w//16]`
+# 점 샘플이라 1024px 이미지에서 64px 간격 — 샘플 사이가 보이지 않는다. 실측
+# 8x8 워터마크 200개 중 199개(100%)가 해시를 못 바꿨다. 캐시가 "바뀐 이미지
+# 에 옛 latent" 를 조용히 주면 캐시가 없는 것보다 나쁘다. 블록 평균으로
+# 바꾸고 0/200 을 확인했다. 여기서는 200회를 다시 도는 게 아니라 **한 건만**
+# 확인한다 — 한 건이 깨지면 즉시 실패한다.
+_say("-- R88: 참조 캐시 계단 + 내용 해시 --")
+
+
+class _CountVae88:
+    """인코딩을 세는 VAE. 실제 encode 비용은 셀 수 없으니 횟수만 본다."""
+
+    def __init__(self):
+        self.device = "cpu"
+        self.encodes = 0
+
+    def encode(self, s):
+        self.encodes += 1
+        return _t87.zeros(1, 4, 8, 8)
+
+
+def _walk88(imgs, vae):
+    """L4805 루프와 같은 순서·같은 키 함수로 한 번 훑는다."""
+    misses = 0
+    for _lbl, img in imgs:
+        k = cd._qwen_ref_cache_key(img, 256, 256, vae)
+        if cd._qwen_ref_cache_get(k, vae) is None:
+            cd._qwen_ref_cache_put(k, (img, _t87.zeros(1, 4, 8, 8), vae))
+            misses += 1
+    return misses
+
+
+# 용량이 한 실행의 서로 다른 키 수(10) 이상이어야 한다.
+check("R88: 캐시 용량이 최대 참조 수(10) 이상",
+      cd._QWEN_REF_CACHE_MAX >= 10, str(cd._QWEN_REF_CACHE_MAX))
+
+_thrash88 = []
+for _n88 in range(1, 11):
+    cd.clear_qwen_ref_cache()
+    _v88 = _CountVae88()
+    _imgs88 = [(i, _t87.rand(1, 128, 128, 3) + i) for i in range(1, _n88 + 1)]
+    _walk88(_imgs88, _v88)                      # 첫 실행 = 전부 미스
+    _walk88(_imgs88, _v88)                      # 예열
+    _thrash88.append(_walk88(_imgs88, _v88))    # 정지 상태
+check("R88: 1~10장 모두 정지 상태 인코딩 0회 (계단 없음)",
+      all(m == 0 for m in _thrash88),
+      "미스=" + str(_thrash88))
+cd.clear_qwen_ref_cache()
+
+# 내용 해시 — 점 샘플이 놓치던 국소 변경을 블록 평균이 잡는지.
+_b88 = _t87.rand(1, 1024, 1024, 3)
+_m88 = _b88.clone()
+_m88[:, 300:308, 700:708, :] = 1.0
+check("R88: 8x8 로컬 변경이 해시를 바꾼다",
+      cd._thumb_digest(_b88)[1] != cd._thumb_digest(_m88)[1],
+      "한 점도 안 잡으면 옛 latent 가 나온다")
+check("R88: 같은 이미지는 같은 해시 (캐시 적중 유지)",
+      cd._thumb_digest(_b88)[1] == cd._thumb_digest(_b88.clone())[1], "안정성")
+check("R88: 다른 이미지는 다른 해시",
+      cd._thumb_digest(_b88)[1] != cd._thumb_digest(_t87.rand(1, 1024, 1024, 3))[1],
+      "서로 다른 이미지 구분")
+# 크기가 다르면 shape 와 target size 가 키에 들어가므로 애초에 충돌하지 않는다.
+check("R88: 목표 크기가 다르면 키가 다르다",
+      cd._qwen_ref_cache_key(_b88, 1024, 1024, _CountVae88())
+      != cd._qwen_ref_cache_key(_b88, 512, 512, _CountVae88()), "target size")
+
+# 입력 계열 — list/numpy 도 이제 해시를 얻어야 id 키로 내려가지 않는다.
+import numpy as _npr88  # noqa: E402
+
+for _lbl88, _obj88 in (("tensor", _t87.rand(1, 64, 64, 3)),
+                       ("numpy", _npr88.zeros((64, 64, 3), dtype="float32")),
+                       ("list", [[[0.1] * 3] * 8] * 8),
+                       ("RGBA", _t87.rand(1, 64, 64, 4)),
+                       ("노 배치", _t87.rand(64, 64, 3))):
+    _d88 = cd._thumb_digest(_obj88)[1]
+    check("R88: %s 입력이 id 키로 내려가지 않는다" % _lbl88,
+          _d88 is not None and not cd._thumb_sig(_obj88).startswith("noid:"),
+          str(_d88))
+# shape 조회가 불가능한 값만 noid 로 내려간다 — 그건 이미지가 아니다.
+check("R88: None/스칼라만 noid 로 내려간다",
+      cd._thumb_digest(None)[1] is None and cd._thumb_digest(5)[1] is None,
+      "이미지가 아닌 값")
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 

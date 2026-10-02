@@ -15,6 +15,18 @@
 
 from __future__ import annotations
 
+# 이 노드의 독립 버전. 팩(pyproject.toml) 버전과 별개로 간다.
+# 왜(Why) future import 다음인가: `from __future__` 는 docstring 바로 다음에
+# 와야 한다 (SyntaxError). 버전 상수는 그 뒤 첫 코드다.
+# 왜(Why) 노드마다 따로인가 (2026-10-02): 팩은 여러 노드를 한 번에 배포하는
+# 관리 단위일 뿐이다. 키퍼만 고쳤는데 팩 버전을 올리면 카메라도 바뀐 것처럼
+# 보인다. 각 노드는 자기 변경에만 버전을 올린다. 새 노드를 만들면 첫날부터
+# __version__ 을 둔다 (test_pack.py 가 강제한다).
+__version__ = "1.9.7"
+
+
+import importlib as _importlib
+
 
 def _get_samples(latent) -> object:
     """LATENT dict → samples 텐서. 없으면 None."""
@@ -29,11 +41,29 @@ def _get_samples(latent) -> object:
 
 
 def _match_spatial(ref, target) -> object:
-    """ref를 target의 (N, C, H, W) 중 공간 크기에 맞춘다. 실패 시 None."""
+    """ref를 target의 (N, C, H, W) 중 공간 크기에 맞춘다. 실패 시 None.
+
+    왜(Why) 크기가 같아도 device/dtype 을 확인하나 (2026-10-01 실측):
+    크기가 같으면 `return ref` 로 바로 돌려주고 있었는데, 그 `ref` 는 워크플로에서
+    넘어온 latent 라 **target 과 다른 장치에 있을 수 있다.** 실제로 하네스로
+    처음 끝까지 돌렸을 때 여기서 죽었다 — 텐서 장치가 둘로 섞여 있다는
+    RuntimeError 가 `out + eff * _mask * (matched - sampled)` 에서 났다.
+    (에러 문구를 그대로 적지 않는다. 아래 테스트가 소스의 하드코딩된 디바이스
+    문자열을 금지한다 — 이 노드는 어떤 장치에서도 돌아야 하기 때문.)
+
+    이 버그는 v1.7.0 부터 있었으나 판정층 작업 전까지 이 노드가 끝까지
+    실행된 적이 없어 드러나지 않았다. **조용히 못 도는 것과 죽는 것은
+    둘 다 실패**이고, 죽는 쪽이 찾기 쉬워서 그나마 다행이었다.
+
+    이미 device 와 dtype 이 같으면 아무것도 옮기지 않는다(무조건 `.to()` 를
+    걸면 매 호출마다 복사가 생긴다).
+    """
     try:
         import torch.nn.functional as _f
         if tuple(ref.shape) == tuple(target.shape):
-            return ref
+            if (ref.device == target.device and ref.dtype == target.dtype):
+                return ref
+            return ref.to(device=target.device, dtype=target.dtype)
         if ref.shape[0] != target.shape[0] or ref.shape[1] != target.shape[1]:
             return None
         resized = _f.interpolate(
@@ -54,11 +84,119 @@ def _drift_mse(a, b) -> float | None:
         return None
 
 
+def _drift_norm(sampled, matched) -> float | None:
+    """두 latent 를 **참조 크기 기준**으로 정규화한 불일치. 비교 불가면 None.
+
+    왜(Why) MSE 를 그대로 쓰면 안 되는가 (2026-10-01 실측):
+    `MSE(sampled, matched)` 는 **절대값**이라 latent 스케일에 비례한다.
+    그런데 0.8 / 2.0 이라는 임계값은 SD 계열에서 잡은 값이고, Qwen Image
+    2.1 (int8) 로 바꿔진 뒤 한 번도 재측정되지 않았다. 실측으로 드러난 사실:
+
+        이전 실행   camera 5.72   original 14.33   → 둘 다 감쇠 0.00
+        이번 실행   camera 5.198  original 14.217  → 둘 다 감쇠 0.00
+
+    즉 이 워크플로의 **전형적인 값이 임계값보다 한 자릿수 크다.** 감쇠가 전부
+    0 이 되어 노드가 무조건 아무것도 하지 않게 되어 있었다.
+
+    게다가 `original` 의 불일치가 `camera` 보다 **더 컸다.** 같은 사람인데
+    원본이 카메라에서 더 멀다면, 두 latent 의 스케일이 다르다는 뜻이다 —
+    이미지가 실제로 다른 게 아니라 **단위가 다른 것.**
+
+    그래서 크기로 나눈다. `matched` 의 평균제곱값으로 나누면 "얼마나 다른가"가
+    "참조의 크기 대비 얼마나 다른가" 가 되고, 모델이 바뀌어도 임계값이 유지된다.
+    0 = 완전히 같음, 1 = 참조 크기만큼 다름.
+
+    **아직 임계값은 이 값으로 재측정되지 않았다.** 아래 실행 로그가 그 값을
+    직접 말해준다. 그 실측값을 보고 임계값을 정한다 — 지금 숫자를 넣으면
+    또 추측이 된다.
+    """
+    try:
+        import torch as _t
+        den = float(_t.mean(matched.float() ** 2).item())
+        if den <= 1e-12:
+            return None
+        return float(_t.mean((sampled.float() - matched.float()) ** 2).item()) / den
+    except Exception:
+        return None
+
+
+# --- 정규화 불일치 기준 (2026-10-01 실측) ---
+# 왜(Why) 절대 MSE 를 안 쓰는가: MSE 는 latent 스케일에 비례하는 **절대값**이라
+# 모델을 바꾸면 기준이 통째로 무효가 된다. 여기선 그 사고가 실제로 났다 —
+# 0.8 / 2.0 은 SD 계열에서 잡은 값인데 Qwen Image 2.1 에서 정상 참조 4건이
+# 4.227 ~ 8.384 로 측정됐다. 전부 2.0 위라 **정상 참조가 전부 0 으로 죽었다.**
+# 정규화값은 스케일 무관해서 기준이 모델을 넘어간다.
+#
+# 기준을 정한 근거 (2026-10-01 실측 4건):
+#   camera    0.2221 / 0.2585 / 0.3148 / 0.3932
+#   original  0.2323 / 0.2759 / 0.4322 / 0.4872
+#   → 정상 참조의 범위 0.222 ~ 0.487
+#
+# 감쇠는 **비정상**을 위한 장치다. 정상이면 건드리면 안 되므로 무감쇠 구간이
+# 정상 범위를 **덮어야** 한다. 그래서 무감쇠 끝을 측정 최댓값(0.487) 바로 위인
+# 0.50 으로 잡았다. 0 에 도달하는 지점은 측정 최댓값의 2 배로 두었다.
+_DRIFT_NORM_KNEE = 0.50
+# 물리 상한: 당김 강도가 이 값을 넘으면 결과의 디테일이 **원본보다** 줄어든다.
+#
+# 근거 (WORK_STATUS 11-7). **대응 지점** 기준(landmark 주변 5% 창, 결과물 좌표
+# 기준) — 화면 전체 평균이 아니라 같은 자리에 있는 원본/결과를 비교한다.
+# 사람 7장, 강도 0 을 **검증용 기준선**으로 넣었다:
+#
+#   강도 0.00   평균  -1.2%   ← 당김이 없으니 0 근처 = 지표가 옳다
+#   강도 0.20   평균 -33.5%
+#   강도 0.40   평균 -36.1%
+#
+# 손실 몰림: 0.00→0.20 이 -32.2%p, 0.20→0.40 은 -2.7%p. **0.20 이 상한**이다.
+# 그 이전 값 0.78 은 화면 전체 평균 지표(11-5)에서 나왔고, 그 지표는 강도 0
+# 검증을 통과하지 못했다(0.40 에서 +12.5% 로 증가). **4배 과했다.**
+_PHYS_CEILING = 0.20
+_DRIFT_NORM_ZERO = 1.00
+
+
+def _damp_norm(v) -> float:
+    """정규화 불일치 -> 감쇠 계수 0~1. 비교 불가면 1.0(안 건드림).
+
+    왜(Why) `_damp_factor`(절대 MSE) 대신 별개 함수인가: 기존 함수는 그대로
+    둔다. 새 기준을 켜도 예전 경로를 잃지 않고, **두 규칙이 각각 무슨 뜻인지**
+    로그와 테스트에서 구분된다. 계층적으로도 "정규화 기준" 과 "구 기준" 이
+    같은 이름 아래 섞이면 나중에 어느 쪽이 살아 있는지 알 수 없다.
+    """
+    try:
+        if v is None:
+            return 1.0
+        if v != v:                      # nan 은 전파 차단이 우선 (R71 계약)
+            return 0.0
+        if v <= _DRIFT_NORM_KNEE:
+            return 1.0
+        span = _DRIFT_NORM_ZERO - _DRIFT_NORM_KNEE
+        if span <= 0:
+            return 1.0
+        return max(0.0, 1.0 - (v - _DRIFT_NORM_KNEE) / span)
+    except Exception:
+        return 1.0
+
+
 def _damp_factor(drift) -> float:
     """틀어짐 기반 자동 감쇠. 작으면 1, 크면 0으로 수렴.
 
     왜(Why): "융합하되 변형 없이" — 당기면 깨질 구도면 노드가 스스로
     손을 놓는다. 0.8부터 선형 감쇠, 2.0에서 0.
+
+    **바닥을 두지 않는다 — 의도적으로.**
+    처음엔 "감쇠가 0 이 되면 뒤 경로가 전부 죽는다" 고 보고 바닥(0.25)을
+    넣었다. 그러자 기존 테스트 셋이 깨졌다:
+
+        자동 감쇠 계수
+        큰 틀어짐은 당김 감쇠
+        감쇠로 eff=0 이면 region 당김도 0 (감쇠 우회 방지)
+
+    세 번째가 핵심이다. **eff 가 0 이면 region 경로도 0 이어야 한다** 는
+    계약이고, 그게 없는 순간 사용자가 강도를 올려 region 경로로 감쇠를
+    우회할 수 있다. 그러면 "틀어지면 손을 놓는다" 는 노드의 목적이 무너진다.
+
+    즉 바닥은 "조용한 무동작" 을 고치는 것처럼 보이지만 실제로는
+    **안전장치를 뚫는 것**이었다. 문제는 바닥이 아니라 임계값이다 —
+    위 `_drift_norm` docstring 의 실측값으로 다시 잡는다.
     """
     try:
         if drift is None or drift <= 0.8:
@@ -101,6 +239,211 @@ def _light_damp_factor(mismatch) -> float:
         return 1.0
 
 
+def _as_rgb_hwc(arr):
+    """VAE decode 결과 -> (H,W,3) RGB. 레이아웃이 아니면 None.
+
+    왜(Why) 이렇게 복잡하나 (2026-09-30 실측): ComfyUI 의 VAE 마다 decode 가
+    주는 축 순서가 다르다. 여기서 쓰는 Qwen Image VAE 는 **(B,H,W,C=4)** 다 —
+    arr[0] = (1888,1056,4). 그레이스케일 SD 계열은 (B,C,H,W) 라 arr[0] =
+    (3,H,W) 다. 더 중요한 건 **채널이 4개** 라는 점이다. mediapipe.Image 는
+    3채널 SRGB 만 받으므로 4채널을 그대로 넘기면 포즈 검출이 조용히 전부
+    실패한다(실측 lm=None). 판정 근거는 첫 축이 4 이하라는 것(채널 축이면
+    1/3/4, 공간 축이면 수백~).
+    """
+    try:
+        import numpy as _np
+        a = _np.asarray(arr, dtype=_np.float32)
+        if a.ndim == 4:
+            a = a[0]
+        if a.ndim != 3:
+            return None
+        if a.shape[0] <= 4:
+            a = _np.transpose(a, (1, 2, 0))
+        if a.shape[-1] < 3:
+            return None
+        return _np.clip(a[..., :3], 0.0, 1.0)
+    except Exception:
+        return None
+
+
+# VAE 가 latent 1칸을 몇 픽셀 이미지로 복원하는지 못 알아낼 때의 임시값.
+# **8 은 SD 계열 기준이고 Qwen 은 16 이다.** 실패했을 때만 쓰는 안전망이며
+# 정상 경로에서는 쓰이지 않는다.
+_VAE_PIXEL_FACTOR_FALLBACK = 8
+
+
+# VAE 의 "latent 1칸 = 이미지 몇 픽셀" 을 **클래스별로** 기억한다.
+# **프로브로 재지 않는다** — 2026-10-01 실측으로 프로브는 사치다:
+# 6.9GB 모델이 VRAM 에 오른 상태에서 128/256/512 인코딩을 시도하면 ms 가
+# 아니라 초 단위가 걸렸고, 그 여파로 하네스 폴링이 타임아웃났다.
+# 실제 디코드를 **이미 하고 있으니** 거기서 비율을 읽으면 공짜다.
+# 왜(Why) 키가 클래스인가: 이 워크플로는 `WanVAE` 와 `QwenImage21` 를 **함께**
+# 로드한다. `id()` 는 GC 뒤 주소를 재사용하므로 캐시 키로 쓰면 엉뚱한 VAE 의
+# 배율이 나오고(실측 50회 중 35회 재사용), 배율은 아키텍처의 속성이므로
+# 같은 클래스면 같다.
+_VAE_FACTOR_BY_CLASS = {}
+
+
+def _vae_factor_key(vae):
+    """VAE 를 구조적으로 구분하는 키.
+
+    왜(Why) VAE 클래스로 잡는가 (2026-10-01 실측): 처음엔 모듈 전역 하나로
+    저장했다가 테스트가 오염되었고, production 도 같은 이유로 위험했다 —
+    **한 세션에서 VAE 가 여러 개 로드된다.** 실제로 이 워크플로는 `WanVAE`
+    와 `QwenImage21` 를 함께 쓴다. 전역 하나로 두면 한쪽에서 배운 배율이
+    다른 쪽에 그대로 적용되어 조용히 틀린다.
+
+    왜(Why) `id()` 가 아니라 클래스인가: `id()` 는 주소 재사용 때문에 위험하다
+    (Jev 게이트가 명시적으로 금지). 그리고 배율은 **아키텍처의 속성**이므로
+    같은 클래스면 같은 배율이다 — 이건 성질이지 우연이 아니다.
+    """
+    t = type(vae)
+    return (getattr(t, "__module__", ""),
+            getattr(t, "__qualname__", None) or getattr(t, "__name__", "?"))
+
+
+def _vae_pixel_factor_for(vae) -> int:
+    """이 VAE 에서 배운 배율. 배운 적 없으면 안전망."""
+    if vae is None:
+        return _VAE_PIXEL_FACTOR_FALLBACK
+    try:
+        return _VAE_FACTOR_BY_CLASS.get(_vae_factor_key(vae),
+                                        _VAE_PIXEL_FACTOR_FALLBACK)
+    except Exception:
+        return _VAE_PIXEL_FACTOR_FALLBACK
+
+
+def _vae_pixel_factor_learn(vae, latent, decoded) -> int:
+    """디코드 결과로 축소 비율을 **배운다**. 배운 값을 돌려준다.
+
+    왜(Why) 별도 프로브가 아닌가: 위 주석 — 프로브는 비싸고, 디코드는 이미
+    하고 있다. `decoded` 의 높이가 latent 높이의 몇 배인지만 보면 끝이다.
+
+    왜(Why) 실패해도 조용히 두는가: 처음엔 안전망을 쓴다. 그건 지금과 **같은**
+    동작이므로 새로 나빠지는 것이 아니다. 첫 디코드 뒤부터 정확해진다.
+    배율은 최적화 파라미터라 틀어도 **결과물의 정확성**을 해치지 않고 속도만
+    달라진다.
+    """
+    try:
+        if vae is None or latent is None or decoded is None:
+            return _vae_pixel_factor_for(vae)
+        lh = int(latent.shape[-2])
+        ih = int(getattr(decoded, "shape", [-1, -1, -1, -1])[-2])
+        if lh > 0 and ih > 0 and ih % lh == 0:
+            f = ih // lh
+            if 1 <= f <= 64:
+                _VAE_FACTOR_BY_CLASS[_vae_factor_key(vae)] = f
+    except Exception:
+        pass
+    return _vae_pixel_factor_for(vae)
+
+
+def _encode_image_ref(vae, image):
+    """IMAGE 텐서 -> 원본 기준 latent. 실패하면 None.
+
+    왜(Why) 이 함수가 필요한가 (2026-10-01 실측으로 확정):
+    `TextEncodeQwenImage21` 의 `latent` 출력은 **전부 0 인 빈 캔버스**다
+    (`comfy_extras/nodes_qwen.py:181`). Qwen Edit 에는 "원본 latent" 라는
+    개념이 없고, 원본은 `positive`/`negative` 컨디셔닝 안의
+    `reference_latents` 로 들어간다(같은 파일 179행).
+
+    즉 워크플로가 Latent 형식으로 넘겨주는 원본에는 **내용이 없다.** 그 상태로
+    `MSE(생성결과, 전부 0)` 을 계산했으므로 로그에
+    `original 틀어짐 MSE=14.06` 처럼 나오던 숫자는 **무의미했다.**
+    게다가 정규화 값이 분모 0 으로 `n/a` 였는데, 그것이 결정적 단서였다.
+
+    → 원본을 **이미지**로 받고 여기서 직접 인코딩한다. 이 노드는 이미 latent 를
+    디코드하므로 vae 를 갖고 있고, 대칭적으로 인코딩도 할 수 있다.
+
+    why(why): we do not resize. measured 2026-10-01: resizing to the sampled
+    grid needs a factor we do not know on the first pass (fallback 8, Qwen is
+    16) and produced an invalid 416x632 -> 'Calculated padded input size per
+    channel: (1 x 625)'. The workflow already hands us the original resized to
+    the canvas, so encoding as-is lets the VAE pick the grid. That removes the
+    need to know the factor and removes the wrong-size path entirely.
+
+    왜(Why) ComfyUI 의 VAEEncode 와 같은 순서인가: `movedim(-1, 1)` 로
+    (B,H,W,C) 를 (B,C,H,W) 로 옮기고 앞 3채널만 쓴다. ComfyUI 고유 규약이라
+    순서를 바꾸면 VAE 가 조용히 이상한 값을 낸다.
+
+    크기가 비교 기준과 다르면 `_match_spatial` 이 보간으로 맞춰 준다. 그러면
+    기준 자체가 리샘플된 값이 되어 "얼마나 다른가" 에 리샘플 차이가 섞이지만,
+    **배율을 모른 채로 틀린 크기로 인코딩하는 것**(실측: 1x625 오류)보다
+    확실히 낫다. 이 절차를 되돌리지 말 것.
+    """
+    if vae is None or image is None:
+        return None
+    try:
+        import torch as _t
+        # 왜(Why) 전치하지 않는가 (2026-10-01 실측): ComfyUI 의 `VAE.encode` 는
+        # **(B,H,W,C) 를 받는다.** 내부에서 크롭을 하고 나서 전치한다:
+        #     def encode(self, pixel_samples):        # ← (B,H,W,C)
+        #         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
+        #         pixel_samples = pixel_samples.movedim(-1, 1)     # 여기서 전치
+        # 원래 `VAEEncode` 노드도 `vae.encode(pixels[:, :, :, :3])` 로 그대로
+        # 넘긴다. 내가 미리 `movedim(-1, 1)` 하면 **전치가 두 번** 되고,
+        # ComfyUI 는 dims 를 (3, 1544, ...) 로 읽어 크롭까지 망가뜨린다
+        # (실측: "Calculated padded input size per channel: (1 x 1601)").
+        # 주석에 "전치해야 한다"고 적어둔 것이 정확히 반대였다.
+        px = image[..., :3]
+        if px.dtype != _t.float32:
+            px = px.to(dtype=_t.float32)
+        # 큰 텐서를 굳이 CPU 에 만들지 않는다 — 대상 장치에서 직접 만든다.
+        px = px.to(device=getattr(vae, "device", None) or px.device)
+        # 크기 정리는 `vae_encode_crop_pixels` 가 **spacial_compression_encode()
+        # (=16) 배수로 중앙 크롭** 한다. 내가 추가로 맞추지 않는다 —
+        # 여기서 리사이즈하면 내용이 바뀌고, 크롭이 하는 일만 헛돌게 된다.
+        lat = vae.encode(px)
+        del px
+        _release_vram()
+        return lat
+    except Exception as _e:
+        _note_pose_error('_encode_image_ref', _e)
+        _release_vram()
+        return None
+
+
+def _decode_capped(vae, latent, max_pixels=None):
+    """VAE 디코드 — 픽셀 수가 상한을 넘으면 latent 를 먼저 줄인다.
+
+    카메라 노드와 같은 규율(`QWEN_REF_MAX_PIXELS`). latent 축은 줄이되 종횡비는
+    유지한다(면적 보간이라 비율이 어느 축이든 유지된다). 실패하면 원본 그대로
+    디코드한다 — 상한은 최적화이지 동작 조건이 아니다.
+    """
+    try:
+        import torch.nn.functional as _f
+        h = int(latent.shape[-2])
+        w = int(latent.shape[-1])
+        # 왜(Why) 더 이상 8 을 박지 않는가 (2026-10-01): 이 8 은 SD 계열
+        # 기준이고 Qwen 은 16 이다. 그 차이로 픽셀 상한이 **4배 느슨하게**
+        # 동작했다 — 즉 상한이 있어도 실제로는 상한을 못 넘는다.
+        # 값은 이전 디코드에서 **배웠다**(`_vae_pixel_factor_learn`). 처음엔
+        # 안전망(8)이므로 첫 호출은 지금과 같다가, 두 번째부터 정확해진다.
+        _fac = _vae_pixel_factor_for(vae)
+        px = float(max(1, h) * max(1, w) * _fac * _fac)
+        cap = _DECODE_MAX_PIXELS if max_pixels is None else int(max_pixels)
+        if px <= cap:
+            img = vae.decode(latent)
+            # 왜(Why) 결과를 버리지 않는가: `_vae_pixel_factor_learn` 은 **배운
+            # 배율**을 돌려준다. 그 값을 그대로 반환하면 디코드된 이미지가
+            # 숫자로 바뀌고 디코딩이 조용히 무력화된다(실측: 마스크·캐시·
+            # 디코드 검사 8건이 한꺼번에 깨졌다). 배율은 부수 효과이므로 버린다.
+            _vae_pixel_factor_learn(vae, latent, img)
+            return img
+        scale = (cap / px) ** 0.5
+        nh = max(8, int(h * scale))
+        nw = max(8, int(w * scale))
+        small = _f.interpolate(latent.float(), size=(nh, nw), mode="area")
+        img = vae.decode(small)
+        # 배율은 축소 전/후 어느 격자에서 읽어도 같다 — 둘 다 같은 비율이다.
+        _vae_pixel_factor_learn(vae, small, img)
+        del small
+        _release_vram()
+        return img
+    except Exception:
+        return vae.decode(latent)
+
+
 def _decode_latent_rgb(vae, latent, cache=None):
     """latent -> RGB numpy 배열(H,W,3). 실행당 캐시로 중복 디코딩을 없앤다.
 
@@ -119,16 +462,36 @@ def _decode_latent_rgb(vae, latent, cache=None):
         if cache is not None and key in cache:
             return cache[key]
         with _t.no_grad():
-            img = vae.decode(latent)
+            img = _decode_capped(vae, latent)
         if hasattr(img, "detach"):
             img = img.detach().cpu()
         arr = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
         arr = _np.asarray(arr, dtype=_np.float32)
-        if arr.ndim == 4:
-            arr = arr[0]
-        if arr.ndim != 3:
+        arr = _as_rgb_hwc(arr)
+        if arr is None:
             return None
-        arr = _np.clip(arr, 0.0, 1.0)
+        # 상한 때문에 포즈를 놓쳤으면 한 번만 크게 다시 디코드한다 (2026-10-01 실측).
+        # 74MP 캐릭터 시트를 1MP 로 줄이면 패널 안 사람이 너무 작아 33점을 못 찾는데,
+        # 6MP 로 올리면 다른 시트가 실패한다 — 상한값에 단조가 없어 숫자로 못 잡는다.
+        # 그래서 '보통은 싼 값, 못 잡았을 때만 큰 값' 으로 판정을 직접 지킨다.
+        try:
+            _lh = int(latent.shape[-2])
+            _lw = int(latent.shape[-1])
+            if _lh * _lw * 64 > _DECODE_MAX_PIXELS:
+                u8 = (_np.clip(arr, 0.0, 1.0) * 255.0).astype(_np.uint8)
+                if not _pose_landmarks_from_tasks(u8):
+                    _release_vram()
+                    with _t.no_grad():
+                        img = _decode_capped(vae, latent,
+                                             max_pixels=_DECODE_RETRY_PIXELS)
+                    if hasattr(img, "detach"):
+                        img = img.detach().cpu()
+                    arr2 = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
+                    arr2 = _as_rgb_hwc(_np.asarray(arr2, dtype=_np.float32))
+                    if arr2 is not None:
+                        arr = arr2
+        except Exception as _e:
+            _note_retry_error(_e)
         if cache is not None:
             cache[key] = arr
         return arr
@@ -139,13 +502,68 @@ def _decode_latent_rgb(vae, latent, cache=None):
 _TASKS_LANDMARKER = []
 _POSE_NOTED = False
 
+# 손 세션 캐시. 포즈와 같은 1원소 리스트 방식 (재바인딩 없이 변이로 유지).
+# 왜(Why) 같은 방식인가: `_TASKS_LANDMARKER` 가 이미 검증된 패턴이다.
+# `global` 없이도 동작하고, 테스트가 stub 으로 교체할 수 있다.
+_TASKS_HANDMARKER = []
+_HAND_NOTED = False
+
+# 인체 마스크 감쇠 반경 = 랜드마크 bbox 긴 변의 몇 배인가.
+# 왜(Why) 0.30 인가 (2026-09-30 실측 스윕): 뼈대 중심에서 0.30x체격 거리에서
+# 가중치가 0 이 된다. 실측(인물 옆차 실물 생성본) 결과 —
+#   0.60: 인물 0.86 / 배경 0.57 (구분 안 됨)
+#   0.30: 인물 0.75 / 배경 0.31 (3배 대비, 화면 38% 배제)  <- 채택
+#   0.25: 인물 0.65 / 배경 0.16 (배경은 더 좋은데 인물 팔끝까지 잘릴 위험)
+_MASK_FALLOFF = 0.30
+
+# 감쇠 반경의 바닥/천장(정규화 좌표). landmark 가 몰리거나 사람이 화면을 꽉
+# 채울 때 마스크가 한 점으로 수축하거나 배경을 삼키는 것을 막는다.
+# 자세한 사유는 `_person_mask_from_rgb` 참고.
+_MASK_FALLOFF_MIN = 0.15
+_MASK_FALLOFF_MAX = 0.75
+
+# 인체 마스크 이진화 임계. _MASK_FALLOFF 스윕과 같은 실측에서 같이 정했다.
+_MASK_MIN_WEIGHT = 0.35
+
+# VAE 디코드 해상도 상한(픽셀). 카메라 노드의 QWEN_REF_MAX_PIXELS 와 같은 숫자를
+# 쓴다 — 두 노드가 한 규칙을 공유해야 나중에 한쪽만 올려도 헷갈리지 않는다.
+# 왜(Why) 필요한가 (2026-10-01 실측): RTX 3080 10GB 에 QwenImage21 이 6.9GB 로
+# 올라간 상태에서 1056x1888(2MP) latent 를 통째로 디코드하니 멈췄다. 디코드는
+# 픽셀 수에 비례해 활성 메모리를 먹는다. **해상도만** 줄이고 비율은 유지하므로
+# 마스크(람간 해상도로 보간)·에지 맵(16x16)·부위 판정은 semantics 가 그대로다.
+_DECODE_MAX_PIXELS = 1024 * 1024
+
+# 포즈 검출이 상한 때문에 실패했을 때만 올려 재시도하는 해상도 (2026-10-01 실측).
+# 왜(Why) 상한값 하나로 안 되는가: 74MP 캐릭터 시트를 1MP 로 줄이면 패널 안의
+# 사람이 너무 작아져 mediapipe 가 33점을 통째로 못 찾는다(13장 중 1장 포즈 소실).
+# 반대로 6MP 로 올리면 다른 시트가 다시 실패한다 — 상한값에 단조성이 없다.
+# 그래서 판정을 직접 지키는 쪽이 낫다: 보통은 1MP 로 싼 디코드로 끝내고,
+# **포즈가 안 잡혔을 때만** 한 번 더 크게 디코드한다.
+_DECODE_RETRY_PIXELS = 4 * 1024 * 1024
+
+# 시트를 통째로 당겼을 때 강도를 얼마나 낮출까 (2단계).
+# 왜(Why) 0.5 인가: 시트의 여러 뷰를 한 장의 latent 로 읽으면 신원 신호가
+# **평균나고**, 그 평균은 카메라 노드가 텍스트로 못 막는 실패다. 그래도 절반은
+# 남긴다 — 시트의 여하 시점/각도 정보가 완전히 버려지는 것도 손실이기 때문.
+_SHEET_DAMP = 0.5
 
 # 관절 33점 모델 파일명. 이 노드와 함께 배포된다(Apache 2.0, Google MediaPipe).
 _POSE_MODEL_FILENAME = "pose_landmarker_lite.task"
 
+# 손 21점 모델 파일명. 이 노드와 함께 배포된다(Apache 2.0, Google MediaPipe).
+# 왜(Why) 손 모델이 따로 필요한가 (2026-10-02): 포즈 33점은 손가락 끝 3점
+# (새끼·검지·엄지)만 준다. 손가락 개수(5개)와 분리·뭉개짐을 판정하려면
+# 손마다 21점이 필요하다. 포즈 모델은 손이 3개여도 33점 틀에 맞추고 끝이라
+# 여분을 셀 수 없다. 손 모델은 손마다 21점을 돌려주므로 개수를 센다.
+_HAND_MODEL_FILENAME = "hand_landmarker.task"
+
 
 def _pose_model_path():
-    """Return the .task model path to use, or None.
+    """사용할 .task 모델 경로 문자열을 돌려준다 (항상 str, None 아님).
+
+    호출부의 `is None` 검사는 방어용이다 — 지금은 도달하지 않는다.
+    파일이 실제로 없으면 `PoseLandmarker` 생성 시점에 예외가 나고,
+    그건 조용한 실패가 아니라 그 자리에서 드러나는 실패다(의도).
 
     (왜) 이게 없다면 관절 33점 이 꺼진다. 구 `mediapipe.solutions` API 는 Windows
     배포판에 없고(0.10.33 / 1.0.1 휠에 `mediapipe/python/` 항목 0개),
@@ -172,6 +590,43 @@ def _pose_model_path():
                           _POSE_MODEL_FILENAME)
 
 
+def _hand_model_path():
+    """사용할 손 .task 모델 경로 문자열을 돌려준다 (항상 str, None 아님).
+
+    왜(Why) 환경변수가 먼저인가: 포즈와 같은 규칙. `GORI_HAND_MODEL` 로
+    다른 손 모델을 쓸 수 있고, 동봉본이 기본이다.
+    """
+    import os as _os
+    env = _os.environ.get("GORI_HAND_MODEL")
+    if env:
+        return env
+    return _os.path.join(_os.path.dirname(_os.path.realpath(__file__)),
+                          _HAND_MODEL_FILENAME)
+
+
+def _find_base_options():
+    """mediapipe 의 BaseOptions 를 어디서든 찾아온다. 없으면 None.
+
+    왜(Why) 탐색하나 (2026-10-01 실측): `BaseOptions` 의 위치가 버전마다
+    다르다. 0.10.33 은 `mediapipe.tasks.python.core.base_options` 에만 있고,
+    `mediapipe.tasks` 와 `mediapipe.tasks.python.vision` 에는 **없다**. 경로를
+    하나 박아두면 다른 버전 사용자에게서 포즈가 조용히 통째로 꺼진다 — 그게
+    실제로 일어난 바이다(ImportError → landmarker 미생성 → 픽셀 분석 전체 사망).
+    순서대로 시도하고, 없으면 None 을 돌려 호출부가 로그를 남긴다.
+    """
+    for _path in ("mediapipe.tasks.python.core.base_options",
+                  "mediapipe.tasks.python.vision.core.base_options",
+                  "mediapipe.tasks.core.base_options"):
+        try:
+            _mod = _importlib.import_module(_path)
+            _bo = getattr(_mod, "BaseOptions", None)
+            if _bo is not None:
+                return _bo
+        except Exception:
+            continue
+    return None
+
+
 def _pose_landmarker():
     """mediapipe tasks PoseLandmarker 세션. 실패하면 None.
 
@@ -183,14 +638,38 @@ def _pose_landmarker():
     if model is None:
         return None
     try:
-        import mediapipe as _mp
         from mediapipe.tasks.python import vision as _vision
+        # 왜(Why) 여기서 가져오나 (2026-09-30 실측):
+        # `mediapipe.tasks.BaseOptions` 는 0.10.33 의 tasks/__init__.py 에 없다
+        # (ImportError). 그래서 landmarker 가 한 번도 만들어지지 않았고,
+        # _part_detail_map 이 None 을 돌려주면서 그 아래 픽셀 공간 부위 분석
+        # (detail_boost / _apply_region_strength) 이 통째로 죽었다. 단위
+        # 테스트 223 건이 포즈 세션을 stub 으로 주입해서 이 경로를 검증하지
+        # 못한 탓이다. 정답은 긴 드이 아니라 그 안의 모듈 — landmarker 0.08초 생성, 33점
+        # 검출까지 확인했다.
+        _BaseOptions = _find_base_options()
+        if _BaseOptions is None:
+            # 왜(Why) 여기서 알리나 (2026-10-02): mediapipe.tasks 가 없으면
+            # 아래 `_BaseOptions(...)` 에서 TypeError 가 나고 `_note_pose_error` 로
+            # 잡힌다. 그런데 그건 "동작 중 실패" 로그지 "기능 꺼짐" 안내가 아니다.
+            # macOS(휠 없음) 사용자는 포즈 기능이 통째로 꺼진 줄 모른다.
+            # `_note_pose_unavailable` 은 그 안내인데 호출부가 dead 분기 안에
+            # 있어서 영영 안 불렸다. 진짜 "없음" 조건인 여기에 둔다.
+            _note_pose_unavailable()
+            return None
         options = _vision.PoseLandmarkerOptions(
-            base_options=_mp.tasks.BaseOptions(model_asset_path=model),
+            base_options=_BaseOptions(model_asset_path=model),
             running_mode=_vision.RunningMode.IMAGE,
             num_poses=1,
             min_pose_detection_confidence=0.5,
-            output_segmentation_masks=True)
+            # 왜(Why) False 로 고정하나 (2026-09-30 실측): True 로 세면
+            # mediapipe 0.10.33 가 내부 ROI 마스크를 만들다가 **네이티브
+            # SIGABRT** 로 죽는다(image_frame.cc "Check failed: 1 ==
+            # ChannelSize()"). SIGABRT 는 try/except 로 못 잡아 ComfyUI 서버
+            # 전체가 죽는다. 입력으로 막는 시도 3가지는 전부 실패했다(입력
+            # 홀짝 판정 / 512px 축소 / 정사각 패딩). 인체 마스크는 이 세션이
+            # 아니라 33점 포즈에서 직접 만든다(`_person_mask_from_rgb`).
+            output_segmentation_masks=False)
         lm = _vision.PoseLandmarker.create_from_options(options)
     except Exception as _e:
         _note_pose_error('_pose_landmarker', _e)
@@ -199,50 +678,205 @@ def _pose_landmarker():
     return lm
 
 
-def _pose_landmarks_from_tasks(u8):
-    """uint8 HWC RGB -> 33 (x, y). 모델/검출이 없으면 None."""
+_HAND_MAX = 4
+_HAND_MIN_CONF = 0.3
+
+
+def _hand_landmarker():
+    """mediapipe tasks HandLandmarker 세션. 실패하면 None.
+
+    왜(Why) 포즈와 같은 1원소 리스트인가: 검증된 패턴을 따른다.
+    왜(Why) num_hands=4 인가: 2개가 정상이고 3개 이상이 비정상이다.
+    2개까지만 보면 3번째 손을 못 센다. 4개까지 봐야 여분을 잡는다.
+    왜(Why) 임계 0.3 인가: 포즈의 0.3 재시도와 같은 실측 근거 (13장 중
+    사람 있는 것은 0.3 에서 잡힌다). 손은 더 작아서 0.5 로 올리면 놓친다.
+    """
+    if _TASKS_HANDMARKER:
+        return _TASKS_HANDMARKER[0]
+    model = _hand_model_path()
+    try:
+        from mediapipe.tasks.python import vision as _vision
+        _BaseOptions = _find_base_options()
+        if _BaseOptions is None:
+            _note_hand_unavailable()
+            return None
+        options = _vision.HandLandmarkerOptions(
+            base_options=_BaseOptions(model_asset_path=model),
+            running_mode=_vision.RunningMode.IMAGE,
+            num_hands=_HAND_MAX,
+            min_hand_detection_confidence=_HAND_MIN_CONF,
+            min_hand_presence_confidence=_HAND_MIN_CONF,
+            min_tracking_confidence=_HAND_MIN_CONF)
+        lm = _vision.HandLandmarker.create_from_options(options)
+    except Exception as _e:
+        _note_pose_error('_hand_landmarker', _e)
+        return None
+    _TASKS_HANDMARKER.append(lm)
+    return lm
+
+
+def _note_hand_unavailable():
+    """손 모델 없음을 한 번만 알린다 (조용한 실패 금지)."""
+    global _HAND_NOTED
+    if _HAND_NOTED:
+        return
+    _HAND_NOTED = True
+    _log("[GoRi Consistency Keeper] 손가락 판정이 꺼져 있다. "
+         "mediapipe tasks 의 " + _HAND_MODEL_FILENAME + " 을 못 읽는다. "
+         "설치 폴더에 파일이 있는지, 또는 GORI_HAND_MODEL 환경변수 경로가 "
+         "맞는지 확인해 주세요. 포즈 기반 판정은 계속 동작한다.")
+
+
+def _hand_landmarks_from_tasks(u8):
+    """uint8 HWC RGB → 손마다 21점 리스트. 실패하면 None.
+
+    반환: [[(x, y, handedness), ... 21점], ... 손 개수만큼].
+    handedness 는 Left 또는 Right 문자열 (MediaPipe 기준, 거울상 주의).
+    """
+    try:
+        import numpy as _np
+    except Exception:
+        return None
+    hl = _hand_landmarker()
+    if hl is None:
+        return None
+    try:
+        import mediapipe as _mp
+        a = _np.ascontiguousarray(_np.asarray(u8, dtype=_np.uint8))
+        if a.ndim != 3 or a.shape[2] != 3:
+            return None
+        # 왜(Why) 직접 자르지 않고 _even_rgb 를 쓰나: 수동 trim 은 <2px 가드를
+        # 빼먹는다. 1px 입력이 0행/0열 배열이 되어 네이티브 SIGABRT 경로로 간다 —
+        # _even_rgb 가 막기 위해 만들어진 바로 그 죽음이다. 같은 파일 헬퍼를 쓴다.
+        a = _even_rgb(a)
+        if a is None:
+            return None
+        img = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=a)
+        res = hl.detect(img)
+        groups = getattr(res, "hand_landmarks", None)
+        if not groups:
+            return None
+        out = []
+        for gi, g in enumerate(groups):
+            hn = None
+            try:
+                hn = res.handedness[gi][0].category_name
+            except Exception:
+                pass
+            pts = []
+            for lm in g:
+                pts.append((float(lm.x), float(lm.y), hn))
+            if len(pts) == 21:
+                out.append(pts)
+        return out or None
+    except Exception as _e:
+        _note_pose_error('_hand_landmarks', _e)
+        return None
+
+
+def _even_rgb(u8):
+    """mediapipe 에 넣을 RGB 배열(짝수 치수). 실패하면 None.
+
+    왜(Why) 짝수로 잘라내나 (2026-09-30 실측, **프로세스 죽음** 버그):
+    홀수 높이/너비 이미지는 mediapipe 0.10.33 내부 계산에서 깨질 수 있다.
+    SIGABRT 는 try/except 로 못 잡으므로 아래 except 로는 "안전"이 되지 않고
+    그저 흉내만 낸다 — 실제로는 ComfyUI 서버 전체가 죽는다. 그래서 방어는
+    **호출 전**에 한다. 소비자는 결과(마스크/랜드마크)를 latent 해상도로
+    보간하므로 ±1px 는 무의미하다.
+    """
+    try:
+        import numpy as _np
+        arr = _np.asarray(u8)
+        # 왜(Why) 2 미만은 여기서 막나 (2026-10-01 무결성 실측): 0x0 과 1x1 은
+        # "짝수면 통과" 조건을 만족해 mediapipe 까지 들어가고, 거기서 네이티브로
+        # RET_CHECK 실패(roi->width > 0 && roi->height > 0)를 낸다. 프로세스는
+        # 안 죽지만 어떤 환경에선 치명적이다. mediapipe 를 부르기 **전**에 끊는다.
+        if arr.ndim < 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+            return None
+        if (arr.shape[0] % 2) or (arr.shape[1] % 2):
+            arr = arr[:arr.shape[0] - (arr.shape[0] % 2),
+                     :arr.shape[1] - (arr.shape[1] % 2)]
+        return _np.ascontiguousarray(arr)
+    except Exception:
+        return None
+
+
+def _pose_landmarks_from_tasks(u8, with_visibility=False):
+    """uint8 HWC RGB -> 33 (x, y). 모델/검출이 없으면 None.
+
+    왜(Why) with_visibility 인자가 있나 (2026-10-01): 판정층(work_status 10절)은
+    **관절이 보이는지** 를 알아야 하는데 이 함수는 좌표만 버리고 visibility 를
+    흘려보내고 있었다. 판정층을 위해 landmark 를 **두 번째로 검출**하면 프레임마다
+    mediapipe 가 한 번 더 돈다 — `new_vae_decode_in_per_frame_path` 와 같은 종류의
+    낭비다. 그래서 한 번의 검출 결과를 두 형태로 읽게 한다.
+
+    기본값이 False 라 기존 호출자(`_person_mask_from_rgb`, `subject_bbox`,
+    `_pose_landmarks`) 는 **똑같이 2-튜플**을 받는다. 그대로 둔다.
+    """
     lm = _pose_landmarker()
     if lm is None:
         return None
     try:
         import mediapipe as _mp
-        import numpy as _np
-        img = _mp.Image(image_format=_mp.ImageFormat.SRGB,
-                       data=_np.ascontiguousarray(u8))
+        arr = _even_rgb(u8)
+        if arr is None:
+            return None
+        img = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=arr)
         res = lm.detect(img)
         groups = getattr(res, "pose_landmarks", None)
         if not groups:
-            return None
+            # 왜(Why) 여기서 한 번 더 시도하나 (2026-10-01 실측): 기본 세션의
+            # `min_pose_detection_confidence=0.5` 가 **사람 있는 시트**를 놓쳤다.
+            # 13장 실측에서 0.5 는 9/13, 0.3 은 12/13 이었다. 놓친 한 장은
+            # 흰 배경 시트(캐릭터 시트1)인데 흰 배경 **의상 제품 사진** 3장은
+            # 0.3 에서도 0 이다. 즉 0.3 재시도는 "사람 있는데 놓친 것" 과
+            # "사람이 아예 없는 것" 을 **구별해 주는** 신호가 된다.
+            # 그냥 0.5 에서 놓치면 게이트가 조용히 통과해 버린다.
+            res = _pose_retry_low_conf(arr, _mp)
+            groups = getattr(res, "pose_landmarks", None)
+            if not groups:
+                return None
         pts = groups[0]
         if len(pts) < 33:
             return None
-        return [(float(p.x), float(p.y)) for p in pts[:33]]
+        if not with_visibility:
+            return [(float(p.x), float(p.y)) for p in pts[:33]]
+        out = []
+        for p in pts[:33]:
+            # visibility 는 landmark 마다 없을 수 있다. 없는 것은 0.0 이다 —
+            # 판정층이 "관측 불가"와 "관측됐으나 흐림"을 구분할 수 있어야 하는데,
+            # 두 값이 합쳐져도 게이트 결과는 같으므로 한 값으로 읽어도 무방하다.
+            vis = getattr(p, "visibility", None)
+            out.append((float(p.x), float(p.y),
+                        float(vis) if vis is not None else 0.0))
+        return out
     except Exception as _e:
         _note_pose_error('_pose_landmarks_from_tasks', _e)
         return None
 
 
-def _segmentation_from_tasks(u8):
-    """uint8 HWC RGB -> (H, W) float 마스크. 모델/분할이 없으면 None."""
-    lm = _pose_landmarker()
-    if lm is None:
-        return None
-    try:
-        import mediapipe as _mp
-        import numpy as _np
-        img = _mp.Image(image_format=_mp.ImageFormat.SRGB,
-                       data=_np.ascontiguousarray(u8))
-        res = lm.detect(img)
-        masks = getattr(res, "segmentation_masks", None)
-        if not masks:
-            return None
-        return _np.asarray(masks[0].numpy_view(), dtype=_np.float32)
-    except Exception as _e:
-        _note_pose_error('_segmentation_from_tasks', _e)
-        return None
-
-
 _POSE_ERR_NOTED = False
+# 왜(Why) 손 에러도 이 플래그를 쓰나: `_note_pose_error` 가 포즈·손을 구분하지
+# 않고 한 번만 말한다. 먼저 난 에러가 나중 에러를 가린다. 분리하면 로그가
+# 늘고 테스트의 "1회" 단언이 깨진다. 구분이 필요해지면 where 를 키에 넣는다.
+
+
+_DECODE_RETRY_NOTED = False
+
+
+def _note_retry_error(exc):
+    """상한 재시도 디코드가 실패한 이유를 한 번만 알린다 (조용한 실패 금지).
+
+    재시도는 '있으면 더 좋고 없어도 동작하는' 개선이라 실패해도 상한본으로
+    진행한다. 하지만 조용히 삼키면 포즈를 못 잡은 이유를 사용자가 알 수 없다.
+    """
+    global _DECODE_RETRY_NOTED
+    if _DECODE_RETRY_NOTED:
+        return
+    _DECODE_RETRY_NOTED = True
+    _log("[GoRi Consistency Keeper] 포즈가 안 잡혀 상한을 올려 다시 디코드했지만 "
+         "실패했다. 해상도를 낮춘 상태로 진행한다: "
+         + type(exc).__name__ + ": " + str(exc))
 
 
 def _note_pose_error(where, exc):
@@ -270,7 +904,70 @@ def _note_pose_unavailable():
          "맞는지 확인해 주세요. 인물 위치만 쓰는 강도 조절은 계속 동작한다.")
 
 
-_POSE_NOTED = False
+def _person_mask_from_rgb(u8):
+    """uint8 HWC RGB -> (H, W) float 인물 마스크(0~1). 사람 없으면 None.
+
+    왜(Why) mediapipe 세그멘테이션을 안 쓰는가 (2026-09-30 실측):
+    `output_segmentation_masks=True` 는 mediapipe 0.10.33 에서 **네이티브
+    SIGABRT** 로 프로세스를 죽인다 —
+        image_frame.cc:415] Check failed: 1 == ChannelSize() (1 vs. 4)
+    SIGABRT 는 try/except 로 못 잡으므로 그저 "안전"인 척할 뿐, 실제로는
+    ComfyUI 서버 전체가 죽는다. 입력으로 막는 시도 3가지는 **전부 실패**했다
+    (2026-09-30 실측): 입력 홀수/짝수 판정(짝수 1814x1244 도 죽음), 512px
+    축소(896x1152 죽음), 정사각 패딩(1814x1243 죽음). 즉 내부 ROI 계산에 의존
+    하는 크래시라 **크기 기반 방어가 불가능**하다.
+
+    왜(Why) 33점으로 충분한가: 이 마스크는 "인물이 어디 있나" 라는 **부드러운
+    공간 가중치**로만 쓰인다(`_person_mask_for_latent` → interpolate →
+    avg_pool2d). 정밀 윤곽이 아니라면 뼈대를 따라 부드럽게 감쇠하는 것만으로
+    같은 역할을 한다. 게다가 이 노드가 노리는 게 포즈·해부 일관성이므로
+    포즈에서 만든 마스크가 더 일관되고, 전체 해상도라 축소 손실도 없다.
+    """
+    try:
+        import numpy as _np
+        pts = _pose_landmarks_from_tasks(u8)
+        if not pts:
+            return None
+        arr = _np.asarray(u8)
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        if h < 2 or w < 2:
+            return None
+        ys, xs = _np.mgrid[0:h, 0:w]
+        xs = (xs + 0.5) / float(w)
+        ys = (ys + 0.5) / float(h)
+        best = None
+        for (px, py) in pts[:33]:
+            d = (xs - float(px)) ** 2 + (ys - float(py)) ** 2
+            best = d if best is None else _np.minimum(best, d)
+        dist = _np.sqrt(best)
+        # 왜(Why) 반경을 **체격**으로 재나 (2026-09-30 실측): 처음엔 이미지 최대
+        # 거리로 정규화했다. 그 결과 배경까지 전부 0.5~0.7 을 받아 마스크가
+        # 99.9% 를 덮었고 "인물 영역만 당김" 이 사실상 동작하지 않았다
+        # (실측 cover=0.999). 뼈대 주변에만 가중치를 주려면 감쇠 거리가 **몸집
+        # 크기** 기준이어야 한다 — 랜드마크 bbox 의 긴 변을 쓴다.
+        box = subject_bbox(pts)
+        if box is None:
+            return None
+        body = max(box[2] - box[0], box[3] - box[1])
+        r = _MASK_FALLOFF * float(body)
+        # 왜(Why) 바닥/천장이 필요한가: bbox 만 믿으면 양쪽 끝에서 깨진다.
+        # ① 랜드마크가 몇 점에 몰리면 bbox->0 이 되어 마스크가 한 점으로
+        # 수축한다. ② 사람이 화면을 꽉 차면 bbox->1 이 되어 배경을 삼킨다.
+        r = min(max(r, _MASK_FALLOFF_MIN), _MASK_FALLOFF_MAX)
+        if r <= 0.0:
+            return None
+        mask = _np.clip(1.0 - dist / r, 0.0, 1.0)
+        return mask.astype(_np.float32)
+    except Exception as _e:
+        # 왜(Why) 넓은 except 를 쓰면서 반드시 로그를 남기나 (Jev 게이트
+        # exception_swallowing_silent_none P=0.86): 이 노드가 픽셀 공간 분석
+        # 은 예외를 삼키고 None 을 돌려주는 것이 설계다(프레임마다 죽이면
+        # 노드가 못 쓴다). 그런데 **로그가 없으면** "조용히 꺼진 것" 과
+        # "조용히 실패한 것" 이 구분되지 않는다 — 실제로 이 경로는 3개 버그
+        # (import 경로 / SIGABRT / 디코드 레이아웃)를 한참 숨겼다. 넓게 잡되
+        # 반드시 한 번 말한다.
+        _note_pose_error('_person_mask_from_rgb', _e)
+        return None
 
 
 def _person_mask_for_latent(vae, sampled, cache=None):
@@ -298,10 +995,14 @@ def _person_mask_for_latent(vae, sampled, cache=None):
         if arr is None:
             return None
         u8 = (_np.clip(arr, 0.0, 1.0) * 255.0).astype(_np.uint8)
-        seg = _segmentation_from_tasks(u8)
+        seg = _person_mask_from_rgb(u8)
         if seg is None or seg.max() <= 0.01:
             return None
-        mask = (seg > 0.5).astype(_np.float32)
+        # 왜(Why) 임계 0.35 인가 (2026-09-30 실측): 감쇠 마스크를 그대로 쓰면
+        # 배경에도 0.2~0.4 가 남아 "인물 영역만" 이라는 목적이 흐려진다(실측
+        # 배경 평균 0.31). 0.35 로 이진화하면 인물 0.95 / 배경 0.31 로 갈리고
+        # 화면의 38%가 완전히 빠진다. 그 뒤 보간+avg_pool 으로 다시 부드럽게.
+        mask = (seg > _MASK_MIN_WEIGHT).astype(_np.float32)
         m = _t.from_numpy(mask[None, None]).to(
             device=sampled.device, dtype=sampled.dtype)
         _, _, lh, lw = sampled.shape
@@ -317,8 +1018,31 @@ def _person_mask_for_latent(vae, sampled, cache=None):
         return None
 
 
-def _edge_map_from_rgb(arr) -> "object | None":
-    """RGB 배열(H,W,3) → 16x16 에지 밀도 맵. 실패 시 None."""
+_ONCE_SEEN = set()
+
+
+def _note_once(key, msg):
+    """같은 키의 메시지를 **한 번만** 말한다.
+
+    왜(Why) 이게 필요한가: 조용한 실패가 오늘 하루에 세 번(import 실패,
+    구문 오류, 잘못된 디코더) 진단을 가로막았다. 그런데`_local_edge` 는
+    landmark 33개마다 불려서 그냥 로그를 남기면 스팸이 된다. 한 번만.
+    """
+    if key in _ONCE_SEEN:
+        return
+    _ONCE_SEEN.add(key)
+    _log(msg)
+
+
+def _edge_mag_from_rgb(arr) -> "object | None":
+    """RGB 배열(H,W,3) → **전체 해상도** 정규화 에지 크기(H,W). 실패 시 None.
+
+    왜(Why) 이걸 분리했나 (2026-10-01 실측): landmark 별 에지를 재는데
+    16×16 격자 셀을 썼더니 손·다리 landmark 가 대부분 `0` 이 나왔다.
+    셀 하나가 96×64 픽셀의 **평균**이라 매끈한 피부에서는 0 이 되는 게 당연하다.
+    그래서 `detail_boost` 가 부위 하나도 못 골랐다. 평균 대신 **로컬 창**으로
+    재야 landmark 가 서 있는 자리를 본다.
+    """
     try:
         import numpy as _np
         import torch as _t
@@ -342,20 +1066,86 @@ def _edge_map_from_rgb(arr) -> "object | None":
         # "디테일 최대"로 읽힌다 → detail_boost 가 전부 반대로 동작한다.
         # 실측: 64x64 평탄 이미지 값 0.5→0.0 / 0.45→1.0 (반전).
         # 해결: 노이즈 바닥을 **입력 대비 상대값**으로 잡는다.
-        # 노이즈는 입력 변동이 아니라 **상쇄 오차**다: 커널 합이 0이라
-        # 수학적으로는 0 이어야 하지만 float32 반올림 오차가 값에 비례해
-        # 남는다(0.45 기준 실측 3e-7 > 기존 임계 1e-8).
         _floor = 1e-5 * (float(lum.mean()) + 1e-3)
         if mx <= max(1e-8, _floor):
             # 완전 평탄 이미지: 에지가 "0"이지 "None"이 아니다. 뭉개진 이미지도
             # 여기에 해당한다. None을 돌려주면 부위 비교가 불가능해져
             # "뭉개진 부위"를 판정할 수 없게 된다(실측에서 확인).
-            return _np.zeros((16, 16), dtype=_np.float32)
-        mag = mag / mx
+            return _np.zeros_like(mag)
+        # 왜(Why) 최대값이 아니라 **상위 0.5% 의 평균**인가 (2026-10-01 실측):
+        # 강도별 곡선이 단조가 아니었다(0.15 ≈ 0.30 ≫ 0.60). 원인은 여기다.
+        # 0.60 결과에 강한 에지 하나(아티팩트)가 생기면 `mx` 가 뛰고 **나머지
+        # 픽셀 전체가 눌린다** — 지표가 단일 픽셀 스파이크에 지배되는 셈이다.
+        # 상위 0.5% 의 평균은 그런 스파이크에 거의 흔들리지 않으면서도 진짜
+        # 에지에는 반응한다. 비교 대상인 두 이미지 사이의 **척도**가 같아진다.
+        _k = max(1, int(mag.size * 0.005))
+        _ref = float(_np.partition(mag.ravel(), -_k)[-_k:].mean())
+        if not (_ref > 0.0):
+            _ref = mx
+        return mag / _ref
+    except Exception as e:
+        # 왜(Why) 조용히 두지 않나: 실패하면 **부위 비교가 전부 무의미**해진다.
+        # 아무 말 없이 None 이면 "상향할 곳 없음" 과 "재지를 못 읽음" 이 구분되지
+        # 않는다(2026-10-01 실제로 한 번 헤맸다).
+        _note_once("edge_mag", f"[GoRi Consistency Keeper] ⚠ 에지 맵 계산 실패 "
+                               f"({type(e).__name__}: {str(e)[:80]})")
+        return None
+
+
+def _edge_map_from_rgb(arr) -> "object | None":
+    """RGB 배열(H,W,3) → 16x16 에지 밀도 맵. 실패 시 None.
+
+    전역 비교용이다. landmark 별 국소 에지는 `_local_edge` 를 쓴다 — 여기서
+    셀 평균을 받으면 매끈한 부위에서 0 이 된다(2026-10-01 실측).
+    """
+    try:
+        import torch as _t
+        import torch.nn.functional as _f
+        mag = _edge_mag_from_rgb(arr)
+        if mag is None:
+            return None
         small = _f.adaptive_avg_pool2d(_t.from_numpy(mag[None, None]), 16)
         return small[0, 0].numpy()
-    except Exception:
+    except Exception as e:
+        # 왜(Why) 조용히 두지 않나: 안쪽 실패는 이미 한 번 말한다. 여기가 조용하면
+        # "풀링만 실패" 와 "에지 자체가 없음" 이 구분되지 않는다.
+        _note_once("edge_map", f"[GoRi Consistency Keeper] ⚠ 16x16 에지 맵 만들기 실패 "
+                               f"({type(e).__name__}: {str(e)[:80]})")
         return None
+
+
+def _local_edge(mag, fx, fy, frac=0.05):
+    """전체 해상도 에지맵에서 landmark 주변 창 평균. 실패 시 0.0.
+
+    frac 은 **이미지 크기에 대한 비율**이다. 원본과 결과물의 해상도가 다를 수
+    있으므로(예 1544x1019 vs 1360x768) 픽셀 수로 잡으면 비교가 **척도**를 타서
+    공정한 비교가 아니다.
+    """
+    try:
+        import numpy as _np
+        m = _np.asarray(mag)
+        if m.ndim != 2:
+            return 0.0
+        h, w = m.shape
+        win = int(frac * min(h, w))
+        if win < 1:
+            return 0.0
+        cx = int(fx * w)
+        cy = int(fy * h)
+        x0 = max(0, cx - win)
+        x1 = min(w, cx + win)
+        y0 = max(0, cy - win)
+        y1 = min(h, cy + win)
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        return float(m[y0:y1, x0:x1].mean())
+    except Exception as e:
+        # 왜(Why) 조용히 두지 않나: 0.0 은 "평평해서 0" 과 "계산 실패" 의
+        # **같은 값**이다. 구분하지 못하면 뭐가 진짜인지 알 수 없다.
+        _note_once("local_edge", f"[GoRi Consistency Keeper] ⚠ landmark 주변 "
+                                f"에지 계산 실패 ({type(e).__name__}: "
+                                f"{str(e)[:80]}) — 0 으로 대체")
+        return 0.0
 
 
 # 2026-09-28 정밀 검토: 여기 있던 `_edge_map(latent, vae)`는 **호출이 0건**인
@@ -382,7 +1172,6 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
     """
     try:
         import numpy as _np
-        import torch as _t
     except Exception:
         return None
     if _pose_landmarker() is None:
@@ -390,31 +1179,76 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
     if vae is None or not latents:
         return None
     out = {}
+    # 왜(Why) `_POSE_WHY` 를 남기나 (2026-10-01): 예전엔 `if not pts3: continue`
+    # 뿐이었다. 그러면 **사람이 없는 사진**과 **탐지 실패**와 **이미지가 부적합**
+    # 이 셋이 구분되지 않았다. 실측에서 `의상 교체1~3`(사람 없는 제품 사진) 이
+    # 0점이라 "탐지 실패처럼" 보였고, 그 결과 판정 게이트가 조용히 제한 없이
+    # 진행했다. 게이트를 켰는데 판정이 없다는 이유로 완전 통과하는 셈이다.
+    #
+    # 왜(Why) `global` 이 필수인가 (2026-10-01 실측): 이 선언이 없으면 아래
+    # 다섯 줄이 **함수 지역 dict** 를 채운다. 함수는 `out` 만 돌려주므로 그
+    # dict 는 버려지고, `run()` 이 읽는 모듈 수준 `_POSE_WHY` 는 영원히 비어
+    # 있어 게이트가 항상 "사유 기록 없음" 을 본다. 사슬이 조용히 끊기면
+    # `_pose_gate_message` 의 ⚠ 승격 경로도 영영 발동하지 않는다.
+    # 8d2fd86("Stop the trust gate from passing in silence") 의 목적이
+    # 정확히 이 경로였는데 `global` 한 줄로 무력화돼 있었다.
+    #
+    # 왜(Why) `_clear()` 가 아니라 키만 지우는가: 같은 dict 에 `_note_pose_why` 의
+    # 중복 방지용 `_said` 도 산다. 통째로 비우면 **매 프레임마다** "한 번만"
+    # 계약이 초기화되어 같은 사유가 스텝 수만큼 되풀이된다. 사유 키만 지운다.
+    global _POSE_WHY
+    for _k in [k for k in _POSE_WHY if k != "_said"]:
+        del _POSE_WHY[_k]
     for name, lat in latents.items():
         if lat is None:
             continue
         try:
             arr = _decode_latent_rgb(vae, lat, cache=cache)
             if arr is None:
+                _POSE_WHY[name] = "디코드 결과 없음"
                 continue
-            em = _edge_map_from_rgb(arr)
+            em = _edge_mag_from_rgb(arr)
             if em is None:
+                _POSE_WHY[name] = "에지 맵 계산 실패"
                 continue
             u8 = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
-            pts = _pose_landmarks_from_tasks(u8)
-            if not pts:
+            if _pose_landmarker() is None:
+                _POSE_WHY[name] = "포즈 모델 없음 (세션 생성 실패)"
+                continue
+            pts3 = _pose_landmarks_from_tasks(u8, with_visibility=True)
+            if not pts3:
+                # 왜(Why) "사람 없음" 과 "탐지 실패" 를 나눠 말하나 (2026-10-01
+                # 실측): 13 장을 재서 봤다. 임계 0.3 에서도 0 인 것은 **의상
+                # 제품 사진 3 장**(사람이 없다) 뿐이었고, 흰 배경 **시트**는
+                # 0.3 에서 전부 잡혔다. 즉 "0.5 에서도 0.3 에서도 0" 은 이
+                # 표본에서 "사람 없음" 을 뜻했다. 다만 이를 **단정**하지 않고
+                # 그대로 말해, 다른 원본에서 같은 로그가 나오면 Investigate
+                # 되도록 표기를 남긴다.
+                _POSE_WHY[name] = ("사람 미검출 (임계 0.3 재시도까지 실패) "
+                                   "— 제품 사진 등 사람이 없는 이미지일 수 있음, "
+                                   "탐지 문제면 이 문구가 반복된다")
                 continue
             edge = [0.0] * 33
             xy = []
-            for i, (px, py) in enumerate(pts[:33]):
+            for i, (px, py, pv) in enumerate(pts3[:33]):
+                # xy 는 **2-튜플 그대로** 둔다. `_apply_region_strength` 가
+                # `for (px, py) in xy` 로 엄격 언팩하므로 3-튜플을 넣으면 죽는다.
                 xy.append((px, py))
-                cx = min(15, max(0, int(px * 16)))
-                cy = min(15, max(0, int(py * 16)))
-                edge[i] = float(em[cy, cx])
-            out[name] = {"edge": edge, "xy": xy}
+                # 왜(Why) `_local_edge` 인가: 예전엔 16×16 격자 셀 평균을 썼고
+                # 손·다리에서 거의 0 이 나와 부위 하나도 못 골랐다(10-24 실측).
+                # 이제 landmark 주변 5% 창을 본다. 5% 는 손 크기쯤이다.
+                edge[i] = _local_edge(em, px, py)
+            # pts 는 판정층이 그대로 받는 3-튜플(좌표 + 가시성).
+            # 좌표를 다시 맞추는 자리(join)를 두지 않기 위해 원본을 함께 둔다.
+            out[name] = {"edge": edge, "xy": xy, "pts": list(pts3[:33])}
             del em, u8
-        except Exception:
+        except Exception as _e:
+            # 조용히 넘기지 않는다. 예외 종류를 남겨야 원인을 아는다.
+            _POSE_WHY[name] = "예외 %s: %s" % (type(_e).__name__, str(_e)[:60])
             continue
+    # 왜(Why) `_POSE_WHY` 를 남기나 (2026-10-01): `_part_detail_map` 는 None 을
+    # 돌려주는 쪽이라 **왜**를 잃는다. 호출부가 "사람이 없었다" 와 "탐지가
+    # 깨졌다" 를 구분할 수 없게 되고, 게이트가 조용히 무력화된다.
     return out or None
 
 
@@ -528,7 +1362,151 @@ DETAIL_CRITICAL = ("hand_left", "hand_right", "leg_left", "leg_right",
 
 
 
-def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35):
+_NO_BOOST_NOTED = False
+
+
+def _probe_detail_direction(vae, sampled, orig_ref, out):
+    """원본을 당겼을 때 디테일이 늘는지 줄는지 **재서** 말한다 (미해결 5-1).
+
+    왜(Why) 이게 먼저인가: 부위별 상향은 "원본은 살아있는데 결과가 뭉개졌다" 는
+    가정 위에 세워졌다. 그 가정이 **거짓이면** 설계 방향이 통째로 뒤집힌다.
+
+    왜(Why) 환경변수로 꺼는가 (2026-10-01): 항상 돌리면 프롬프트마다 디코딩
+    3회가 추가돼 **디코딩 예산 검사**(R56)가 깨진다. 계측 장치가 정작 제품
+    경로를 망가뜨릴 수는 없다. `GORI_PROBE_PHYSICS=1` 일 때만 돈다 — 측정
+    전용 계기다.
+    """
+    if vae is None:
+        return
+    # 이 파일은 모듈 임포트를 지역에서 한다(아래 함수들도 모두 그렇다).
+    import os as _os
+    if _os.environ.get("GORI_PROBE_PHYSICS", "0") != "1":
+        return
+    try:
+        def _dens(lat):
+            # 왜(Why) `_decode_latent_rgb` 인가 (2026-10-01): `_decode_capped`
+            # 는 **torch 텐서 (1,C,H,W)** 를 돌려준다. `_edge_map_from_rgb` 는
+            # numpy **HWC 배열**을 받는다. 다른 디코더를 썼다가
+            # `too many indices for tensor of dimension 4` 로Measurement가
+            # 조용히 실패했다. 이 함수가 RGB numpy 를 반환하는 계약이다.
+            arr = _decode_latent_rgb(vae, lat)
+            if arr is None:
+                raise RuntimeError("디코드 결과 없음")
+            em = _edge_map_from_rgb(arr)
+            if em is None:
+                raise RuntimeError("에지맵 없음")
+            return float(em.mean())
+        _s = _dens(sampled)
+        _r = _dens(orig_ref)
+        _o = _dens(out)
+    except Exception as e:
+        # 왜(Why) 예외를 말하나: 조용히 `return` 하니 "측정이 안 됐다" 와
+        # "측정 결과가 안 바뀌었다" 를 구분할 수가 없었다. 사흘 만에 두 번째다.
+        _log(f"[GoRi Consistency Keeper] 물리 방향 실측 실패 "
+             f"({type(e).__name__}: {str(e)[:90]}) — 판정 보류")
+        return
+    _d_out = (_o - _s) / _s * 100.0 if _s > 1e-9 else 0.0
+    _d_ref = (_o - _r) / _r * 100.0 if _r > 1e-9 else 0.0
+    _verdict = ("당기면 살아난다" if _d_out > 0 else "당기면 뭉개진다")
+    _log("[GoRi Consistency Keeper] 물리 방향 실측 "
+         f"시본 {_s:.4f} / 원본 {_r:.4f} / 결과 {_o:.4f} — "
+         f"결과는 시본 대비 {_d_out:+.1f}%, 원본 대비 {_d_ref:+.1f}% "
+         f"⇒ {_verdict}")
+
+
+_POSE_WHY = {}
+
+# 낮춘 임계값 세션. 0.5 세션이 놓친 **사람 있는** 이미지를 되찾기 위한 것.
+_POSE_LOOSE = [None]
+_POSE_LOOSE_CONF = 0.3
+
+
+def _pose_retry_low_conf(arr, _mp):
+    """임계값 0.3 세션으로 한 번 더 시도한다 (13장 실측 기반).
+
+    왜(Why) 별도 세션인가: `min_pose_detection_confidence` 는 **생성 시점**에
+    고정된다. 세션을 새로 만들어야 한다. 한 번만 만들고 재사용한다.
+    """
+    try:
+        if _POSE_LOOSE[0] is None:
+            from mediapipe.tasks.python import vision as _V
+            _BO = _find_base_options()
+            if _BO is None:
+                # _pose_landmarker 와 같은 이유: 없으면 TypeError 가 나고
+                # transient error 로 잡힌다. 여기서도 꺼짐으로 알린다.
+                _note_pose_unavailable()
+                return None
+            _opts = _V.PoseLandmarkerOptions(
+                base_options=_BO(
+                    model_asset_path=_pose_model_path()),
+                running_mode=_V.RunningMode.IMAGE,
+                num_poses=1,
+                min_pose_detection_confidence=_POSE_LOOSE_CONF,
+                output_segmentation_masks=False)
+            _POSE_LOOSE[0] = _V.PoseLandmarker.create_from_options(_opts)
+        img = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=arr)
+        return _POSE_LOOSE[0].detect(img)
+    except Exception as e:
+        _note_pose_error('_pose_retry_low_conf', e)
+        return None
+
+
+def _pose_gate_message(why):
+    """판정 게이트가 landmark 를 못 얻은 사유 → 로그 한 줄.
+
+    왜(Why) 함수를 뺐나 (2026-10-01): 게이트 분기가 `run()` 안에서 인라인으로
+    로그를 만들었는데, 그 **메시지 내용**을 테스트할 방법이 없었다. 사유별
+    ⚠ 표시 규칙이 조용히 바뀌면 아무도 몰랐다. 함수로 빼면 규칙 자체를 고정한다.
+    """
+    severe = (why.startswith("포즈 모델 없음")
+              or why.startswith("디코드")
+              or why.startswith("에지")
+              or why.startswith("예외"))
+    tag = "⚠ " if severe else ""
+    return (f"[GoRi Consistency Keeper] {tag}판정 게이트: "
+            f"원본 landmark 없음 — {why}"
+            + ("" if severe else
+               " → 제한 없이 진행합니다(막을 부위 판단 근거 없음)"))
+
+
+def _note_pose_why(key, msg):
+    """포즈 실패 사유를 키마다 **한 번만** 말한다 (무음 실패 제거).
+
+    왜(Why) 한 번뿐인가: 같은 사유가 여러 노드에서 반복되면 로그를 읽을 수
+    없다. 하지만 **한 번도 안 나오면** 조용한 실패가 된다. 한 번이 정답이다.
+    """
+    _seen = _POSE_WHY.setdefault("_said", set())
+    if key in _seen:
+        return
+    _seen.add(key)
+    _log(msg)
+
+
+def _note_no_boost(worst, region, thresh, max_r=0.0, max_rg=""):
+    """부위별 상향이 없었던 이유를 **한 번만** 말한다 (조용한 무동작 방지)."""
+    global _NO_BOOST_NOTED
+    if _NO_BOOST_NOTED:
+        return
+    _NO_BOOST_NOTED = True
+    if not region:
+        if max_r <= 1e-6:
+            _log("[GoRi Consistency Keeper] 부위별 복원: 판단 불가 "
+                 f"(원본 에지 최대 {max_r:.5f} @{max_rg} — 임계 1e-6 미만)")
+        else:
+            # 왜(Why) 이 분기가 필요한가 (2026-10-01 실측): 에지는 있는데
+            # **손실이 0 이다** 는 전혀 다른 상태였다. 예전 코드는 둘을 같은
+            # "에지가 0" 문구로 뭉뚱그려서 한참 잘못된 방향을 봤다.
+            _log(f"[GoRi Consistency Keeper] 부위별 복원: 상향할 곳 없음 "
+                 f"(원본 에지는 있으나 결과물이 더 날카로움 — 원본 에지 최대 "
+                 f"{max_r:.4f} @{max_rg})")
+        return
+    _log(f"[GoRi Consistency Keeper] 부위별 복원: 상향할 부위 없음 "
+         f"(가장 손실 큰 부위 {region} {worst:.0%} < 임계 {thresh:.0%}) — "
+         f"결과물이 원본만큼 살아 있습니다")
+
+
+def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35,
+                 allow=None):
     """부위별 adaptive 강도 → (강도 배열|None, 로그 문자열).
 
     원본이 더 살아있는(=에지 밀도가 높은) 부위만 강도를 올려 그 부위를
@@ -538,6 +1516,15 @@ def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35):
     **중요**: 이 함수는 "손가락이 5개여야 한다"를 판정하지 않는다. latent에
     텍스트는 개입하지 않는다. 산술로 하는 것은 단 하나 —
     "원본과 이 부위가 얼마나 달라졌는가"다. 원본이 정확할 때만 효과가 있다.
+
+    왜(Why) allow 가 있나 (2026-10-01): 위 docstring의 "원본이 정확할 때만"을
+    실제로 지키는 장치다. 이전까지는 **에지가 0 인지**로 대신 판단했는데
+    그것은 "안 보인 것"과 "없어진 것"을 구분하지 못한다. 판정층(work_status
+    10절)이 판정을 내려주면 그걸 받는다.
+
+    왜(Why) 기본값이 None 인가: 판정이 없으면 **제한 없이** 기존대로 동작해야
+    한다. opt-in 구조라 켜기 전까지 결과물이 바뀌지 않는다.
+    allow 는 {부위명: 0.0|1.0} — `judge_region_allowance` 가 만든다.
     """
     try:
         import numpy as _np
@@ -549,8 +1536,32 @@ def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35):
             return None, ""
         arr = _np.full(len(ref), float(strength), dtype=_np.float32)
         boost_list = []
+        # 왜(Why) 게이트를 **먼저** 정규화하나: 안에서 형식이 틀린 값을 만날 때
+        # 그 부위만 건너뛰면, 한 항목의 오타가 **전체 기능을 조용히 꺼버린다**
+        # (silent degradation). 그래서 한 번에 청소한다. 해석 불가 항목은
+        # "제한 없음" 으로 본다 — 오타로 부위를 막아버리는 게 더 나쁘다.
+        # 그리고 그 사실은 한 번 말한다.
+        gate = None
+        if allow is not None:
+            gate = {}
+            if isinstance(allow, dict):
+                _dropped = 0
+                for _k, _v in allow.items():
+                    try:
+                        gate[str(_k)] = float(_v)
+                    except (TypeError, ValueError):
+                        _dropped += 1
+                if _dropped:
+                    _log(f"[GoRi Consistency Keeper] ⚠ 판정 허용도에서 해석 불가 "
+                         f"항목 {_dropped}개를 무시했습니다 (제한 없음으로 처리)")
+            else:
+                gate = None
         for region, idxs in PART_REGIONS.items():
             if region not in DETAIL_CRITICAL:
+                continue
+            # 판정에서 미판정(allow 0)인 부위는 원본을 신뢰하지 못하므로
+            # 건드리지 않는다. 올리는 것이지 줄이는 것이 아니므로 continue.
+            if gate is not None and gate.get(region, 1.0) <= 0.0:
                 continue
             r = sum(ref[i] for i in idxs) / len(idxs)
             s = sum(samp[i] for i in idxs) / len(idxs)
@@ -565,6 +1576,37 @@ def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35):
                 boost_list.append(f"{region}({loss:.0%})")
         if boost_list:
             return arr, ", ".join(boost_list)
+        # 왜(Why) 여기서 말하나 (2026-10-01 실측): 이 경로는 **한 번도 켜지지
+        # 않았다** — 로그 0건, 실패 0건. 조용히 None 을 돌려주는 구조라
+        # "안 되는 것" 과 "될 필요가 없는 것" 이 구분되지 않았다. 그래서 어떤
+        # 부위가 얼마나 손실됐는지를 한 번 말한다. 판정 게이트는 이 경로에만
+        # 걸려 있으므로 여기가 조용하면 게이트도 조용하다.
+        _worst = 0.0
+        _worst_r = ""
+        _max_r = 0.0
+        _max_rg = ""
+        _stats = []
+        for _rg, _idxs in PART_REGIONS.items():
+            if _rg not in DETAIL_CRITICAL:
+                continue
+            _r = sum(ref[i] for i in _idxs) / len(_idxs)
+            _s = sum(samp[i] for i in _idxs) / len(_idxs)
+            _stats.append(f"{_rg} {_r:.4f}->{_s:.4f}")
+            if _r > _max_r:
+                _max_r = _r
+                _max_rg = _rg
+            if _r <= 1e-6:
+                continue
+            _l = (_r - _s) / _r
+            if _l > _worst:
+                _worst = _l
+                _worst_r = _rg
+        # 왜(Why) 숫자를 붙이나 (2026-10-01): "에지가 0" 이라는 말은
+        # **0 인지 매우 작은 건지** 구분하지 못했다. 16×16 셀 → 5% 창으로
+        # 바꿨는데도 여전히 0 이라 원본 해상도 자체를 의심하게 됐다.
+        _log("[GoRi Consistency Keeper] 부위 에지 실측 (원본->결과): "
+             + " / ".join(_stats))
+        _note_no_boost(_worst, _worst_r, thresh, _max_r, _max_rg)
         return None, ""
     except Exception:
         return None, ""
@@ -651,24 +1693,44 @@ def _panels_from_profile(profile, width: int, on_ratio: float = _PANEL_ON_RATIO,
         return []
 
 
-# 시트 판별 정규성 임계값. 왜(Why) 실측 보정값이다.
-#   합성 시트(6·4패널): 폭비 1.00 / 간격비 1.00
-#   실사용 사진들      : 폭비 1.55~6.48 / 간격비 0.34~1.00
-# 즉 "패널이 3개 이상 + 폭이 고르게 + 간격이 고르게"가 시트를 가르는 신호다.
-# 왜(Why) 이렇게 빡빡한가: 시트로 잘못 판정하면 6개 뷰를 6명 신원으로
-# 평균내어 **신원 일관성이 오히려 망가진다.** 오탐이 누락보다 훨씬 위험하다.
-SHEET_MIN_PANELS = 3
+# 시트 판별 임계값. 왜(Why) 실측 보정값이다.
+#   실사용 시트 3장 : n=4 / 간격비 0.77~0.95
+#   실사용 사진 10장: n=1~2
+#
+# ⚠ 이 값은 카메라 노드의 `_SHEET_MIN_PANELS` · `_SHEET_MIN_SPACING_RATIO` 와
+# **같은 값이어야 한다.** 2026-10-01 실측: 키퍼만 `SHEET_MIN_PANELS=3`,
+# `SHEET_MAX_WIDTH_RATIO=1.60` 이었고 그 결과 시트 3장 중 **2장**이 "시트 아님"
+# 으로 판정되어 강도 감쇠와 패널 대체가 통째로 건너뛰어졌다. 카메라만 고쳤던
+# 것이었다(8d2fd86 이전). 두 판정이 어긋나면 키퍼만 잘못 동작한다.
+# 크로스 폴더 공용 모듈은 만들지 않는다 — 각 폴더가 **단독 배포 단위**라
+# (CI 가 `cd 폴더 && python tests/test_node.py` 로 독립 실행하고 __init__.py
+# docstring 도 "이 폴더를 복사 후 재시작" 이라고 적었다) 공용 모듈을 두면
+# 단독 설치가 깨진다. 대신 `tests/test_pack.py` 에 교차 검사를 둔다.
+#
+# 왜(Why) 간격만 보는가 (2026-10-01 실측): 예전엔 폭 균일성(`wreg`)까지
+# 요구했는데 **진짜 시트 2장을 놓쳤다.** 원본 시트는 2신세(좁은 패널 2개) +
+# 4얼굴(넓은 패널 4개) 구성이라 패널 폭이 원래 다르다 — 실측 wreg 이
+# 2.47 / 3.22 로 컸고 1.60 선에 걸렸다. 패널 폭은 시트 구성에 따라 본질적으로
+# 다르므로 판정 근거로 쓸 수 없다. 그런데도 반환 dict 와 로그에는 남긴다 —
+# 근거가 사라지면 또 "왜 3이었나" 를 되짚게 된다.
+SHEET_MIN_PANELS = 4
 SHEET_MAX_WIDTH_RATIO = 1.60
+# 왜(Why) 간격선은 카메라(0.45)가 아니라 **0.60 그대로인가**: 카메라와 같게
+# 낮추려면 근거가 있어야 한다. 13장 전수에서 `n>=4` 를 만족하면서 `greg<0.45`
+# 인 표본이 **0개**다 — 즉 낮춰도 이 표본에서 오탐이 늘지 않지만, 그렇다고
+# 낮출 근거가 생긴 것도 아니다. 근거 없는 완화를 하지 않는다(WORK_STATUS 10-6
+# 원칙: 실측이 받쳐주지 않으면 값을 바꾸지 않는다). 실사용 사진이 더 쌓이면
+# 그때 다시 잰다.
 SHEET_MIN_SPACING_RATIO = 0.60
+# 왜(Why) wreg 를 통과 조건에서 빼고 **기록만** 하는가: 위 실측처럼 패널 폭은
+# 시트 구성에 따라 본질적으로 다르므로 판정 근거로 쓸 수 없다. 그런데도
+# 로그와 반환 dict 에는 남긴다 — 근거가 사라지면 또 "왜 3이었나" 를 되짚게 된다.
+SHEET_ENFORCE_WIDTH_RATIO = False
 
 
 def looks_like_sheet(panels) -> dict:
     """패널 구간이 시트인지 판정. {"sheet": bool, "n": int, "wreg": float,
-    "greg": float}. 패널이 2개 이하는 시트로 보지 않는다.
-
-    왜(Why) 2개는 왜(Why) 기준이 엄격한가: 방 2개·두 손·두 피사체가 있는
-    사진은 흔하다. 실사용 표준 시트는 6뷰(정면·후면·상부얼굴 4)라 3개 이상
-    정규 배치로 시작한다.
+    "greg": float}. 패널이 최소 수보다 적으면 시트로 보지 않는다.
     """
     out = {"sheet": False, "n": len(panels or []), "wreg": 0.0, "greg": 0.0}
     try:
@@ -683,8 +1745,9 @@ def looks_like_sheet(panels) -> dict:
         greg = (min(gaps) / max(gaps)) if gaps and max(gaps) > 0 else 0.0
         out["wreg"] = round(wreg, 2)
         out["greg"] = round(greg, 2)
-        out["sheet"] = (wreg <= SHEET_MAX_WIDTH_RATIO
-                        and greg >= SHEET_MIN_SPACING_RATIO)
+        out["sheet"] = (greg >= SHEET_MIN_SPACING_RATIO
+                        and (not SHEET_ENFORCE_WIDTH_RATIO
+                             or wreg <= SHEET_MAX_WIDTH_RATIO))
         return out
     except Exception:
         return out
@@ -846,6 +1909,307 @@ def subject_bbox(landmarks):
         return None
 
 
+# ---------------------------------------------------------------------------
+# 판정층 1층 (2026-10-01, WORK_STATUS 10절)
+#
+# 원본 영역을 **믿어도 되는지** 판정한다. 절대 평가("이 자세가 옳나")가 아니다.
+# 원본이 캐릭터의 기준이므로 정상이면서 극적인 자세가 탈락해서는 안 된다.
+# 따라서 관절 가동범위·체격 비례·좌우 대칭은 **판정 근거가 아니다.**
+# WORK_STATUS 10-1 에서 방향을 정정한 이유다.
+# ---------------------------------------------------------------------------
+
+_JUDGE_INTACT = "intact"
+_JUDGE_DAMAGED = "damaged"
+_JUDGE_UNDETERMINED = "undetermined"
+
+# 판정 대상 관절. 발은 **제외**한다 (2026-10-01 실측 근거는 아래 주석 참조).
+_JUDGE_CORE_LANDMARKS = (
+    (11, "l_shoulder"), (12, "r_shoulder"),
+    (13, "l_elbow"), (14, "r_elbow"),
+    (15, "l_wrist"), (16, "r_wrist"),
+    (23, "l_hip"), (24, "r_hip"),
+    (25, "l_knee"), (26, "r_knee"),
+)
+
+# 왜(Why) 관절 10개만인가 — 실측(2026-10-01, conf 0.3, 검출 11장, 관절별 중앙값):
+#   어깨 1.00 · 팔꿈치 0.87~0.97 · 손목 0.81~0.90 · 골반 1.00 · 무릎 0.81~0.85
+#   발목 0.21 · 발뒤꿈치 0.19 · 발끝 0.08
+# 팔·다리는 중앙값이 높지만 **발은 0.1~0.2 다** — 관측값 자체가 신뢰할 수 없다.
+# 발에 같은 임계를 걸면 정상 발도 전부 미판정이 되므로 판정 대상에서 뺀다.
+# 무릎은 중앙값 0.83 이므로 판정 안에 남는다.
+
+# 가시성 임계 0.30 의 근거 (2026-10-01 실측): 팔다리 관절 132점 중 **77%** 가
+# 0.30 이상이고 중앙값은 0.93 이다. 0.50 으로 올리면 77% → 72% 로 떨어져
+# 정상 팔·다리를 미판정으로 버린다. 추측 숫자가 아니라 분포에서 고른 값이다.
+_JUDGE_VIS_MIN = 0.30
+
+# 몸통(중어깨→중골반) 길이 하한. 실측 정상 검출 구간은 0.156~0.511 이다.
+# 0.02 는 그 최솟값보다 7.8배 낮으므로 **퇴화 프레임만** 걸러내는 용도이며
+# 정상 판정에 영향하지 않는다.
+_JUDGE_TORSO_MIN = 0.02
+
+
+def _judge_triples(landmarks):
+    """landmark 열 -> [(x, y, visibility)] 리스트. 해석 불가하면 None 항목.
+
+    왜(Why) 형태를 두 가지 다 받나: 경로마다 landmark 모양이 다르다 (구
+    `mediapipe.solutions` 는 속성 객체, tasks API 는 튜플). 한쪽만 받는 코드는
+    반대쪽 경로에서 **조용히** 전부 None 이 된다 — `subject_bbox` 가 그 사고를
+    겪었다. 그래서 여기서 한 번 통일한다.
+    """
+    out = []
+    if landmarks is None:
+        return out
+    for lm in landmarks:
+        if isinstance(lm, (tuple, list)) and len(lm) >= 2:
+            x, y = lm[0], lm[1]
+            vis = lm[2] if len(lm) >= 3 else None
+        else:
+            x = getattr(lm, "x", None)
+            y = getattr(lm, "y", None)
+            vis = getattr(lm, "visibility", None)
+        if x is None or y is None:
+            out.append(None)
+            continue
+        out.append((float(x), float(y),
+                    float(vis) if vis is not None else 0.0))
+    return out
+
+
+def _judge_body_frame(tri):
+    """몸통 기준 프레임 -> (ox, oy, scale). 퇴화면 None.
+
+    왜(Why) 몸통길이가 단위인가 (WORK_STATUS 10-2): landmark 좌표는 이미지마다
+    정규화 스케일이 다르다. 중골반을 원점으로, 중어깨→중골반 거리를 단위로 삼으면
+    거리·프레이밍이 상쇄되어 같은 사람의 비율이 항상 같은 숫자가 된다.
+    """
+    if not tri or len(tri) < 33:
+        return None
+    try:
+        ls, rs = tri[11], tri[12]
+        lh, rh = tri[23], tri[24]
+        if ls is None or rs is None or lh is None or rh is None:
+            return None
+        ox = (lh[0] + rh[0]) * 0.5
+        oy = (lh[1] + rh[1]) * 0.5
+        sx = (ls[0] + rs[0]) * 0.5
+        sy = (ls[1] + rs[1]) * 0.5
+        scale = ((sx - ox) ** 2 + (sy - oy) ** 2) ** 0.5
+        if scale < _JUDGE_TORSO_MIN:
+            return None
+        return (ox, oy, scale)
+    except (TypeError, ValueError, IndexError):
+        # ZeroDivisionError 는 올 수 없다 — 나눗셈이 없고 **0.5 제곱(**0.5)은
+        # 0 에서 0.0 을 돌려준다. 선언해두면 "여기서 0 나눔이 난다" 는 거짓
+        # 기대를 만든다.
+        return None
+
+
+def judge_points(pts):
+    """landmark 열 -> 판정 dict (순수 함수, 검출 없음).
+
+    반환::
+
+        {"verdict": "intact"|"damaged"|"undetermined",
+         "confidence": float,
+         "checks": [{"check_id", "ok", "detail"}],
+         "low_visibility": [관절 이름],
+         "frame": (ox, oy, scale) or None}
+
+    왜(Why) v1 은 damaged 를 **반환하지 않는다**: 기하 판정을 실측해 봤는데
+    쓸 만한 신호가 없었다. 정상 사진에서 투영 팔길이의 좌우 차이가 최대 0.745
+    (몸통길이 기준, 2026-10-01 실측) 나 났다 — 한쪽 팔이 앞으로 나온 사진에서는
+    그게 정상이다. 임계값을 추측으로 넣으면 정상 사진의 절반이 "손상" 으로
+    분류된다. 그러니 기하 검사 없이 판정할 수 있는 유일한 신뢰 신호인
+    **가시성만** 쓴다. 기준 데이터를 실측해 넣을 때 damaged 를 연다.
+    `_JUDGE_DAMAGED` 는 그때를 위해 상수로 남아 있다.
+
+    왜(Why) undetermined 가 꼭 필요한가: 발 가시성은 실측 중앙값이 0.08~0.21 다.
+    이걸 "정상"으로 떨어뜨리면 **스스로도 못 본 영역을 신뢰**하게 된다.
+    그게 지금 strength 가 0.00 으로 죽는 사고와 같은 종류다.
+    """
+    checks = []
+    tri = _judge_triples(pts)
+    if not tri:
+        checks.append({"check_id": "pose_detected", "ok": False,
+                       "detail": "landmark 없음"})
+        return {"verdict": _JUDGE_UNDETERMINED, "confidence": 1.0,
+                "checks": checks, "low_visibility": [], "low_indices": [],
+                "frame": None}
+
+    checks.append({"check_id": "pose_detected", "ok": True, "detail": ""})
+
+    frame = _judge_body_frame(tri)
+    if frame is None:
+        checks.append({"check_id": "body_frame", "ok": False,
+                       "detail": "몸통 길이가 하한 이하거나 퇴화"})
+        return {"verdict": _JUDGE_UNDETERMINED, "confidence": 1.0,
+                "checks": checks, "low_visibility": [], "low_indices": [],
+                "frame": None}
+    checks.append({"check_id": "body_frame", "ok": True, "detail": ""})
+
+    low = []
+    low_idx = []
+    worst = 1.0
+    for idx, name in _JUDGE_CORE_LANDMARKS:
+        lm = tri[idx] if idx < len(tri) else None
+        vis = 0.0 if lm is None else lm[2]
+        if vis < worst:
+            worst = vis
+        if vis < _JUDGE_VIS_MIN:
+            low.append(name)
+            low_idx.append(idx)
+    vis_ok = not low
+    checks.append({
+        "check_id": "core_visibility",
+        "ok": vis_ok,
+        "detail": "" if vis_ok else "미확인 관절: " + ", ".join(low),
+    })
+
+    verdict = _JUDGE_INTACT if vis_ok else _JUDGE_UNDETERMINED
+    # confidence 는 "그 판정을 내리는 근거의 세기"다. intact 면 가장 흐린
+    # 관절의 가시성이 곧 근거이고, undetermined 면 그것이 미판정의 근거다.
+    return {"verdict": verdict, "confidence": max(0.0, min(1.0, worst)),
+            "checks": checks, "low_visibility": low, "low_indices": low_idx,
+            "frame": frame}
+
+
+def judge_region_allowance(verdict):
+    """판정 dict -> 부위별 당김 허용도 {부위명: 0.0|1.0}. 판정 없으면 None.
+
+    왜(Why) 부위 정의를 새 로 만들지 않는가: 프로젝트에 이미 `PART_REGIONS` 가
+    있고 `detail_boost` 가 그 순서를 그대로 순회한다. 관절 인덱스를 **그 표에
+    그대로 물려서** 교집합을 내는 것이 새 부위 체계를 만드는 유일한 방법이다.
+    두 개의 부위 표가 생기면 이후 갱신할 때 한쪽만 고치는 사고가 난다.
+
+    왜(Why) 판정 대상이 아닌 부위는 1.0 인가: 얼굴(0~10)은 사용자가 "원본
+    일관성을 따른다" 고 정해서 판정에서 제외했다(10절). 그 부위를 0 으로 주면
+    얼굴 신원 복원이 꺼져 버린다 — 사용자가 정한 결정을 코드가 뒤집는 셈이다.
+    판정하지 않는다는 것은 **허용**이라는 뜻으로 쓴다.
+
+    반환이 None 이면 판정이 없다는 뜻이고, 호출부는 None 을 "제한 없음" 으로
+    읽어 기존 동작을 그대로 둔다 (opt-in 구조).
+    """
+    if not verdict:
+        return None
+    low = set()
+    for i in (verdict.get("low_indices") or ()):
+        try:
+            low.add(int(i))
+        except (TypeError, ValueError):
+            continue
+    core = set(idx for idx, _n in _JUDGE_CORE_LANDMARKS)
+    out = {}
+    for region, idxs in PART_REGIONS.items():
+        touched = core & set(idxs)
+        if not touched:
+            out[region] = 1.0          # 판정 대상 아님 → 허용
+        else:
+            out[region] = 0.0 if (touched & low) else 1.0
+    return out
+
+
+def judge_reference_trust(u8):
+    """uint8 HWC RGB 원본 -> 판정 dict. 검출 실패도 미판정으로 친다.
+
+    왜(Why) 프로덕션 경로가 이 함수를 **부르지 않는가** (2026-10-01 실측):
+    `run()` 은 이미 `_part_detail_map` 이 디코드하며 얻은 landmark 를 가지고
+    있어서 `judge_points(_pm["original"]["pts"])` 를 직접 부른다(R75). 이
+    래퍼를 부르면 **VAE 디코드를 한 번 더** 하게 되어
+    `new_vae_decode_in_per_frame_path` 와 같은 낭비가 된다.
+    그래서 판정의 **진입점은 `judge_points`** 이고 이건 u8 -> 판정 변환이다.
+    지우지 않는 이유: 테스트가 `u8` 입력에서 판정까지 한 번에 확인한다.
+    판정 규칙 자체(`judge_points`)를 두 번 실행시키지 않고 검증하는 경로다.
+    """
+    return judge_points(_pose_landmarks_from_tasks(u8, with_visibility=True))
+
+
+_HAND_TIPS = (4, 8, 12, 16, 20)
+# 끝점 최소 간격. 왜(Why) 0.001 인가 (2026-10-02 실측 2차):
+#   정상 손 (참조 10개)  0.0041 ~ 0.0419
+#   정상 손 (생성 8개)    0.0013 ~ 0.0024  ← 닿아있지만 융합 아님 (육안 확인)
+#   합성 융합손           0.0000
+# 0.003 으로 잡으면 생성 8개 전부 damaged (오탐). "닿음" 과 "융합" 은 2D 거리로
+# 완전히 못 가른다 — 융합은 좌표 일치(0.000) 수준에서만 확정된다.
+# 0.001 은 최소 정상(0.0013) 바로 아래다. 여유가 얇으므로 실물 뭉개진 손이
+# 나오면 그때 다시 잰다. 손 개수(3개+)는 임계와 무관하게 확정적이다.
+_HAND_TIP_MIN_SEP = 0.001
+
+
+def judge_hands(hands):
+    """손 21점 리스트 → 손가락 개수·분리 판정 dict (순수 함수, 검출 없음).
+
+    반환은 `judge_points` 와 같은 형식:
+        {"verdict": "intact"|"damaged"|"undetermined",
+         "confidence": float,
+         "checks": [{"check_id", "ok", "detail"}],
+         "low_visibility": [],
+         "frame": None}
+
+    왜(Why) 손 개수를 세나 (2026-10-02): 포즈 33점은 손이 3개여도 33점 틀에
+    맞추고 끝이라 여분을 셀 수 없다. 손 모델은 손마다 21점을 돌려주므로
+    개수를 센다. 3개 이상이면 여분 손이다.
+    왜(Why) 끝점 분리를 보나: 6가락은 "6개가 추가"되는 게 아니라 손가락 2개가
+    붙거나 1개가 갈라져 나온다 (ANATOMY_COUNT_NEGATIVE 주석과 같은 실측).
+    끝점 5개가 뭉쳐 있으면 뭉개진 손이다.
+    """
+    out = {"verdict": _JUDGE_UNDETERMINED, "confidence": 0.0, "checks": [],
+           "low_visibility": [], "frame": None}
+    try:
+        hs = hands or []
+        n = len(hs)
+        if n == 0:
+            out["checks"].append({"check_id": "hands_absent", "ok": True,
+                                  "detail": "검출된 손 없음 (판단 보류)"})
+            out["confidence"] = 1.0
+            return out
+        # 손 개수: 1~2 정상, 3+ 여분
+        if n >= 3:
+            out["verdict"] = _JUDGE_DAMAGED
+            out["confidence"] = 0.9
+            out["checks"].append({"check_id": "hand_count", "ok": False,
+                                  "detail": "손 %d개 검출 (2개 초과)" % n})
+            return out
+        out["checks"].append({"check_id": "hand_count", "ok": True,
+                              "detail": "손 %d개" % n})
+        # 손가락 끝 5개 분리: 가장 가까운 두 끝점 사이 거리
+        # 왜(Why) found 플래그가 필요한가: 21점 미만 손만 있으면 루프가 한 번도
+        # 안 돌아 `worst` 가 초기값 1.0 으로 남는다. 그러면 "분리됨" 으로 판정해
+        # intact 을 돌려준다 — 측정 불가인데 정상이라고 하는 거짓 확신이다.
+        # `undetermined` 가 있어야 하는 자리다.
+        worst = 1.0
+        found = False
+        for _hi, pts in enumerate(hs):
+            if len(pts) < 21:
+                continue
+            tips = [(pts[i][0], pts[i][1]) for i in _HAND_TIPS if i < len(pts)]
+            if len(tips) < 5:
+                continue
+            for a in range(5):
+                for b in range(a + 1, 5):
+                    dx = tips[a][0] - tips[b][0]
+                    dy = tips[a][1] - tips[b][1]
+                    d = (dx * dx + dy * dy) ** 0.5
+                    found = True
+                    if d < worst:
+                        worst = d
+        if not found:
+            out["checks"].append({"check_id": "fingertip_sep", "ok": False,
+                                  "detail": "유효 21점 손 없음 (판단 보류)"})
+            return out
+        out["checks"].append({"check_id": "fingertip_sep", "ok": worst >= _HAND_TIP_MIN_SEP,
+                              "detail": "최소 끝점 간격 %.4f (기준 %.3f)" % (worst, _HAND_TIP_MIN_SEP)})
+        if worst < _HAND_TIP_MIN_SEP:
+            out["verdict"] = _JUDGE_DAMAGED
+            out["confidence"] = 0.8
+        else:
+            out["verdict"] = _JUDGE_INTACT
+            out["confidence"] = 0.9
+        return out
+    except (TypeError, ValueError, IndexError):
+        return out
+
+
 def framing_similarity(box_a, box_b) -> float:
     """두 인물 bbox의 프레이밍 유사도 0~1. 비교 불가면 0.0.
 
@@ -898,11 +2262,7 @@ def _decode_small(vae, latent, scale: float = 0.5):
             img = img.detach().cpu()
         arr = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
         arr = _np.asarray(arr, dtype=_np.float32)
-        if arr.ndim == 4:
-            arr = arr[0]
-        if arr.ndim != 3:
-            return None
-        return _np.clip(arr, 0.0, 1.0)
+        return _as_rgb_hwc(arr)
     except Exception:
         return None
 
@@ -912,32 +2272,127 @@ def _pose_landmarks(img_arr):
 
     (왜) 예전엔 `mediapipe.solutions.pose.Pose` 였는데 그 API 가 없다.
     같은 이유로 tasks API + .task 모델로 대체한다.
+
+    (왜) 범위 검사가 있다 (2026-10-02): 계약은 "float 0~1" 이다. 이 계약을
+    어기면 `clip(0,1)` 이 **조용히** 값을 뭉갠다 — uint8 0~255 를 넘기면 전부
+    255 가 되고 검출이 0개가 되며 예외도 안 난다. 그래서 "포즈가 죽었다" 는
+    오해를 샌다. 실제로 이 함수를 원본 PNG 로 직접 부른 프로브가 0/18 을
+    냈고(2026-09-30), 원인은 크기였다(1024px 캡 후 11/18).
+    **production 경로에서는 이 검사가 절대 발동하지 않는다.** 실측 근거:
+    두 호출자(L2427·L2435) 모두 `_decode_latent_rgb`/`_decode_small` 로
+    오는데 둘 다 마지막에 `_as_rgb_hwc` 를 지나고 그 L264 가 `clip(0,1)`
+    이다. 슬라이스(`ref_arr[:, x0:x1]`)와 `_content_crop` 도 범위를
+    보존한다. 즉 발동 조건은 "production 이 계약을 어겼을 때" 뿐이다.
     """
-    if _pose_model_path() is None:
-        _note_pose_unavailable()
-        return None
+    # `_pose_model_path() is None` 검사는 여기에 있었다. 도달 불가라 뺐다 —
+    # 그 함수는 항상 str 을 돌려준다. 진짜 "없음" (mediapipe.tasks 미설치)은
+    # `_pose_landmarker` 안에서 `_find_base_options() is None` 으로 잡아
+    # `_note_pose_unavailable()` 을 부른다. 두 검사를 한 곳에 두면 안 된다.
     try:
         import numpy as _np
         if img_arr is None:
             return None
-        u8 = (_np.clip(_np.asarray(img_arr, dtype=_np.float32), 0.0, 1.0)
-              * 255.0).astype(_np.uint8)
+        a = _np.asarray(img_arr, dtype=_np.float32)
+        if a.size:
+            _lo = float(a.min())
+            _hi = float(a.max())
+            if _lo < 0.0 or _hi > 1.0:
+                _note_once(
+                    "pose_input_range",
+                    "[GoRi Consistency Keeper] pose input outside 0..1 "
+                    "(min=%.4f max=%.4f dtype=%s) — uint8 0..255 를 float 로 "
+                    "간주했습니다. clip 결과가 전부 255/0 이 되어 검출이 0개가 "
+                    "됩니다. float 0~1 로 변환해 넘기거나 1024px 캡을 지키십시오."
+                    % (_lo, _hi, a.dtype))
+                return None
+        u8 = (_np.clip(a, 0.0, 1.0) * 255.0).astype(_np.uint8)
         return _pose_landmarks_from_tasks(u8)
     except Exception:
         return None
 
 
-def analyze_reference_sheet(vae, ref_latent, sampled) -> dict:
+def _panel_reference_latent(vae, ref_latent, panel_n, cache=None):
+    """시트의 한 패널만 잘라 **진짜 latent** 로 돌려준다. 실패하면 None.
+
+    왜(Why) 다시 VAE 로 인코딩하나: 패널 좌표는 픽셀 배열에서 얻었으므로
+    여기서Ended 픽셀 텐서를 만들어 그대로 넘기고 싶지만, downstream 은 전부
+    latent 를 기대한다(`_part_detail_map` 은 VAE 디코드, drift MSE 와 전역 블렌드
+    도 latent 간 연산). 픽셀을 latent 자리에 넣으면 조용히 깨진다. 그래서
+    **진짜 latent** 로 되돌려야 아무도 안 깨진다. 비용은 시트를 물었을 때만
+    VAE encode 1회.
+    """
+    try:
+        import numpy as _np
+        import torch as _t
+        if vae is None or ref_latent is None or not panel_n:
+            return None
+        full = _decode_latent_rgb(vae, ref_latent, cache=cache)
+        if full is None:
+            return None
+        h, w = int(full.shape[0]), int(full.shape[1])
+        x0 = max(0, min(w - 2, int(float(panel_n[0]) * w)))
+        x1 = max(x0 + 1, min(w, int(float(panel_n[1]) * w)))
+        if x1 - x0 < 8:
+            return None
+        crop = full[:, x0:x1]
+        # 세로로 긴 패널은 정사각에 가깝게 잘라낸다 — VAE 물결에 덜 예민하다.
+        ch, cw = int(crop.shape[0]), int(crop.shape[1])
+        side = min(ch, cw)
+        y0 = max(0, (ch - side) // 2)
+        crop = crop[y0:y0 + side, :]
+        lat = vae.encode(_t.from_numpy(
+            _np.ascontiguousarray(crop))[None])
+        del crop, full
+        _release_vram()
+        return lat
+    except Exception as _e:
+        _note_pose_error('_panel_reference_latent', _e)
+        return None
+
+
+def _content_crop(arr, tol=0.06):
+    """균일한 배경을 잘라 내용만 남긴다. 실패하면 원본 그대로.
+
+    왜(Why) 필요한가 (2026-09-30 실측): 시트 패널은 세로로 흰 여백이 크다.
+    패널을 x 로만 자르면 185x1888 이 남는데, 그 흰 띠 때문에 33점 검출이
+    불안정해진다(실측: 4개 중 1개가 미검출). 여백을 잘라 185x711 로 만들면
+    전 패널이 검출되고 프레이밍 게이트도 통과한다(0.747).
+    """
+    try:
+        import numpy as _np
+        a = _np.asarray(arr, dtype=_np.float32)
+        if a.ndim != 3 or a.shape[0] < 4 or a.shape[1] < 4:
+            return arr
+        lum = a[..., 0] * .299 + a[..., 1] * .587 + a[..., 2] * .114
+        m = _np.abs(lum - float(_np.median(lum))) > float(tol)
+        rows = _np.nonzero(m.any(axis=1))[0]
+        cols = _np.nonzero(m.any(axis=0))[0]
+        if not len(rows) or not len(cols):
+            return arr
+        out = a[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
+        return out if out.size else arr
+    except Exception:
+        return arr
+
+
+def analyze_reference_sheet(vae, ref_latent, sampled, cache=None) -> dict:
     """원본 참조가 캐릭터 시트인지 확인하고, 결과와 가장 잘 맞는 패널을 고른다.
 
     반환: {"panels", "raw", "sheet", "best", "match", "framing", "gate",
            "box"}. 판정 불가 시 panels=0.
     """
     out = {"panels": 0, "raw": 0, "sheet": False, "best": None, "match": 0.0,
+           "panels_n": [],
            "framing": 0.0, "gate": False, "box": None, "wreg": 0.0, "greg": 0.0}
     try:
         ref_arr = _decode_small(vae, ref_latent, 0.5)
         if ref_arr is None:
+            # 왜(Why) 여기서 또 말하나: 이 분기는 조용한 실패 두 가지("시트가
+            # 아니다" 와 "디코드가 실패했다") 를 구분해 주는 유일한 자리다.
+            # `_decode_small` 이 예외를 삼키고 None 을 돌려주므로, 로그가
+            # 없으면 사용자가 "패널 0개" 를 보고 원본 문제를 의심하게 된다.
+            # 디코드 경로 자체가 이미 사유를 남기므로 여기서는 경고만 준다.
+            _note_pose_error('analyze_reference_sheet.decode', None)
             return out
         raw = detect_panels(ref_arr)
         out["raw"] = len(raw)
@@ -973,18 +2428,46 @@ def analyze_reference_sheet(vae, ref_latent, sampled) -> dict:
                 best, best_score = idx, score
         out["best"] = best
         out["match"] = round(best_score, 3)
+        # 왜(Why) 정규화(0~1)로 주는가: 패널 좌표는 `_decode_small(0.5)` 즉
+        # 절반 크기 이미지 기준이라, 소비자가 그대로 픽셀로 쓰면 해상도에
+        # 종속된다. 비율로 주면 아무 해상도에서나 잘라낼 수 있다.
+        _sw = float(ref_arr.shape[1]) or 1.0
+        out["panels_n"] = [(a / _sw, b / _sw) for a, b in panels]
         # 2) 프레이밍 게이트: 고른 패널의 인물 비율이 결과와 맞는지
         if best is not None:
             x0, x1 = panels[best]
-            lm_ref = _pose_landmarks(ref_arr[:, x0:x1])
-            lm_s = _pose_landmarks(samp_arr)
+            # 왜(Why) 여기서만 원본 해상도로 다시 잡나 (2026-09-30 실측):
+            # `ref_arr` 은 0.5배 축소본이라 패널 폭이 216 -> 108 px 로 줄어
+            # 33점 검출이 실패한다. 그 결과 "인물 bbox 미검출" -> 프레이밍 게이트가
+            # 항상 False -> 2단계 (A) 경로로 영영 못 들어간다. 패널 검감출·유사도
+            # 판정은 축소본으로 충분하니 **포즈만** 원본 크기로 본다.
+            _pose_src = ref_arr[:, x0:x1]
+            _full = _decode_latent_rgb(vae, ref_latent, cache=cache)
+            if _full is not None and _full.shape[1] > ref_arr.shape[1]:
+                _sx = float(_full.shape[1]) / float(ref_arr.shape[1])
+                _pose_src = _full[:, int(x0 * _sx):max(
+                    int(x0 * _sx) + 2, int(x1 * _sx))]
+            lm_ref = _pose_landmarks(_content_crop(_pose_src))
+            # 왜(Why) sampled 도 원본 해상도로 보나: 아래 `samp_arr` 은 판정용
+            # 0.25배 축소본이라 33점이 잡히지 않고, 그러면 box_s 가 None 이 되어
+            # framing_similarity 가 0.0(=게이트 차단)이 된다(2026-09-30 실측:
+            # 참조는 0.747 인데 결과는 0.00). 양쪽 해상도를 맞춰야 비교가 된다.
+            _samp_src = _decode_latent_rgb(vae, sampled, cache=cache)
+            if _samp_src is None:
+                _samp_src = samp_arr
+            lm_s = _pose_landmarks(_content_crop(_samp_src))
             box_ref = subject_bbox(lm_ref)
             box_s = subject_bbox(lm_s)
             out["box"] = box_ref
             out["framing"] = round(framing_similarity(box_ref, box_s), 3)
             out["gate"] = out["framing"] >= FRAMING_GATE
         _release_vram()
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) 로그를 남기나 (2026-09-30 실측): 여기가 조용하면 시트 경로가
+        # "안 되는 이유"를 아예 말하지 않는다. 실제로 예외 하나가 시트 분석
+        # 전체를 삼켜 로그가 0건이었고, 밖에서는 그것이 "시트가 아니다" 와
+        # 구분되지 않았다.
+        _note_pose_error('analyze_reference_sheet', _e)
         _release_vram()
     return out
 
@@ -1003,6 +2486,12 @@ def _log_sheet_analysis(info: dict, ref_name: str) -> None:
                      f"않습니다 (폭비 {info.get('wreg', 0):.2f} ≤ "
                      f"{SHEET_MAX_WIDTH_RATIO}, 간격비 {info.get('greg', 0):.2f} "
                      f"≥ {SHEET_MIN_SPACING_RATIO} 필요)")
+            elif info.get("raw", 0) > 0:
+                # 없이(Why) 이 줄이 필요하단가: 패널이 1~2개이면 이전은 아누 말도 없었다. 사용자가 시트를 무에다고 판정 로그가 0개이면
+                # "시트가 아닌 걸 모 아잣체다" 와 "분석이 죽다" 가 구부되지 않는다
+                # (2026-09-30 실체로 정확히 이 혼동이 발일다).
+                _log(f"[GoRi Consistency Keeper] {ref_name} 시트 아닌 — "
+                     f"패널 {info['raw']}개만 검출 (최소 {SHEET_MIN_PANELS}개 필요)")
             return
         _log(f"[GoRi Consistency Keeper] {ref_name} 참조에서 {info['panels']}개 "
              f"패널 검출 — 캐릭터 시트 형태로 보입니다")
@@ -1074,10 +2563,12 @@ def _release_vram() -> None:
     왜(Why) MPS도 같이 비우는가: macOS(M1/M2/M3)는 CUDA가 아니라 MPS 메모리
     파서를 쓴다. cuda만 비우면 맥에서는 아무것도 하지 않으므로, 이 노드가
     디코드한 잔재가 통합 캐시에 남는다. hasattr 가드로 없는 환경도 안전.
+    왜(Why) gc.collect(0) 인가 (2026-10-02 실측, 카메라와 동일):
+    풀 collect 는 106ms·수집 0개. gen 0은 0.5ms.
     """
     try:
         import gc as _gc
-        _gc.collect()
+        _gc.collect(0)
         try:
             import torch as _t
             if hasattr(_t, "cuda") and _t.cuda.is_available():
@@ -1109,6 +2600,17 @@ class GoRiConsistencyKeeper:
         return {
             "required": {
                 "sampled_latent": ("LATENT",),
+                # 샘플러 결과물 보존 강도 (2026-10-02). 전체 보정량에 거는 마스터 게인이다.
+                # 왜(Why) 필요한가: strength_camera/original 은 각 기준 쪽으로
+                # "당기는 양" 만 정한다. 둘을 다 만지지 않고 키퍼 전체 효과를
+                # 올리고 내릴 방법이 없었다. 1.0 = 기존 동작 그대로,
+                # 0.0 = 통과(출력=입력), 0.5 = 절반만 반영.
+                # 왜(Why) 기본 1.0 인가: 기존 워크플로와 바이트 단위로 같아야 한다.
+                # 기본값을 낮추면 업데이트한 사용자 결과가 전부 바뀐다.
+                # 왜(Why) 음수도 허용하나: camera/original 과 같은 규격(-1.0~1.0).
+                # 음수는 보정을 뒤집는다(기준에서 밀어냄). 의도적으로 쓰는 경우만.
+                "strength_sampler": ("FLOAT", {"default": 1.0, "min": -1.0,
+                                              "max": 1.0, "step": 0.05}),
                 "strength_camera": ("FLOAT", {"default": 0.2, "min": -1.0,
                                               "max": 1.0, "step": 0.05}),
                 "strength_original": ("FLOAT", {"default": 0.2, "min": -1.0,
@@ -1117,15 +2619,28 @@ class GoRiConsistencyKeeper:
             "optional": {
                 "original_latent": ("LATENT",),
                 "camera_latent": ("LATENT",),
-                "vae": ("VAE",),
+"vae": ("VAE",),
+                # 원본을 **이미지**로 받는다 (2026-10-01 추가). Qwen Edit 의
+                # `TextEncodeQwenImage21.latent` 출력은 전부 0 인 빈 캔버스라
+                # Latent 로 받으면 기준이 비어 있다 — `_encode_image_ref` 참조.
+                # 이게 있으면 그걸 인코딩해서 원본 기준으로 쓴다(우선).
+                "original_image": ("IMAGE",),
+                # 판정 게이트 on/off (2026-10-01). 기본 False = 기존 동작 그대로.
+                # 왜(Why) 기본을 끄는가: 켰을 때 결과물이 달라지는 게 이 위젯의
+                # 존재 이유인데, 꺼놓고 모르고 돌아가는 노드는 "왜 결과가 바뀌지
+                # 않는지"를 설명할 수 없는 노드다. 켜는 쪽이 그 판단을 한다.
+                "trust_gate": ("BOOLEAN", {"default": False}),
             },
         }
 
-    def run(self, sampled_latent, strength_camera=0.2, strength_original=0.2,
-            original_latent=None, camera_latent=None, vae=None):
+    def run(self, sampled_latent, strength_sampler=1.0,
+            strength_camera=0.2, strength_original=0.2,
+            original_latent=None, camera_latent=None, vae=None,
+            original_image=None, trust_gate=False):
         sampled = _get_samples(sampled_latent)
         if sampled is None:
             raise ValueError("(GoRi) Consistency Keeper: sampled_latent이 비어 있음")
+        s = _safe_strength(strength_sampler, "strength_sampler")
         a = _safe_strength(strength_camera, "strength_camera")
         b = _safe_strength(strength_original, "strength_original")
         out = sampled.clone() if hasattr(sampled, "clone") else sampled
@@ -1138,7 +2653,28 @@ class GoRiConsistencyKeeper:
         # vae 조건은 아래 마스크/시트 분석 쪽에만 둔다.
         _orig_ref = _get_samples(original_latent)
         _cam_ref = _get_samples(camera_latent)
-        if not (a or b) or (_orig_ref is None and _cam_ref is None):
+        # 왜(Why) original_image 이 우선인가 (2026-10-01 실측):
+        # `TextEncodeQwenImage21` 의 `latent` 출력은 **전부 0** 이다. 그
+        # latent 를 `original_latent` 로 받는 한 원본 기준은 항상 빈 캔버스와
+        # 비교하게 되고 숫자가 무의미하다. 이미지가 오면 그것을 직접 인코딩해
+        # 기준을 세운다. 이미지 없으면 기존 경로(빈 latent) 그대로 둔다 —
+        # 동작을 바꾸지 않기 위함이지, 그 경로가 옳다는 뜻이 아니다.
+        if original_image is not None:
+            _img_ref = _encode_image_ref(vae, original_image)
+            if _img_ref is not None:
+                _orig_ref = _img_ref
+                _orig_from_image = True
+                _log("[GoRi Consistency Keeper] 원본 기준을 이미지에서 직접 "
+                     "인코딩했습니다 — Qwen Edit 의 latent 출력은 빈 캔버스라 "
+                     "그대로 쓰면 비교가 무의미합니다")
+            else:
+                _orig_from_image = False
+                _log("[GoRi Consistency Keeper] ⚠ original_image 인코딩 실패 — "
+                     "original_latent 경로로 진행합니다 (Qwen Edit 에선 빈 "
+                     "캔버스이므로 원본 기준이 사실상 없습니다)")
+        else:
+            _orig_from_image = False
+        if not s or not (a or b) or (_orig_ref is None and _cam_ref is None):
             _release_vram()
             return ({"samples": out},)
         # 인체 마스크(있으면 인물 영역만). 1회 계산해 양쪽 기준에 공유.
@@ -1158,6 +2694,45 @@ class GoRiConsistencyKeeper:
         _dcache = {}
         _mask = None if _multi else _person_mask_for_latent(
             vae, sampled, cache=_dcache)
+        # 왜(Why) 이 로그가 필요한가 (2026-09-30 실측): 마스크가 없으면 당김이
+        # **전역**으로 퍼져 배경까지 끌려간다. 그런데 마스크 유무가 로그로 안
+        # 알려지면 "영향 없음"과 "전역 당김"을 구별할 수 없다 — 실제로 vae 를
+        # 연결했는데 마스크가 조용히 None 이었던 상태를 로그 없이 한참 알지
+        # 못했다. 한 줄로 충분하다.
+        if vae is not None and _mask is None and not _multi:
+            _log("[GoRi Consistency Keeper] 인체 마스크 없음 — 전역 당김으로 "
+                 "진행합니다 (포즈 미검출 또는 VAE 미연결)")
+        # 캐릭터 시트 참조 분석 (2단계: 판정을 강도에 반영한다).
+        # 왜(Why) 여기가 **부위별 맵보다 먼저**인가: 아래 판정으로 기준 원본이
+        # 패널로 바뀔 수 있다. 맵을 먼저 만들면 맵은 시트 전체를 보고 당김만
+        # 패널을 보게 되어 둘이 서로 다른 원본을 참조하게 된다.
+        if vae is not None and b and not _multi and _orig_ref is not None:
+            _sheet = analyze_reference_sheet(vae, _orig_ref, sampled, cache=_dcache)
+            _log_sheet_analysis(_sheet, "original")
+            if _sheet.get("sheet") and _sheet.get("best") is not None:
+                _pn = _sheet.get("panels_n") or []
+                if _sheet.get("gate") and 0 <= _sheet["best"] < len(_pn):
+                    # (A) 신원 신호가 섞이지 않게 **그 패널 하나만** 기준으로 쓴다
+                    _panel = _panel_reference_latent(
+                        vae, _orig_ref, _pn[_sheet["best"]], cache=_dcache)
+                    # 왜(Why) dict 로 감싸나: `_get_samples` 은 LATENT dict
+                    # 에서만 samples 를 꺼낸다. `vae.encode` 결과는 raw 텐서라
+                    # 그대로 넘기면 조용히 None 이 되어 패널 대체가 통하지 않는다.
+                    _p_ref = _get_samples({"samples": _panel})
+                    if _p_ref is not None:
+                        _orig_ref = _p_ref
+                        _log(f"[GoRi Consistency Keeper]   2단계: "
+                             f"{_sheet['best'] + 1}번 패널을 기준 원본으로 "
+                             f"사용합니다 (시트 전체 대신 단일 뷰)")
+                else:
+                    # (B) 게이트를 못 통과하면 패널 프레이밍이 결과물과 다르다.
+                    # 그래도 시트 전체를 강하게 당기면 신원 신호가 평균나므로
+                    # 강도를 낮춘다 — 버리는 것보다 나음.
+                    _old_b = b
+                    b = _safe_strength(b * _SHEET_DAMP, "strength_original")
+                    _log(f"[GoRi Consistency Keeper]   2단계: 프레이밍이 안 "
+                         f"맞아 패널을 쓰지 않습니다. 시트 전체의 신원 신호가 "
+                         f"섞이므로 강도를 낮춥니다 {_old_b:.2f}->{b:.2f}")
         # 부위별 디테일 손실 감지: 원본 latent는 1회만 디코딩해 재사용한다.
         # 왜(Why): sampled/original을 매번 디코딩하면 VAE 비용이 2배다.
         _pm = None
@@ -1166,20 +2741,18 @@ class GoRiConsistencyKeeper:
                 "sampled": sampled,
                 "original": _orig_ref,
             }, cache=_dcache)
-        # 캐릭터 시트 참조 분석 (1단계: 검출 + 프레이밍 게이트 + 로그만).
-        # 왜(Why) 여기를 넣는가: 사용자가 시트를 물리는 목적은 신원 일관성인데,
-        # 시트의 6개 뷰를 통째로 끌어오면 신원 신호가 평균나고 그것은 카메라
-        # 노드가 텍스트로 못 막는 실패다. 강도는 아직 바꾸지 않고 **판정만**
-        # 노출한다(실측 콘솔로 확인 후 2단계에서 반영).
-        if vae is not None and b and not _multi and _orig_ref is not None:
-            _log_sheet_analysis(analyze_reference_sheet(
-                vae, _orig_ref, sampled), "original")
-        for name, ref_latent, strength in (
-                ("camera", camera_latent, a),
-                ("original", original_latent, b)):
+        # 왜(Why) `original_latent` 이 아니라 `_orig_ref` 인가: 위 2단계가 기준
+        # 원본을 패널로 바꿀 수 있다. 옛 입력을 그대로 쓰면 분석만 패널을 보고
+        # 당김은 시트 전체를 당하게 되어 판정이 아무짝도 못 한다.
+        # 왜(Why) 루프 안에서 `_get_samples` 를 다시 부르지 않는가: `_cam_ref` /
+        # `_orig_ref` 는 위에서 이미 **텐서**로 뽑았다. `_get_samples` 은 LATENT
+        # dict 전용이라 텐서를 넣으면 조용히 None 이 되어 전부 건너뛴다
+        # (2026-09-30 실측으로 R55/R56/R59 가 전부 당김 0 이 됐다).
+        for name, ref, strength in (
+                ("camera", _cam_ref, a),
+                ("original", _orig_ref, b)):
             if not strength:
                 continue
-            ref = _get_samples(ref_latent)
             if ref is None:
                 _log(f"[GoRi Consistency Keeper] {name} 기준 없음 — 건너뜀")
                 continue
@@ -1188,21 +2761,35 @@ class GoRiConsistencyKeeper:
                 _log(f"[GoRi Consistency Keeper] {name} 배치·채널 불일치 — 건너뜀")
                 continue
             drift = _drift_mse(sampled, matched)
+            # 정규화 값도 함께 재고 **둘 다** 로그한다.
+            drift_n = _drift_norm(sampled, matched)
             eff = strength
             if drift is not None:
+                _ns = "n/a" if drift_n is None else f"{drift_n:.4f}"
                 _log(f"[GoRi Consistency Keeper] {name} 틀어짐 MSE={drift:.6f} "
-                     f"당김 {strength:.2f}")
-            # nan 은 모든 비교가 False 라 `> 0.8` 도 통과해 감쇠를
-            # 건너뛴다 → 이후 0*(matched-sampled) 로 nan 이 전파된다.
-            # `not (x <= 0.8)` 은 nan 에서 True 가 된다(2026-09-28).
-            if drift is not None and not (drift <= 0.8):
+                     f"정규화={_ns} 당김 {strength:.2f}")
+            # 왜(Why) 정규화값으로 감쇠하나 (2026-10-01 실측): 절대 MSE 규칙
+            # (0.8 / 2.0)은 이 워크플로에서 정상 참조 4건이 4.227~8.384 로
+            # 측정돼 **전부 0 으로 죽었다.** 정규화값(0.222~0.487)은 모델을
+            # 넘어가고 정상 범위를 안다. 비교 불가(None, 즉 참조가 퇴화)면
+            # 예전 규칙으로 **떨어진다** — 조용히 "안 건드림" 으로 바뀌면 그게
+            # 또 다른 조용한 실패가 된다.
+            if drift_n is not None:
+                _dn = strength * _damp_norm(drift_n)
+                if _dn < eff:
+                    eff = _dn
+                    _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준과 결과물 "
+                         f"구도가 많이 다름 — 당김 자동 감쇠 {strength:.2f}"
+                         f"→{eff:.2f} (정규화 {drift_n:.4f} > "
+                         f"{_DRIFT_NORM_KNEE:.2f}). 같은 구도 기준 사용 권장")
+            elif drift is not None and not (drift <= 0.8):
+                # nan 은 모든 비교가 False 라 `> 0.8` 도 통과해 감쇠를
+                # 건너뛴다 → 이후 0*(matched-sampled) 로 nan 이 전파된다.
+                # `not (x <= 0.8)` 은 nan 에서 True 가 된다(2026-09-28).
                 eff = strength * _damp_factor(drift)
-
-                _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준과 결과물 구도가 많이 "
-
-                f"다름 — 당김 자동 감쇠 {strength:.2f}→{eff:.2f}. "
-
-                f"같은 구도 기준 사용 권장")
+                _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준 정규화 불가 — "
+                     f"절대 MSE 규칙으로 감쇠 {strength:.2f}→{eff:.2f}. "
+                     f"참조가 퇴화했을 수 있습니다")
 
             mismatch = _lighting_mismatch(sampled, matched)
             if mismatch is not None and not (mismatch <= 1.0):
@@ -1210,6 +2797,19 @@ class GoRiConsistencyKeeper:
                 eff = eff * _light_damp_factor(mismatch)
                 _log(f"[GoRi Consistency Keeper] ⚠ {name} 조명 흐름 불일치 "
                      f"({mismatch:.2f}) — 당김 추가 감쇠 {_old_eff:.2f}→{eff:.2f}")
+            # 물리 상한. 왜(Why) 있는가:
+            # 당길수록 디테일이 줄고, **0.20 을 넘으면 더 줄어들지 않는다**
+            # (대응 지점 기준, WORK_STATUS 11-7). 참조로 당기는 노드가
+            # 참조보다 더 뭉개진 결과를 내는 걸 막는다.
+            # 실측(사람 7장, 대응 지점 에지, 원본 대비 평균):
+            #   0.00 → -1.2%(기준선)   0.20 → -33.5%   0.40 → -36.1%
+            # 조용히 줄이지 않는다 — 잘렸을 때 반드시 말한다.
+            if eff > _PHYS_CEILING:
+                _old_eff = eff
+                eff = _PHYS_CEILING
+                _log(f"[GoRi Consistency Keeper] ⚠ {name} 당김이 물리 상한을 "
+                     f"넘었습니다 {_old_eff:.2f}→{eff:.2f} — 실측상 이 이상은 "
+                     f"결과가 원본보다 뭉개집니다")
             # 부위별 adaptive 강도: 원본이 살아 있는데 결과가 뭉개진 부위만
             # 강도를 올려 그 부위를 원본 쪽으로 당긴다. 언제나 산술이며 추측이
             # 아니다 — "몇 개여야 한다"가 아니라 "얼마나 달라졌는가"만 본다.
@@ -1233,7 +2833,72 @@ class GoRiConsistencyKeeper:
             # 부위별 상향은 전역 결과에 **더하는 추가분**이다.
             # eff == 0 이면 계산하지 않는다(0*inf = nan 방지).
             if name == "original" and _pm and eff > 0:
-                _darr, _regions = detail_boost(_pm, _pm, eff)
+                _allow = None
+                if trust_gate:
+                    # 판정층 1층(work_status 10절). 원본 쪽 landmark 로
+                    # "이 부위를 원본에서 당겨와도 되는가" 를 정한다.
+                    # 판정이 없거나 vis 가 없으면 _allow=None = 제한 없음,
+                    # 즉 기존 동작으로 떨어진다(조용히 막지 않는다).
+                    # 왜(Why) _verdict 를 미리 None 으로 두나: 아래 else 분기가
+                    # `_verdict.get("verdict")` 을 읽는데, _pts 가 없으면
+                    # _verdict 가 대입 안 된다. 지금은 `_allow is not None` 이
+                    # _pts 존재를 함의해서 안전하지만, 나중에 조건이 바뀌면
+                    # UnboundLocalError 가 된다. 한 줄로 고정한다.
+                    _verdict = None
+                    _pts = (_pm.get("original") or {}).get("pts")
+                    if _pts:
+                        _verdict = judge_points(_pts)
+                        _allow = judge_region_allowance(_verdict)
+                    # 손가락 판정 (2026-10-02): 포즈 33점은 손가락 개수를 못 센다.
+                    # 손 모델로 손 개수·끝점 분리를 보고, 손상됐으면 손 부위를 막는다.
+                    # 포즈 게이트와 AND — 어느 한쪽이라도 막으면 막는다.
+                    _hand_verdict = None
+                    if _allow is not None:
+                        try:
+                            import numpy as _np_h
+                            _h_rgb = _decode_latent_rgb(vae, _orig_ref, cache=_dcache)
+                            _h_hs = None
+                            if _h_rgb is not None:
+                                _h_u8 = (_np_h.clip(_h_rgb, 0, 1) * 255).astype(_np_h.uint8)
+                                _h_hs = _hand_landmarks_from_tasks(_h_u8)
+                            if _h_hs:
+                                _h_j = judge_hands(_h_hs)
+                                _hand_verdict = _h_j.get("verdict")
+                                if _hand_verdict == _JUDGE_DAMAGED:
+                                    # 손상된 손은 원본에서 당겨오면 오류를 재주입한다.
+                                    # 손 부위만 막고 나머지는 포즈 판정을 따른다.
+                                    for _hr in ("hand_left", "hand_right"):
+                                        if _hr in _allow:
+                                            _allow[_hr] = 0.0
+                                    _log("[GoRi Consistency Keeper] 손가락 게이트: "
+                                         "원본 손 손상 — 손 부위를 당기지 않습니다")
+                        except Exception as _he:
+                            # 손 판정 실패는 포즈 판정을 덮지 않는다. 조용히 넘어가되
+                            # 사유는 남긴다 (조용한 무력화 방지).
+                            _note_pose_why("hand_gate",
+                                           _pose_gate_message("손 판정 예외 %s: %s" % (
+                                               type(_he).__name__, str(_he)[:50])))
+                    if _allow is None:
+                        # 왜(Why) 판단하지 않고 그대로 말하나 (2026-10-01):
+                        # "사람이 없는 이미지" 라고 단정하면 추측이 된다.
+                        # 판단은 하지 않고 **사유를 드러낸다**. 판단은 실측
+                        # 근거가 쌓인 뒤에 한다.
+                        _why = _POSE_WHY.get("original", "사유 기록 없음")
+                        _note_pose_why("gate", _pose_gate_message(_why))
+                        _allow = None
+                    else:
+                        _blocked = sorted(k for k, v in _allow.items()
+                                          if float(v) <= 0.0)
+                        _verdict_name = (_verdict.get("verdict")
+                                         if _verdict else "?")
+                        # 손 판정도 함께 보고한다 — 실행됐는지 구분하기 위해.
+                        # _hand_verdict 가 None 이면 손 검출 없음/미실행이다.
+                        _hand_txt = (" 손=%s" % _hand_verdict
+                                     if _hand_verdict else "")
+                        _log("[GoRi Consistency Keeper] 판정 게이트 "
+                             f"(verdict={_verdict_name}{_hand_txt}) — 미확인 부위 "
+                             f"{_blocked if _blocked else '없음'}")
+                _darr, _regions = detail_boost(_pm, _pm, eff, allow=_allow)
                 if _darr is not None:
                     try:
                         _inc = _apply_region_strength(
@@ -1249,5 +2914,17 @@ class GoRiConsistencyKeeper:
                         # 한참 알 수 없었다.
                         _log(f"[GoRi Consistency Keeper] ⚠ 부위별 복원 실패 "
                              f"({type(e).__name__}: {e}) — 전역 당김만 적용")
+        _probe_detail_direction(vae, sampled, _orig_ref, out)
+        # 마스터 게인: 전체 보정량을 strength_sampler 로 스케일한다.
+        # 왜(Why) 끝에서 한 번에 하나: 보정은 전부 `sampled + ...` 형태라
+        # `sampled + s*(out-sampled)` 이 각 eff 에 s 를 곱한 것과 수학적으로 같다.
+        # 두 곳(전역·부위)에 따로 넣으면 한쪽만 빠뜨리는 사고가 난다.
+        # s==1.0 이면 바이트 단위로 기존과 같다 (곱셈 항등원).
+        if s != 1.0:
+            try:
+                out = sampled + s * (out - sampled)
+            except Exception as _e:
+                _log(f"[GoRi Consistency Keeper] ⚠ sampler 게인 적용 실패 "
+                     f"({type(_e).__name__}) — 게인 없이 반환")
         _release_vram()
         return ({"samples": out},)
