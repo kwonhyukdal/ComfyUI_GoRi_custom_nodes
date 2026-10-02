@@ -2985,3 +2985,108 @@ R88   캐시 용량 >= 10 / 1~10장 전부 정지 0 encodes / 8x8 변경 검출
       tensor·numpy·list·RGBA·노배치 → id 키 아님 / None·스칼라만 noid
 Jev   (커밋 시 approve 확인)
 ```
+
+## 32절. 배포했더니 CI 가 빨갛다 (2026-10-02)
+
+### 32-1. 무슨 일이 있었나
+
+1.9.7 을 main 에 병합해 푸시했다. Registry 발행은 **성공**했다. CI 는
+**ubuntu·macOS 에서 실패**했다. 6잡 중 3잡 실패.
+
+```
+Publish to Comfy registry   completed / success
+CI  ubuntu-3.12 failure / ubuntu-3.10 failure / macos-3.12 failure
+    windows-3.10·3.12, macos-3.10 진행 중
+```
+
+키퍼 테스트가 **mediapipe 없는 환경에서 18건 실패**했다.
+
+### 32-2. 재현 방법 — 이걸 측정으로 돌린다
+
+추측하지 않고 CI 환경을 그대로 만들었다. `ci.yml` 은 `numpy pillow torch` 만
+설치하므로 **mediapipe 가 없는 환경**이다. `site-packages\mediapipe` 를 잠시
+이름을 바꿔 숨기고 돌린 뒤 `finally` 로 되돌렸다(복원 확인함).
+
+```
+mediapipe 숨김 → 키퍼 407 PASS / 18 FAIL / 카메라 1122 PASS / 팩 22 PASS
+mediapiep 있으면 → 키퍼 431 PASS / 0 FAIL
+```
+
+카메라와 팩은 mediapipe 와 무관하므로 두 환경에서 같다. **키퍼만** 깨졌다.
+
+### 32-3. 근본 원인 — 내 잘못
+
+```
+1  52커밋을 전부 feature 브랜치에 푸시했다
+2  ci.yml 은 push: branches:[main] 에서만 돈다 → 52커밋 동안 CI 0회
+3  PR 을 열지 않았다 (pull_request 는 열림 설정이었다)
+4  그래서 어제부터 깨진 상태를 알지 못했다
+```
+
+`AGENTS.md` 에 그 경고가 있다 — *"한 OS에서만 시험하면 '맥에서 깨진다'를 CI가
+통과시켜 배포한다."* 그대로 당했다. 내가 보고한 "테스트 통과" 는 **항상
+Windows + mediapipe 설치**였다.
+
+### 32-4. 깨진 것은 오늘 작업이 아니었다
+
+`ci_blame.py` 로 커밋을 거슬러 올라가 mediapipe 없이 돌렸다.
+
+```
+daca161 (어제, 오늘 작업 전)   FAIL 15
+7eadad8                         FAIL 18
+main                            FAIL 18
+```
+
+**어제부터 깨져 있었다.** 원인은 이 브랜치에서 `_find_base_options()` 가
+도입되면서 생긴 대조 무관한 파생이다.
+
+```
+1.9.6    `_mp.tasks.BaseOptions(...)` 를 직접 썼다 → 테스트 대역이 이 계약에 맞춰져 있음
+이후     `_find_base_options()` 가 세 경로를 찾도록 바뀜 → 대역이 예전 계약에 멈춤
+결과     mediapipe 없으면 None → 뒤따르는 R64/R74 가 전부 실패
+```
+
+production 은 실제 mediapipe 가 `mediapipe.tasks.python.core.base_options` 를
+제공하므로 영향이 없다. **테스트 대역이 뒤처진 것**이다.
+
+### 32-5. 고친 것 — 세 곳, 셋 다 대역 또는 환경 분기
+
+| 곳 | 문제 | 조치 |
+|---|---|---|
+| R64 `_install_fake_mp` | `base_options` 계층이 없어 세션 미생성 | 대역에 `core.base_options` 체인 추가. **건너뛰지 않고** 세션 캐싱·로그 1회성까지 검증 |
+| R74 | `import mediapipe as _mp` 가 필요 | 이 블록에만 최소 대역( Image/ImageFormat) 깔고 `finally` 로 복구. 전역 오염 없음 |
+| R86 | "세션 생성됨" 을 단언 | mediapipe 로 **두 갈래**. 없으면 "세션 없음 + 캐시 0" — 그 환경에서 진짜 성립하는 메모리 계약 |
+
+R74 의 대역은 되돌립니다. `sys.modules` 는 프로세스 전역이라 남기면 뒤의
+테스트가 "mediapipe 가 있다"고 오인합니다.
+
+> **부재를 통과로 적지 않았다.** R86 은 "미실행"이라고만 하지 않고, 그 환경에서
+> 실제로 성립하는 성질(세션 0 · 캐시 0)을 확인합니다. 없는 걸 통과로 쓰면
+> 회귀를 놓치니까요.
+
+### 32-6. 결과 — 두 환경 다 통과
+
+```
+mediapipe 있음    카메라 1122 / 키퍼 431 / 팩 22 / 프론트 63   FAIL 0
+mediapipe 없음    카메라 1122 / 키퍼 425 / 팩 22              FAIL 0
+```
+
+### 32-7. 버전은 올리지 않는다
+
+```
+변경분     키퍼 테스트 파일 + 문서
+노드 코드  1.9.7 과 바이트 단위로 동일
+```
+
+"자기 변경에만 올린다" 규칙대로 **노드 버전과 `pyproject.toml` 을 그대로 둔다.**
+그러면 `publish_action.yml` 의 `paths: pyproject.toml` 이 걸리지 않아 **발행이
+일어나지 않고**, main 의 CI 만 green 으로 바뀐다. 같은 코드를 1.9.8 로 다시
+배포할 이유가 없다.
+
+### 32-8. 다음 배포 전 규칙
+
+```
+브랜치에 푸시한 뒤에는 ci_real.py(mediapipe 숨김)로 돌린다
+PR을 열어 CI 6개 환경 결과를 본다
+main 병합은 CI green 확인 후에만
+```

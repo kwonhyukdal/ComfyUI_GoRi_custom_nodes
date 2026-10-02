@@ -1276,17 +1276,34 @@ try:
     def _install_fake_mp(vision_mod):
         """`from mediapipe.tasks.python import vision` 가 실제로 성립하게 계층을
         만든다. import 문은 sys.modules 항목뿐 아니라 **부모 모듈의 속성**도
-        본다 — 한쪽만 넣으면 from-import 가 조용히 ImportError 가 된다."""
+        본다 — 한쪽만 넣으면 from-import 가 조용히 ImportError 가 된다.
+
+        왜(Why) `base_options` 계층까지 넣나 (2026-10-02): production 은
+        `_find_base_options()` 로 **세 경로**
+        (`mediapipe.tasks.python.core.base_options` 등)를 찾는다. 그 함수는
+        1.9.6 이 `_mp.tasks.BaseOptions` 를 직접 쓰던 것을 대체했다. 대역이
+        예전 계약에 맞춰져 있으면 **mediapipe 없는 환경**(CI 의 ubuntu·macOS)
+        에서 `_find_base_options()` 가 None 이 되고, 뒤따르는 "세션 생성"
+        검사가 전부 실패했다. 게이트가 게이트를 통과시킨 셈이다.
+        대역을 계약에 맞춰 갱신한다. **건너뛰는 대신** 세션 캐싱·로그 1회성까지
+        그대로 검증한다. 부재를 전제로 하는 검사는 `_pose_landmarker` 를 직접
+        스텁으로 대체하므로 영향이 없다.
+        """
         mp = _ty64.ModuleType("mediapipe")
         tasks = _ty64.ModuleType("mediapipe.tasks")
         py = _ty64.ModuleType("mediapipe.tasks.python")
+        core = _ty64.ModuleType("mediapipe.tasks.python.core")
+        bo = _ty64.ModuleType("mediapipe.tasks.python.core.base_options")
         mp.tasks = tasks
         tasks.BaseOptions = lambda **kw: object()
+        bo.BaseOptions = tasks.BaseOptions
         mp.Image = lambda **kw: object()
         mp.ImageFormat = _ty64.SimpleNamespace(SRGB="SRGB")
         py.vision = vision_mod
         for _n, _m in (("mediapipe", mp), ("mediapipe.tasks", tasks),
                        ("mediapipe.tasks.python", py),
+                       ("mediapipe.tasks.python.core", core),
+                       ("mediapipe.tasks.python.core.base_options", bo),
                        ("mediapipe.tasks.python.vision", vision_mod)):
             sys.modules[_n] = _m
 
@@ -2096,6 +2113,21 @@ try:
           ck._judge_body_frame(_fr2) is None)
 
     # --- with_visibility 경로 계약 ---
+    # (왜) 여기서 mediapipe 대역을 다시 깔나 (2026-10-02): 이 블록은
+    # `ck._TASKS_LANDMARKER` 를 직접 채워 세션 만들기를 우회하지만,
+    # `_pose_landmarks_from_tasks` 는 그래도 `import mediapipe as _mp` 하고
+    # `_mp.Image` / `_mp.ImageFormat.SRGB` 를 쓴다. mediapipe 없는 환경
+    # (CI 의 ubuntu·macOS) 에서 ImportError → `_note_pose_error` → None 이 되고
+    # 아래 5개 검사가 전부 실패했다. R64 의 대역을 재사용하지 않고 **이 블록
+    # 만큼만** 최소 대역을 깔고 나중에 되돌린다 — 전역 오염을 남기지 않기 위해.
+    _r74_saved_mp = {k: v for k, v in sys.modules.items()
+                     if k == "mediapipe" or k.startswith("mediapipe.")}
+    for _k in list(_r74_saved_mp):
+        del sys.modules[_k]
+    _mp74 = _ty64.ModuleType("mediapipe")
+    _mp74.Image = lambda **kw: object()
+    _mp74.ImageFormat = _ty64.SimpleNamespace(SRGB="SRGB")
+    sys.modules["mediapipe"] = _mp74
     _u8 = _np74.zeros((64, 64, 3), _np74.uint8)
     ck._TASKS_LANDMARKER = [_Det74([_LM74(p[0], p[1], p[2]) for p in _r74_pts()])]
     _p2 = ck._pose_landmarks_from_tasks(_u8)
@@ -2128,6 +2160,13 @@ try:
           ck.judge_reference_trust(_u8)["verdict"] == ck._JUDGE_UNDETERMINED)
 finally:
     ck._TASKS_LANDMARKER = _r74_real_lm
+    # (왜) 되돌리나: sys.modules 는 프로세스 전역이라 남기면 뒤의 테스트가
+    # "mediapipe 가 있다"고 오인한다. 깐다면 반드시 걷는다.
+    for _k in [k for k in sys.modules
+               if k == "mediapipe" or k.startswith("mediapipe.")]:
+        del sys.modules[_k]
+    for _k, _v in _r74_saved_mp.items():
+        sys.modules[_k] = _v
 
 # ---------------------------------------------------------------------------
 # R75: 판정층을 강도에 연결 (2026-10-01)
@@ -2642,14 +2681,33 @@ if ck is not None:
     _saved86 = list(ck._TASKS_HANDMARKER)
     ck._TASKS_HANDMARKER.clear()
     _hns86 = ck._hand_landmarker()
-    check("R86: 손 세션 생성됨", _hns86 is not None, type(_hns86).__name__)
-    check("R86: 세션이 1원소 캐시에 들어감", len(ck._TASKS_HANDMARKER) == 1,
-          str(len(ck._TASKS_HANDMARKER)))
+    # (왜) 두 갈래로 나누나 (2026-10-02): 이 테스트는 **진짜 .task 모델**을
+    # 열어 세션이 만들어지는지 본다. mediapipe 가 없으면 세션은 만들어질 수
+    # 없고 `_hand_landmarker` 는 `_note_pose_unavailable()` 후 None 을 돌려준다.
+    # 그건 production 의 정당한 폴백이다(macOS · mediapipe 미설치). 그런데
+    # "세션이 만들어진다" 를 단언하면 **mediapipe 없는 CI 가 실패한다.**
+    #   있음 → 세션 1개 + 캐시 1원소 + 반복해도 1개 (기존 계약)
+    #   없음 → 세션 없음 + **캐시도 0** (누적이 없다는 게 메모리 계약이다)
+    # 없는 걸 "통과" 로 적지 않고, 그 환경에서 진짜 성립하는 성질을 확인한다.
+    _mp86 = ck._find_base_options() is not None
+    if _mp86:
+        check("R86: 손 세션 생성됨", _hns86 is not None, type(_hns86).__name__)
+        check("R86: 세션이 1원소 캐시에 들어감", len(ck._TASKS_HANDMARKER) == 1,
+              str(len(ck._TASKS_HANDMARKER)))
+    else:
+        check("R86: mediapipe 부재 시 세션 없음 (설치 안내 경로)",
+              _hns86 is None, str(type(_hns86).__name__))
+        check("R86: 부재 시 캐시도 쌓이지 않음 (메모리 계약)",
+              len(ck._TASKS_HANDMARKER) == 0,
+              str(len(ck._TASKS_HANDMARKER)))
+        _say("  (참고) mediapipe 미설치 — 진짜 .task 세션은 미실행")
 
     # 3) 반복 호출이 세션을 늘리지 않는다 (메모리 — 1원소 캐시 계약)
     for _ in range(3):
         ck._hand_landmarker()
-    check("R86: 반복 호출에도 세션 1개 유지", len(ck._TASKS_HANDMARKER) == 1,
+    _want86 = 1 if _mp86 else 0
+    check("R86: 반복 호출에도 세션 %d개 유지" % _want86,
+          len(ck._TASKS_HANDMARKER) == _want86,
           str(len(ck._TASKS_HANDMARKER)))
     ck._TASKS_HANDMARKER[:] = _saved86
 
