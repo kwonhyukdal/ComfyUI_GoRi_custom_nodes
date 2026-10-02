@@ -1,0 +1,82 @@
+#!/bin/sh
+# Commit gate.
+#
+# Rule: a keeper change requires Keeper_Logic.md to be at least as new as the
+#       code. That doc is a personal reference and is gitignored, so it is
+#       checked by modification time rather than by staging.
+#
+# Why this exists (2026-10-01): working one long session kept producing
+# confident wrong conclusions - denoise, the switch and the sheet verdict were
+# each settled by guessing first and measuring later. WORK_STATUS.md exists to
+# stop that, but a doc nobody is forced to touch goes stale, and a stale doc
+# is worse than none because it reads as authoritative.
+#
+# Why the WORK_STATUS.md staging rule was removed (2026-10-02): it required a
+# .py change to stage WORK_STATUS.md alongside it. That doc is now gitignored
+# because it holds internal workings - wrong conclusions and their corrections,
+# measured numbers, internal judgements - which must not ship to Manager users.
+# Once it is gitignored, the rule can only be satisfied with git add -f, so it
+# pressured the exact thing it was meant to prevent. Freshness is still checked
+# for the two logic docs below, which stay local for the same reason.
+#
+# Pure ASCII on purpose: git runs this under sh, and a hook carrying UTF-8 can
+# be mis-split by a non-UTF-8 console the same way a .bat can.
+#
+# Bypass deliberately:  git commit --no-verify
+# A blocked commit is a prompt to write down what changed, not a wall.
+
+# Each logic doc is personal and gitignored, so it is checked by modification time
+# rather than by staging, and it only guards the folder it documents.
+# Doc naming follows the rule: <development target name>_Logic.md
+LOGIC_DOC="Keeper_Logic.md"
+LOGIC_DIR="Comfyui-GoRi-Consistency-Keeper"
+CAMERA_LOGIC_DOC="camera_Logic.md"
+# Why the odd casing: git matches pathspecs case-sensitively even on Windows, and
+# a wrong-case directory silently matches nothing - the rule then never fires and
+# reports success. Both directory names below are copied from `git ls-files`.
+CAMERA_DIR="ComfyUI-GoRi-camera-director"
+
+staged="$(git diff --cached --name-only)"
+[ -z "$staged" ] && exit 0
+
+# The WORK_STATUS.md staging rule used to live here. It is gone as of
+# 2026-10-02 because that doc is gitignored now; see the header for why
+# requiring it by stage only pushed people toward `git add -f`.
+
+# Rule 2. If a doc does not exist - fresh clone, or someone who does not keep it
+# - the rule does not apply. A gate that fires for everyone over a file nobody has
+# is a gate people learn to bypass.
+check_freshness() {
+  _doc="$1"
+  _dir="$2"
+  [ -f "$_doc" ] || return 0
+  for _f in $(echo "$staged" | grep "^$_dir/.*\.py$"); do
+    if [ "$_f" -nt "$_doc" ]; then
+      {
+        echo ""
+        echo "BLOCKED: code is newer than $_doc."
+        echo ""
+        echo "  $_f   (edited after the doc)"
+        echo "  $_doc"
+        echo ""
+        echo "$_doc documents every function, constant and decision in this"
+        echo "folder. A code change that does not update it leaves the document"
+        echo "describing code that no longer exists."
+        echo ""
+        echo "Read it, update it, then mark it newer than the code:"
+        echo "  touch $_doc"
+        echo ""
+        echo "If this change genuinely needs no doc update, bypass on purpose:"
+        echo "  git commit --no-verify"
+        echo ""
+      } >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+check_freshness "$LOGIC_DOC" "$LOGIC_DIR" || exit 1
+check_freshness "$CAMERA_LOGIC_DOC" "$CAMERA_DIR" || exit 1
+
+exit 0

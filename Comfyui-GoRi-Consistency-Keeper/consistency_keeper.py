@@ -22,7 +22,7 @@ from __future__ import annotations
 # 관리 단위일 뿐이다. 키퍼만 고쳤는데 팩 버전을 올리면 카메라도 바뀐 것처럼
 # 보인다. 각 노드는 자기 변경에만 버전을 올린다. 새 노드를 만들면 첫날부터
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
-__version__ = "1.9.7"
+__version__ = "1.9.8"
 
 
 import importlib as _importlib
