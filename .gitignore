@@ -267,3 +267,13 @@ install_hook.bat
 .tracking
 
 
+
+# ── 개발 산출물: 배포 저장소에서 제외 (2026-10-02) ────────────────────
+# 이 저장소는 사용자에게 내려가는 배포물이다. 사용자는 ComfyUI Manager 에서
+# 노드를 **사용**하려고 받으며, 테스트를 돌리거나 개발하지 않는다. 아래는
+# 개발에만 쓰이는 것이므로 여기서 추적을 끊는다. 개발·검증은 비공개 원본
+# 저장소(Private_Comfyui_GoRi_camera_director / _Consistency_Keeper)에서 한다.
+tests/
+.github/workflows/ci.yml
+.githooks/
+__pycache__/
