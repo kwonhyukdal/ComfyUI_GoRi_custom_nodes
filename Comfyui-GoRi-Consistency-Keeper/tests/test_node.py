@@ -2561,6 +2561,59 @@ if ck is not None:
 else:
     check("R81: keeper 없음 — 건너뜀", True)
 
+# ── R82. strength_sampler 마스터 게인 (2026-10-02) ────────────────────────
+# 왜(Why): camera/original 은 각 기준 쪽 당김만 정한다. 둘을 안 만지고 전체
+# 효과를 조절할 방법이 없었다. 1.0=기존 그대로, 0.0=통과, 0.5=절반.
+_say("-- R82: sampler 마스터 게인 --")
+if ck is not None:
+    _req82 = ck.GoRiConsistencyKeeper.INPUT_TYPES()["required"]
+    check("R82: strength_sampler 가 strength_camera 위에 있다",
+          list(_req82.keys()).index("strength_sampler")
+          < list(_req82.keys()).index("strength_camera"),
+          str(list(_req82.keys())))
+    check("R82: 기본 1.0 (기존 동작 그대로)",
+          abs(float(_req82["strength_sampler"][1]["default"]) - 1.0) < 1e-9,
+          str(_req82["strength_sampler"]))
+    check("R82: 범위 -1.0~1.0 (다른 강도와 동일)",
+          float(_req82["strength_sampler"][1]["min"]) == -1.0
+          and float(_req82["strength_sampler"][1]["max"]) == 1.0,
+          str(_req82["strength_sampler"]))
+    # 1.0/0.5/0.0 비율로 검증한다 — 감쇠·상한에 무관하다.
+    # 왜(Why) 절대값이 아니라 비율인가: eff 는 감쇠·물리상한을 거쳐서
+    # 테스트가 그 값을 하드코딩하면 정책이 바뀔 때마다 깨진다.
+    # `out = sampled + s*C` 구조이므로 s 비율만 보면 된다.
+    import torch as _t82
+    _s82 = _t82.zeros(1, 4, 8, 8)
+    _c82 = _t82.ones(1, 4, 8, 8)
+    _node82 = ck.GoRiConsistencyKeeper()
+    _o10 = _node82.run({"samples": _s82}, strength_sampler=1.0,
+                       strength_camera=0.5, strength_original=0.0,
+                       camera_latent={"samples": _c82})[0]["samples"]
+    _o05 = _node82.run({"samples": _s82}, strength_sampler=0.5,
+                       strength_camera=0.5, strength_original=0.0,
+                       camera_latent={"samples": _c82})[0]["samples"]
+    _o00 = _node82.run({"samples": _s82}, strength_sampler=0.0,
+                       strength_camera=0.5, strength_original=0.0,
+                       camera_latent={"samples": _c82})[0]["samples"]
+    # o05 == (o10 + sampled)/2  (절반 반영)
+    _half = (_o10 + _s82) / 2.0
+    check("R82: 0.5 는 1.0 의 절반 반영",
+          bool(((_o05 - _half).abs().max() < 1e-5).item()),
+          f"maxdiff={float((_o05 - _half).abs().max()):.6f}")
+    # o00 == sampled (통과)
+    check("R82: 0.0 은 통과 (출력=입력)",
+          bool(((_o00 - _s82).abs().max() < 1e-9).item()),
+          f"maxdiff={float((_o00 - _s82).abs().max()):.8f}")
+    # nan/inf 는 0.0 으로 (다른 강도와 같은 _safe_strength 계약)
+    _onan = _node82.run({"samples": _s82}, strength_sampler=float("nan"),
+                        strength_camera=0.5, strength_original=0.0,
+                        camera_latent={"samples": _c82})[0]["samples"]
+    check("R82: nan 게인은 0.0 (통과)",
+          bool(((_onan - _s82).abs().max() < 1e-9).item()),
+          f"maxdiff={float((_onan - _s82).abs().max()):.8f}")
+else:
+    check("R82: keeper 없음 — 건너뜀", True)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)

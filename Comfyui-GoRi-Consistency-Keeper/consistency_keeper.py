@@ -2544,6 +2544,15 @@ class GoRiConsistencyKeeper:
         return {
             "required": {
                 "sampled_latent": ("LATENT",),
+                # 샘플러 결과물 보존 강도 (2026-10-02). 전체 보정량에 거는 마스터 게인이다.
+                # 왜(Why) 필요한가: strength_camera/original 은 각 기준 쪽으로
+                # "당기는 양" 만 정한다. 둘을 다 만지지 않고 키퍼 전체 효과를
+                # 올리고 내릴 방법이 없었다. 1.0 = 기존 동작 그대로,
+                # 0.0 = 통과(출력=입력), 0.5 = 절반만 반영.
+                # 왜(Why) 기본 1.0 인가: 기존 워크플로와 바이트 단위로 같아야 한다.
+                # 기본값을 낮추면 업데이트한 사용자 결과가 전부 바뀐다.
+                "strength_sampler": ("FLOAT", {"default": 1.0, "min": -1.0,
+                                              "max": 1.0, "step": 0.05}),
                 "strength_camera": ("FLOAT", {"default": 0.2, "min": -1.0,
                                               "max": 1.0, "step": 0.05}),
                 "strength_original": ("FLOAT", {"default": 0.2, "min": -1.0,
@@ -2566,12 +2575,14 @@ class GoRiConsistencyKeeper:
             },
         }
 
-    def run(self, sampled_latent, strength_camera=0.2, strength_original=0.2,
+    def run(self, sampled_latent, strength_sampler=1.0,
+            strength_camera=0.2, strength_original=0.2,
             original_latent=None, camera_latent=None, vae=None,
             original_image=None, trust_gate=False):
         sampled = _get_samples(sampled_latent)
         if sampled is None:
             raise ValueError("(GoRi) Consistency Keeper: sampled_latent이 비어 있음")
+        s = _safe_strength(strength_sampler, "strength_sampler")
         a = _safe_strength(strength_camera, "strength_camera")
         b = _safe_strength(strength_original, "strength_original")
         out = sampled.clone() if hasattr(sampled, "clone") else sampled
@@ -2605,7 +2616,7 @@ class GoRiConsistencyKeeper:
                      "캔버스이므로 원본 기준이 사실상 없습니다)")
         else:
             _orig_from_image = False
-        if not (a or b) or (_orig_ref is None and _cam_ref is None):
+        if not s or not (a or b) or (_orig_ref is None and _cam_ref is None):
             _release_vram()
             return ({"samples": out},)
         # 인체 마스크(있으면 인물 영역만). 1회 계산해 양쪽 기준에 공유.
@@ -2840,5 +2851,16 @@ class GoRiConsistencyKeeper:
                         _log(f"[GoRi Consistency Keeper] ⚠ 부위별 복원 실패 "
                              f"({type(e).__name__}: {e}) — 전역 당김만 적용")
         _probe_detail_direction(vae, sampled, _orig_ref, out)
+        # 마스터 게인: 전체 보정량을 strength_sampler 로 스케일한다.
+        # 왜(Why) 끝에서 한 번에 하나: 보정은 전부 `sampled + ...` 형태라
+        # `sampled + s*(out-sampled)` 이 각 eff 에 s 를 곱한 것과 수학적으로 같다.
+        # 두 곳(전역·부위)에 따로 넣으면 한쪽만 빠뜨리는 사고가 난다.
+        # s==1.0 이면 바이트 단위로 기존과 같다 (곱셈 항등원).
+        if s != 1.0:
+            try:
+                out = sampled + s * (out - sampled)
+            except Exception as _e:
+                _log(f"[GoRi Consistency Keeper] ⚠ sampler 게인 적용 실패 "
+                     f"({type(_e).__name__}) — 게인 없이 반환")
         _release_vram()
         return ({"samples": out},)
