@@ -492,6 +492,12 @@ def _decode_latent_rgb(vae, latent, cache=None):
 _TASKS_LANDMARKER = []
 _POSE_NOTED = False
 
+# 손 세션 캐시. 포즈와 같은 1원소 리스트 방식 (재바인딩 없이 변이로 유지).
+# 왜(Why) 같은 방식인가: `_TASKS_LANDMARKER` 가 이미 검증된 패턴이다.
+# `global` 없이도 동작하고, 테스트가 stub 으로 교체할 수 있다.
+_TASKS_HANDMARKER = []
+_HAND_NOTED = False
+
 # 인체 마스크 감쇠 반경 = 랜드마크 bbox 긴 변의 몇 배인가.
 # 왜(Why) 0.30 인가 (2026-09-30 실측 스윕): 뼈대 중심에서 0.30x체격 거리에서
 # 가중치가 0 이 된다. 실측(인물 옆차 실물 생성본) 결과 —
@@ -534,6 +540,13 @@ _SHEET_DAMP = 0.5
 # 관절 33점 모델 파일명. 이 노드와 함께 배포된다(Apache 2.0, Google MediaPipe).
 _POSE_MODEL_FILENAME = "pose_landmarker_lite.task"
 
+# 손 21점 모델 파일명. 이 노드와 함께 배포된다(Apache 2.0, Google MediaPipe).
+# 왜(Why) 손 모델이 따로 필요한가 (2026-10-02): 포즈 33점은 손가락 끝 3점
+# (새끼·검지·엄지)만 준다. 손가락 개수(5개)와 분리·뭉개짐을 판정하려면
+# 손마다 21점이 필요하다. 포즈 모델은 손이 3개여도 33점 틀에 맞추고 끝이라
+# 여분을 셀 수 없다. 손 모델은 손마다 21점을 돌려주므로 개수를 센다.
+_HAND_MODEL_FILENAME = "hand_landmarker.task"
+
 
 def _pose_model_path():
     """사용할 .task 모델 경로 문자열을 돌려준다 (항상 str, None 아님).
@@ -565,6 +578,20 @@ def _pose_model_path():
         return env
     return _os.path.join(_os.path.dirname(_os.path.realpath(__file__)),
                           _POSE_MODEL_FILENAME)
+
+
+def _hand_model_path():
+    """사용할 손 .task 모델 경로 문자열을 돌려준다 (항상 str, None 아님).
+
+    왜(Why) 환경변수가 먼저인가: 포즈와 같은 규칙. `GORI_HAND_MODEL` 로
+    다른 손 모델을 쓸 수 있고, 동봉본이 기본이다.
+    """
+    import os as _os
+    env = _os.environ.get("GORI_HAND_MODEL")
+    if env:
+        return env
+    return _os.path.join(_os.path.dirname(_os.path.realpath(__file__)),
+                          _HAND_MODEL_FILENAME)
 
 
 def _find_base_options():
@@ -639,6 +666,101 @@ def _pose_landmarker():
         return None
     _TASKS_LANDMARKER.append(lm)
     return lm
+
+
+_HAND_MAX = 4
+_HAND_MIN_CONF = 0.3
+
+
+def _hand_landmarker():
+    """mediapipe tasks HandLandmarker 세션. 실패하면 None.
+
+    왜(Why) 포즈와 같은 1원소 리스트인가: 검증된 패턴을 따른다.
+    왜(Why) num_hands=4 인가: 2개가 정상이고 3개 이상이 비정상이다.
+    2개까지만 보면 3번째 손을 못 센다. 4개까지 봐야 여분을 잡는다.
+    왜(Why) 임계 0.3 인가: 포즈의 0.3 재시도와 같은 실측 근거 (13장 중
+    사람 있는 것은 0.3 에서 잡힌다). 손은 더 작아서 0.5 로 올리면 놓친다.
+    """
+    if _TASKS_HANDMARKER:
+        return _TASKS_HANDMARKER[0]
+    model = _hand_model_path()
+    try:
+        from mediapipe.tasks.python import vision as _vision
+        _BaseOptions = _find_base_options()
+        if _BaseOptions is None:
+            _note_hand_unavailable()
+            return None
+        options = _vision.HandLandmarkerOptions(
+            base_options=_BaseOptions(model_asset_path=model),
+            running_mode=_vision.RunningMode.IMAGE,
+            num_hands=_HAND_MAX,
+            min_hand_detection_confidence=_HAND_MIN_CONF,
+            min_hand_presence_confidence=_HAND_MIN_CONF,
+            min_tracking_confidence=_HAND_MIN_CONF)
+        lm = _vision.HandLandmarker.create_from_options(options)
+    except Exception as _e:
+        _note_pose_error('_hand_landmarker', _e)
+        return None
+    _TASKS_HANDMARKER.append(lm)
+    return lm
+
+
+def _note_hand_unavailable():
+    """손 모델 없음을 한 번만 알린다 (조용한 실패 금지)."""
+    global _HAND_NOTED
+    if _HAND_NOTED:
+        return
+    _HAND_NOTED = True
+    _log("[GoRi Consistency Keeper] 손가락 판정이 꺼져 있다. "
+         "mediapipe tasks 의 " + _HAND_MODEL_FILENAME + " 을 못 읽는다. "
+         "설치 폴더에 파일이 있는지, 또는 GORI_HAND_MODEL 환경변수 경로가 "
+         "맞는지 확인해 주세요. 포즈 기반 판정은 계속 동작한다.")
+
+
+def _hand_landmarks_from_tasks(u8):
+    """uint8 HWC RGB → 손마다 21점 리스트. 실패하면 None.
+
+    반환: [[(x, y, handedness), ... 21점], ... 손 개수만큼].
+    handedness 는 Left 또는 Right 문자열 (MediaPipe 기준, 거울상 주의).
+    """
+    try:
+        import numpy as _np
+    except Exception:
+        return None
+    hl = _hand_landmarker()
+    if hl is None:
+        return None
+    try:
+        import mediapipe as _mp
+        a = _np.ascontiguousarray(_np.asarray(u8, dtype=_np.uint8))
+        if a.ndim != 3 or a.shape[2] != 3:
+            return None
+        h, w = a.shape[0], a.shape[1]
+        if (h % 2) == 1:
+            a = a[:-1]
+        if (w % 2) == 1:
+            a = a[:, :-1]
+        img = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=a)
+        res = hl.detect(img)
+        groups = getattr(res, "hand_landmarks", None)
+        if not groups:
+            return None
+        out = []
+        for gi, g in enumerate(groups):
+            hn = None
+            try:
+                hn = res.handedness[gi][0].category_name
+            except Exception:
+                pass
+            pts = []
+            for lm in g:
+                pts.append((float(lm.x), float(lm.y), hn))
+            if len(pts) == 21:
+                out.append(pts)
+        return out or None
+    except Exception as _e:
+        _note_pose_error('_hand_landmarks', _e)
+        return None
 
 
 def _even_rgb(u8):
@@ -1980,6 +2102,81 @@ def judge_reference_trust(u8):
     판정 규칙 자체(`judge_points`)를 두 번 실행시키지 않고 검증하는 경로다.
     """
     return judge_points(_pose_landmarks_from_tasks(u8, with_visibility=True))
+
+
+_HAND_TIPS = (4, 8, 12, 16, 20)
+# 끝점 최소 간격. 왜(Why) 0.003 인가 (2026-10-02 실측):
+#   정상 손 10개   0.0041 ~ 0.0419  (손가락이 닿아도 좌표는 다르다)
+#   합성 융합손     0.0000            (좌표 복사 → 완전 일치)
+# "닿음" 과 "융합" 의 경계다. 0.015 로 잡으면 정상 6장이 damaged 가 된다.
+# 0.003 은 양쪽에 2배 여유가 있다 (0.0041/2 ≈ 0.002, 0.0000×∞).
+# 양성 표본이 합성 1개뿐이라 임계값은 약하다 — 실물 뭉개진 손이 나오면
+# 그때 다시 잰다. 근거 없이 올리지 않는다.
+_HAND_TIP_MIN_SEP = 0.003
+
+
+def judge_hands(hands):
+    """손 21점 리스트 → 손가락 개수·분리 판정 dict (순수 함수, 검출 없음).
+
+    반환은 `judge_points` 와 같은 형식:
+        {"verdict": "intact"|"damaged"|"undetermined",
+         "confidence": float,
+         "checks": [{"check_id", "ok", "detail"}],
+         "low_visibility": [],
+         "frame": None}
+
+    왜(Why) 손 개수를 세나 (2026-10-02): 포즈 33점은 손이 3개여도 33점 틀에
+    맞추고 끝이라 여분을 셀 수 없다. 손 모델은 손마다 21점을 돌려주므로
+    개수를 센다. 3개 이상이면 여분 손이다.
+    왜(Why) 끝점 분리를 보나: 6가락은 "6개가 추가"되는 게 아니라 손가락 2개가
+    붙거나 1개가 갈라져 나온다 (ANATOMY_COUNT_NEGATIVE 주석과 같은 실측).
+    끝점 5개가 뭉쳐 있으면 뭉개진 손이다.
+    """
+    out = {"verdict": _JUDGE_UNDETERMINED, "confidence": 0.0, "checks": [],
+           "low_visibility": [], "frame": None}
+    try:
+        hs = hands or []
+        n = len(hs)
+        if n == 0:
+            out["checks"].append({"check_id": "hands_absent", "ok": True,
+                                  "detail": "검출된 손 없음 (판단 보류)"})
+            out["confidence"] = 1.0
+            return out
+        # 손 개수: 1~2 정상, 3+ 여분
+        if n >= 3:
+            out["verdict"] = _JUDGE_DAMAGED
+            out["confidence"] = 0.9
+            out["checks"].append({"check_id": "hand_count", "ok": False,
+                                  "detail": "손 %d개 검출 (2개 초과)" % n})
+            return out
+        out["checks"].append({"check_id": "hand_count", "ok": True,
+                              "detail": "손 %d개" % n})
+        # 손가락 끝 5개 분리: 가장 가까운 두 끝점 사이 거리
+        worst = 1.0
+        for hi, pts in enumerate(hs):
+            if len(pts) < 21:
+                continue
+            tips = [(pts[i][0], pts[i][1]) for i in _HAND_TIPS if i < len(pts)]
+            if len(tips) < 5:
+                continue
+            for a in range(5):
+                for b in range(a + 1, 5):
+                    dx = tips[a][0] - tips[b][0]
+                    dy = tips[a][1] - tips[b][1]
+                    d = (dx * dx + dy * dy) ** 0.5
+                    if d < worst:
+                        worst = d
+        out["checks"].append({"check_id": "fingertip_sep", "ok": worst >= _HAND_TIP_MIN_SEP,
+                              "detail": "최소 끝점 간격 %.4f (기준 %.3f)" % (worst, _HAND_TIP_MIN_SEP)})
+        if worst < _HAND_TIP_MIN_SEP:
+            out["verdict"] = _JUDGE_DAMAGED
+            out["confidence"] = 0.8
+        else:
+            out["verdict"] = _JUDGE_INTACT
+            out["confidence"] = 0.9
+        return out
+    except (TypeError, ValueError, IndexError):
+        return out
 
 
 def framing_similarity(box_a, box_b) -> float:

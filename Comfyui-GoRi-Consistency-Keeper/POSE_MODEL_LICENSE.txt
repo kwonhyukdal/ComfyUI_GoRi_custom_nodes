@@ -45,3 +45,28 @@ Consistency Keeper 가 결과 이미지에서 **관절 33점** 좌표와 **분�
   (d) 원본에 NOTICE 파일이 있으면 함께 제공한다
 
 전체 라이선스: https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE
+
+hand_landmarker.task
+====================
+
+MediaPipe Hand Landmarker 모델 파일.
+
+    출처   https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
+    크기   7,819,105 bytes (7.46 MB)
+    sha256 fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1
+    라이선스 Apache License 2.0 (google-ai-edge/mediapipe)
+    형식   .task = ZIP 컨테이너 (TFLite + 메타데이터)
+
+사용 목적
+--------
+
+Consistency Keeper 가 결과 이미지에서 **손 21점 × N개** 좌표를 뽑는 데 쓴다.
+포즈 33점은 손가락 끝 3점(새끼·검지·엄지)만 주므로 손가락 개수·분리를 판정할
+수 없다. 손 모델은 손마다 21점(손가락 끝 5개 포함)을 주어 개수와 뭉개짐을 본다.
+
+이 파일이 없으면 손가락 판정만 조용히 꺼지고 나머지는 그대로 돈다.
+환경변수로 경로를 지정할 수 있다:
+
+    setx GORI_HAND_MODEL "C:\어딘가\hand_landmarker.task"
+
+환경변수가 동봉본보다 우선한다.

@@ -4559,6 +4559,29 @@ check("R82: 교체해도 얼굴 유지는 남김",
 check("R82: 교체해도 체형 유지는 남김",
       "same body proportions" in _g82b, _g82b[:150])
 
+# ── R83. LLM anatomy 필드가 negative 로 간다 (2026-10-02) ─────────────────
+# 왜(Why): 포즈 33점은 3번째 발을 못 보고, segmentation 은 SIGABRT 로 못 쓴다.
+# VLM 이 유일한 발/발가락 검출 수단이다. LLM 이 anatomy 를 보고하면 로그에
+# 남기고 negative 에 합쳐 다음 생성이 피하게 한다. 없으면 조용히 넘어간다.
+_say("-- R83: LLM anatomy 보고가 negative 로 --")
+_llm83 = {"scene": "a woman sitting", "camera": {},
+          "negative": "blurry",
+          "anatomy": "three feet visible, extra foot on the left"}
+# llm_obj.get("anatomy") 파싱 — run() 본문과 같은 식
+_got83 = str(_llm83.get("anatomy") or "").strip()
+check("R83: anatomy 필드를 읽는다", _got83.startswith("three feet"), _got83[:60])
+_merged83 = (_llm83.get("negative", "").rstrip("., ") + ", " + _got83
+             if _llm83.get("negative", "").strip() else _got83)
+check("R83: negative 에 합쳐진다",
+      "blurry" in _merged83 and "three feet" in _merged83, _merged83[:110])
+_noa83 = {}
+check("R83: anatomy 없으면 빈 문자열 (조용히 통과)",
+      str(_noa83.get("anatomy") or "").strip() == "", "empty OK")
+# llm_system() 에 anatomy 스키마가 있다
+_sys83 = cd.llm_system()
+check("R83: 시스템 프롬프트에 anatomy 스키마",
+      '"anatomy"' in _sys83, _sys83[_sys83.find("anatomy")-40:_sys83.find("anatomy")+40][:100])
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)

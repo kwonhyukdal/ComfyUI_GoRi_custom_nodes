@@ -2234,7 +2234,8 @@ ANATOMY_COUNT_NEGATIVE = (
     "middle, double thumbs, extra fingers, missing fingers, fingers merging "
     "into the palm, fused toes, split toes, extra toes, missing toes, "
     "feet merged into a single blob, arms fused to the torso, legs fused "
-    "together, three arms, three legs, asymmetric limbs, one arm, one leg"
+    "together, three arms, three legs, three feet, extra feet, "
+    "asymmetric limbs, one arm, one leg"
 )
 
 
@@ -3669,7 +3670,9 @@ def llm_system() -> str:
         ' "camera": {"shot": "<label>", "lens": "<label>", "angle": "<label>",'
         ' "composition": "<label>", "lighting": "<label>", "grade": "<label>",'
         ' "motion": "<label>", "motion2": "<label>", "speed": "<label>", "amplitude": "<label>"},'
-        ' "negative": "<optional extra English negative phrases>"}\n'
+        ' "negative": "<optional extra English negative phrases>",'
+        ' "anatomy": "<ONLY if you see wrong limb counts in the attached image(s):'
+        ' e.g. three feet, extra hand, six fingers, missing leg. Otherwise OMIT this key>"}\n'
         "Rules:\n"
         "- Every camera value MUST be copied EXACTLY from the allowed labels below "
         "(or \"자동 (auto)\" when unsure).\n"
@@ -4290,11 +4293,28 @@ class CameraDirector:
         # 3) 장면: llm 성공 시 영문 확장, 그 외 주제 원문
         scene, scene_src = topic, "주제 원문"
         llm_extra = ""
+        llm_anatomy = ""
         if tier == "llm" and isinstance(llm_obj, dict):
             s = clean_scene_text(str(llm_obj.get("scene") or ""))
             if s:
                 scene, scene_src = s, "LLM 확장"
             llm_extra = str(llm_obj.get("negative") or "")
+            # 왜(Why) anatomy 를 여기서 읽나 (2026-10-02): LLM 이 참조 이미지에서
+            # 잘못된 사지 개수(발 3개, 손 6가락 등)를 보면 보고하게 했다.
+            # 포즈 33점은 3번째 발을 못 보고, segmentation 은 SIGABRT 로 못 쓴다.
+            # VLM 이 유일한 발/발가락 검출 수단이다. 있으면 ⚠ 로 알리고 negative 에
+            # 합쳐 다음 생성이 피하게 한다. 없으면(키 생략) 조용히 넘어간다.
+            llm_anatomy = str(llm_obj.get("anatomy") or "").strip()
+            if llm_anatomy:
+                _log(f"[Camera Director] ⚠ LLM이 참조 이미지에서 해부학 이상을 "
+                     f"보고했습니다: {llm_anatomy[:150]}")
+                # negative 에 합쳐 다음 생성이 피하게 한다. llm_extra 와 같은
+                # 경로(L4421 build_negative)로 간다 — 둘 다 LLM 이 준 회피 지시라
+                # 합치는 게 맞다. 로그는 위에서 따로 남겼으므로 추적 가능하다.
+                llm_extra = (llm_extra.rstrip("., ") + ", " + llm_anatomy
+                             if llm_extra.strip() else llm_anatomy)
+            else:
+                llm_anatomy = ""
 
         if not topic:
             _log("[Camera Director] ⚠ 주제가 비어 있습니다 — 카메라 조항만 출력됩니다.")
@@ -4445,6 +4465,9 @@ class CameraDirector:
                 # 네트워크 호출 0회라 `used=True` 인데 시간이 안 걸린다. 지표가
                 # 없으면 "작동을 안 하는데?" 를 구분할 방법이 없다 — 로그로도.
                 "cache": llm_client.cache_stats()[1],
+                # 왜(Why) anatomy 를 넣나 (2026-10-02): LLM 이 본 사지 이상이
+                # 있으면 기록해야 다음에 "언제 처음 봤나" 를 추적할 수 있다.
+                "anatomy": llm_anatomy[:200] if llm_anatomy else "",
             },
             elapsed_ms=int((time.perf_counter() - _t0) * 1000))
         _release_vram()

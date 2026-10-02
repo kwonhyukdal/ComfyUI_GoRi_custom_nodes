@@ -639,10 +639,10 @@ check("R61: README 가 없는 os.path 주장을 하지 않음",
 # 1.9.5 부터는 동봉 모델 경로 조립에 os.path 를 쓴다(__file__ 기준). 그래서
 # "os.path 0건" 이라는 이전 불변식은 더 이상 사실이 아니다 — 지우면 코드가
 # 문서와 어긋나게 되니까 **구체적으로 다시 잡는다**:
-#   허용  __file__ 기준 1곳 경로 조립 (동봉 모델)
+#   허용  __file__ 기준 경로 조립 (동봉 모델 2개: 포즈 + 손)
 #   금지  시스템 여러 곳을 뒤지는 탐색 (os.path.exists/listdir/walk/glob)
 check("R61: os.path 는 동봉 모델 경로 조립에만 쓰인다",
-      _ksrc.count("os.path") <= 3
+      _ksrc.count("os.path") <= 6
       and "os.path.join(_os.path.dirname(_os.path.realpath(__file__))" in _ksrc,
       f"os.path {_ksrc.count('os.path')}건 (별칭 _os 사용 가능)")
 check("R61: 파일시스템 탐색은 여전히 없다 (R61 취지)",
@@ -2523,5 +2523,44 @@ if ck is not None:
 else:
     check("R80: keeper 없음 — 건너뜀", True)
 
+# ── R81. 손가락 판정 (judge_hands) ─────────────────────────────────────
+# 왜(Why): 포즈 33점은 손가락 끝 3점만 주어 개수·분리를 판정할 수 없다.
+# 손 모델(21점×N개)로 손 개수와 끝점 분리를 본다. 2026-10-02 실측:
+#   정상 손 10개  0.0041~0.0419  → intact
+#   합성 융합손   0.0000          → damaged
+# 임계 0.003 은 "닿음" 과 "융합" 의 경계다.
+_say("-- R81: 손가락 판정 --")
+if ck is not None:
+    # 빈 입력 → undetermined (판단 보류, 정상도 비정상도 아님)
+    _jh0 = ck.judge_hands(None)
+    check("R81: 손 없음은 undetermined",
+          _jh0["verdict"] == ck._JUDGE_UNDETERMINED, _jh0["verdict"])
+    _jh0b = ck.judge_hands([])
+    check("R81: 빈 리스트도 undetermined",
+          _jh0b["verdict"] == ck._JUDGE_UNDETERMINED, _jh0b["verdict"])
+    # 손 3개 → damaged (여분 손)
+    _fake3 = [[(0.1 * i, 0.1, None) for _ in range(21)] for i in range(3)]
+    _jh3 = ck.judge_hands(_fake3)
+    check("R81: 손 3개는 damaged",
+          _jh3["verdict"] == ck._JUDGE_DAMAGED, _jh3["verdict"])
+    # 손 1개 + 끝점 분리 → intact
+    _good = [[(0.10 + 0.02 * (i % 5), 0.10 + 0.01 * (i // 5), None) for i in range(21)]]
+    _jh1 = ck.judge_hands(_good)
+    check("R81: 분리된 손은 intact",
+          _jh1["verdict"] == ck._JUDGE_INTACT, _jh1["verdict"])
+    # 손 1개 + 끝점 겹침 → damaged
+    _fused = [[(0.10, 0.10, None) for _ in range(21)]]
+    _jhf = ck.judge_hands(_fused)
+    check("R81: 겹친 끝점은 damaged",
+          _jhf["verdict"] == ck._JUDGE_DAMAGED, _jhf["verdict"])
+    # 상수 존재
+    check("R81: 손끝 인덱스 상수", ck._HAND_TIPS == (4, 8, 12, 16, 20),
+          str(ck._HAND_TIPS))
+    check("R81: 분리 임계 상수", abs(ck._HAND_TIP_MIN_SEP - 0.003) < 1e-9,
+          str(ck._HAND_TIP_MIN_SEP))
+else:
+    check("R81: keeper 없음 — 건너뜀", True)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
+
 sys.exit(1 if FAIL else 0)
