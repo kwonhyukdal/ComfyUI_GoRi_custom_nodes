@@ -243,3 +243,22 @@ run_tests.bat
 Keeper_Logic.md
 camera_Logic.md
 
+# ── 개발 도구: 배포물에 포함하지 않는다 (2026-10-02) ──────────────────
+# 아래 6개는 1.9.7 배포 시점에 공개 저장소에 올라가 있었다. 전부 로컬 개발
+# 전용이고 사용자에게 아무 의미가 없으며, 일부는 내부 workings 을 그대로
+# 노출한다. 배포 폴더(BOM/LOCAL.md 와 함께 있는 곳)와 개발 폴더 양쪽에서
+# 계속 쓰므로 **디스크에는 남기고** git 추적만 끊는다 — `git rm --cached`.
+#
+# AGENTS.md          이 저장소에서 코딩하는 AI 를 위한 규칙
+# WORK_STATUS.md     진행상황 문서. 내부 추론·실측 수치·판단이 들어간다
+# jev-pref.json      Jev 게이트 규칙
+# .githooks/         로컬 커밋 훅 (install_hook.bat 으로 설치)
+# install_hook.bat   위 훅의 설치기. 공개 저장소에서는 동작 의미가 없다
+# .tracking          비공개 소스 저장소 → 배포 폴더 복사 추적 목록
+AGENTS.md
+WORK_STATUS.md
+jev-pref.json
+.githooks/
+install_hook.bat
+.tracking
+
