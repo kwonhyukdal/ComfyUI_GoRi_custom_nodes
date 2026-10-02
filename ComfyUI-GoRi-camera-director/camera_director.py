@@ -2669,7 +2669,7 @@ PHYSICS_CONTACT_RULES = (
      "leans into them, overlapping silhouettes, weight visibly transferred",
      "standing apart, empty space between the two people, both standing upright "
      "and separate, no contact"),
-    (("안고", "안는", "안은", "안키", "안김", "품에", "감싸", "拥抱", "hold",
+    (("안고", "안는", "안은", "안키", "안김", "품에", "감싸", "hold",
       "hug", "embrace", "carried"),
      "close hold: arms wrapped around the other person's body, bodies pressed "
      "together, the held person lifted with feet clear of the ground",

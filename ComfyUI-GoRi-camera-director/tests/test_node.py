@@ -2780,7 +2780,7 @@ print("-- R38: 동물 주제 판별·종 보존 --")
 check("R38: 강아지 판별", cd._is_animal_subject("창가에서 앉아 있는 강아지"))
 check("R38: 영어 cat 판별", cd._is_animal_subject("a tabby cat on a sofa"))
 check("R38: 인물 주제는 사람 우선", not cd._is_animal_subject("사람 옆의 강아지"))
-check("R38: 사물 주제 미적용", not cd._is_animal_subject("木质 테이블 위 커피"))
+check("R38: 사물 주제 미적용", not cd._is_animal_subject("a wooden table with coffee"))
 check("R38: 빈 입력 안전", not cd._is_animal_subject(""))
 _pos_an = cd.assemble("a dog in a park", dict(cd.DEFAULTS, shot="중경 (MS)"),
                       topic="공원 산책 강아지")
