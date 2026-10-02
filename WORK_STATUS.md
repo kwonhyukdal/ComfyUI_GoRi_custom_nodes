@@ -2078,6 +2078,39 @@ LLM anatomy 는 정상 이미지에서 보고 없음 (오탐이면 안 됨).
 
 ---
 
+## 20절. 외부 코드 리뷰 반영 — 확정 6건 + hardening 6건 (2026-10-02)
+
+### 20-1. 확정 버그 (반드시 고침)
+
+| # | 위치 | 내용 | 수정 |
+|---|---|---|---|
+| 1 | 키퍼 hand decode | 수동 trim 이 `_even_rgb` 의 <2px 가드를 빼먹음. 1px 입력이 0행 배열로 네이티브 SIGABRT 경로 | `_even_rgb` 재사용 |
+| 2 | `judge_hands` | 21점 미만 손만 있으면 `worst=1.0` 초기값으로 intact 반환 (거짓 확신) | `found` 플래그, 없으면 undetermined |
+| 3 | `llm_client` `_cache_logged` | `_cache` 퇴거 시 집합에 남음. 장시간 세션 무제한 증가 | 퇴거 시 함께 discard |
+| 4 | 카메라 anatomy | LLM 출력 무제한으로 negative 에 합류 (프롬프트 오염) | 200자 + 영문·숫자·기본구두점만 |
+
+### 20-2. 저비용 hardening (고침)
+
+| # | 위치 | 내용 |
+|---|---|---|
+| 5 | 키퍼 `_verdict=None` 초기화 | `_allow is not None` 이 `_pts` 존재를 함의해서 안전하지만 조건 변경 시 UnboundLocalError. 한 줄로 고정 |
+| 6 | 키퍼 `_POSE_LOOSE` | `_find_base_options()` None 검사 없음 → TypeError 가 transient 로 잡힘. 꺼짐으로 알리게 수정 |
+| 7 | 키퍼 sampler 음수 | min -1.0 허용하는데 설명 없음 → 왜 주석 추가 (camera/original 과 규격 통일) |
+| 8 | 키퍼 `_POSE_ERR_NOTED` 공유 | 손·포즈가 같은 플래그. 분리하면 테스트 깨짐 → 문서로 남김 |
+| 9 | 카메라 캐시 로그 락 | print I/O 를 락 안에서 → 플래그만 락 안, 출력은 밖 |
+| 10 | 카메라 outfit 동사 | wearing/wore/changed 등 굴절형 누락 → 확장. 형용사 단독은 그대로 (의도적 교체로 봄) |
+| 11 | 카메라 `sheet_reject` 키 | float 실수 키 → 무제한 증가. 고정 키로, 값은 메시지 안에 |
+| 12 | 카메라 중복 else/double-if | `else: llm_anatomy=""` (이미 빈 값) + `if hit` 2회 → 병합 |
+
+### 20-3. 리뷰가 틀린 것 1건
+
+`_default_telemetry_sender` "0 호출" — 실제로는 스레드 target 으로 사용 중.
+AST Call 탐지가 `target=` 참조를 놓친 것이다. 18절에서 이미 살렸고 이번에도 유지.
+
+테스트: **1068 / 408 / 20** FAIL 0. Jev approve.
+
+---
+
 ## 20절. strength_sampler 마스터 게인 (2026-10-02)
 
 `strength_camera` 바로 위에 추가. 전체 보정량에 거는 마스터 게인이다.

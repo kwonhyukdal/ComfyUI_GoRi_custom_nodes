@@ -735,11 +735,12 @@ def _hand_landmarks_from_tasks(u8):
         a = _np.ascontiguousarray(_np.asarray(u8, dtype=_np.uint8))
         if a.ndim != 3 or a.shape[2] != 3:
             return None
-        h, w = a.shape[0], a.shape[1]
-        if (h % 2) == 1:
-            a = a[:-1]
-        if (w % 2) == 1:
-            a = a[:, :-1]
+        # 왜(Why) 직접 자르지 않고 _even_rgb 를 쓰나: 수동 trim 은 <2px 가드를
+        # 빼먹는다. 1px 입력이 0행/0열 배열이 되어 네이티브 SIGABRT 경로로 간다 —
+        # _even_rgb 가 막기 위해 만들어진 바로 그 죽음이다. 같은 파일 헬퍼를 쓴다.
+        a = _even_rgb(a)
+        if a is None:
+            return None
         img = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=a)
         res = hl.detect(img)
         groups = getattr(res, "hand_landmarks", None)
@@ -845,6 +846,9 @@ def _pose_landmarks_from_tasks(u8, with_visibility=False):
 
 
 _POSE_ERR_NOTED = False
+# 왜(Why) 손 에러도 이 플래그를 쓰나: `_note_pose_error` 가 포즈·손을 구분하지
+# 않고 한 번만 말한다. 먼저 난 에러가 나중 에러를 가린다. 분리하면 로그가
+# 늘고 테스트의 "1회" 단언이 깨진다. 구분이 필요해지면 where 를 키에 넣는다.
 
 
 _DECODE_RETRY_NOTED = False
@@ -1416,8 +1420,14 @@ def _pose_retry_low_conf(arr, _mp):
     try:
         if _POSE_LOOSE[0] is None:
             from mediapipe.tasks.python import vision as _V
+            _BO = _find_base_options()
+            if _BO is None:
+                # _pose_landmarker 와 같은 이유: 없으면 TypeError 가 나고
+                # transient error 로 잡힌다. 여기서도 꺼짐으로 알린다.
+                _note_pose_unavailable()
+                return None
             _opts = _V.PoseLandmarkerOptions(
-                base_options=_find_base_options()(
+                base_options=_BO(
                     model_asset_path=_pose_model_path()),
                 running_mode=_V.RunningMode.IMAGE,
                 num_poses=1,
@@ -2152,8 +2162,13 @@ def judge_hands(hands):
         out["checks"].append({"check_id": "hand_count", "ok": True,
                               "detail": "손 %d개" % n})
         # 손가락 끝 5개 분리: 가장 가까운 두 끝점 사이 거리
+        # 왜(Why) found 플래그가 필요한가: 21점 미만 손만 있으면 루프가 한 번도
+        # 안 돌아 `worst` 가 초기값 1.0 으로 남는다. 그러면 "분리됨" 으로 판정해
+        # intact 을 돌려준다 — 측정 불가인데 정상이라고 하는 거짓 확신이다.
+        # `undetermined` 가 있어야 하는 자리다.
         worst = 1.0
-        for hi, pts in enumerate(hs):
+        found = False
+        for _hi, pts in enumerate(hs):
             if len(pts) < 21:
                 continue
             tips = [(pts[i][0], pts[i][1]) for i in _HAND_TIPS if i < len(pts)]
@@ -2164,8 +2179,13 @@ def judge_hands(hands):
                     dx = tips[a][0] - tips[b][0]
                     dy = tips[a][1] - tips[b][1]
                     d = (dx * dx + dy * dy) ** 0.5
+                    found = True
                     if d < worst:
                         worst = d
+        if not found:
+            out["checks"].append({"check_id": "fingertip_sep", "ok": False,
+                                  "detail": "유효 21점 손 없음 (판단 보류)"})
+            return out
         out["checks"].append({"check_id": "fingertip_sep", "ok": worst >= _HAND_TIP_MIN_SEP,
                               "detail": "최소 끝점 간격 %.4f (기준 %.3f)" % (worst, _HAND_TIP_MIN_SEP)})
         if worst < _HAND_TIP_MIN_SEP:
@@ -2551,6 +2571,8 @@ class GoRiConsistencyKeeper:
                 # 0.0 = 통과(출력=입력), 0.5 = 절반만 반영.
                 # 왜(Why) 기본 1.0 인가: 기존 워크플로와 바이트 단위로 같아야 한다.
                 # 기본값을 낮추면 업데이트한 사용자 결과가 전부 바뀐다.
+                # 왜(Why) 음수도 허용하나: camera/original 과 같은 규격(-1.0~1.0).
+                # 음수는 보정을 뒤집는다(기준에서 밀어냄). 의도적으로 쓰는 경우만.
                 "strength_sampler": ("FLOAT", {"default": 1.0, "min": -1.0,
                                               "max": 1.0, "step": 0.05}),
                 "strength_camera": ("FLOAT", {"default": 0.2, "min": -1.0,
@@ -2781,6 +2803,12 @@ class GoRiConsistencyKeeper:
                     # "이 부위를 원본에서 당겨와도 되는가" 를 정한다.
                     # 판정이 없거나 vis 가 없으면 _allow=None = 제한 없음,
                     # 즉 기존 동작으로 떨어진다(조용히 막지 않는다).
+                    # 왜(Why) _verdict 를 미리 None 으로 두나: 아래 else 분기가
+                    # `_verdict.get("verdict")` 을 읽는데, _pts 가 없으면
+                    # _verdict 가 대입 안 된다. 지금은 `_allow is not None` 이
+                    # _pts 존재를 함의해서 안전하지만, 나중에 조건이 바뀌면
+                    # UnboundLocalError 가 된다. 한 줄로 고정한다.
+                    _verdict = None
                     _pts = (_pm.get("original") or {}).get("pts")
                     if _pts:
                         _verdict = judge_points(_pts)

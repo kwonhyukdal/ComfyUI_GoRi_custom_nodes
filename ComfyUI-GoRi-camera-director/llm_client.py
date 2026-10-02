@@ -460,28 +460,36 @@ def chat(provider: str, model: str, api_key: str,
     cache_provider = f"Custom|{endpoint}" if is_custom else provider
     key = _cache_key(cache_provider, model, system, user, image_b64, image_sig, image_list)
     global _cache_hits
+    # 왜(Why) 로그는 락 밖에서 하나: _log 가 print I/O 라 락 안에서 부르면
+    # 캐시 히트 스레드 전부가 print 직렬화에 묶인다. 플래그만 락 안에서 세우고
+    # 출력은 내놓고 한다.
+    _log_hit = None
+    _hit_obj = None
+    _hit = False
     with _cache_lock:
-        hit = key in _cache
-        if hit:
+        if key in _cache:
             _cache_hits += 1
-        if hit:
-            obj = _cache[key]
+            _hit_obj = _cache[key]
+            _hit = True
             # 왜(Why) 여기에 로그가 있나 (2026-10-02 실측): 캐시 히트는 네트워크
             # 호출 0회라 **몇 초 만에 끝난다.** 초록불은 켜지는데 시스템 자원도
             # 시간도 안 쓰는 현상을 사용자가 "작동을 안 하는데?" 로 읽었다.
             # `cam_source` 가 "LLM 판단" 인데 20ms 만에 찍힌 실측이 그 근거다
             # (카메라 노드 preflight→요약 로그 구간 19~25ms × 3회).
-            # 히트/미스 수가 telemetry 로도 보고되므로 여기서 같은 사실을 한 번만
+            # 히트 수가 telemetry 로도 보고되므로 여기서 같은 사실을 한 번만
             # 말해둔다. **같은 키는 한 번만** — 스텝 수만큼 되풀이되면 못 읽는다.
             if key not in _cache_logged:
                 _cache_logged.add(key)
-                try:
-                    _log(f"[GoRi Camera Director] LLM 캐시 히트 — 같은 입력의 "
-                         f"이전 응답을 재사용했습니다 (네트워크 호출 0회). "
-                         f"provider={cache_provider} model={model or '없음'}")
-                except Exception:
-                    pass
-            return obj
+                _log_hit = (cache_provider, model)
+    if _log_hit is not None:
+        try:
+            _log(f"[GoRi Camera Director] LLM 캐시 히트 — 같은 입력의 "
+                 f"이전 응답을 재사용했습니다 (네트워크 호출 0회). "
+                 f"provider={_log_hit[0]} model={_log_hit[1] or '없음'}")
+        except Exception:
+            pass
+    if _hit:
+        return _hit_obj
 
     api_key = (api_key or "").strip()
     if not api_key and provider not in ("Ollama", "LM Studio") and not is_custom:
@@ -597,7 +605,13 @@ def chat(provider: str, model: str, api_key: str,
     obj = extract_json(_content_from(provider, raw))
     with _cache_lock:
         if key not in _cache and len(_cache) >= _CACHE_MAX:
-            _cache.pop(next(iter(_cache)), None)  # 가장 오래된 항목 퇴거
+            # 왜(Why) _cache_logged 도 함께 비우나: _cache 는 256개로 묶이는데
+            # 로그 기억 집합은 퇴거를 몰랐다. 식별 키마다 쌓여 장시간 세션에서
+            # 무제한으로 큰다. 퇴거된 키는 다시 히트하면 다시 말한다 — 로그가
+            # 한 번 더 나오는 대가로 메모리를 묶는다.
+            _evicted = next(iter(_cache))
+            _cache.pop(_evicted, None)
+            _cache_logged.discard(_evicted)
         _cache[key] = obj
     return obj
 

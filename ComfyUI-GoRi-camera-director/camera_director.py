@@ -1599,7 +1599,11 @@ def _is_text_outfit_change(text: str) -> bool:
     if re.search(r"(?:같은|원래|기존)\s*(?:옷|의상|드레스|차림)", t):
         return False
     # 영어: 교체 동사 + 의류 ("replace A with B dress", "change into ...")
-    if re.search(r"\b(?:replace|change|swap|wear|dress in)\b", low) and re.search(
+    # 왜(Why) 굴절형을 넣나: `\bwearing\b` 은 `\bwear\b` 에 안 걸린다.
+    # "wearing a red dress" 처럼 현재진행형이 가장 흔한 교체 표현이다.
+    if re.search(r"\b(?:replac(?:e[sd]?|ing)|chang(?:e[sd]?|ing)|"
+                 r"swap(?:ped|ping)?|wear(?:ing|s)?|wore|worn|"
+                 r"dress(?:ed)? in)\b", low) and re.search(
             r"\b(?:" + _EN_GARMENT_WORDS + r")\b", low):
         return True
     # 영어: 형용사 + 의류 ("different outfit", "new dress", "red evening dress"
@@ -3475,7 +3479,10 @@ def _looks_like_sheet(arr) -> dict:
         if not out["sheet"]:
             # 여기서도 **어느 선에 걸렸는지**를 말한다. 둘 다 0 에 가까우면
             # "패널은 잡혔지만 내용이 서로 다르다" 즉 시트가 아니다.
-            _note_once("camera.sheet_reject_g%.2f_s%.2f" % (greg, sim),
+            # 왜(Why) 키가 고정인가: 실수(float)로 키를 만들면 서로 다른 값마다
+            # 새 키가 생겨 "한 번만" 계약이 깨지고 _ONCE_SEEN 이 무제한으로 큰다.
+            # 값은 메시지 안에 넣는다.
+            _note_once("camera.sheet_reject",
                        f"[Camera Director] 시트로 판정하지 않음 — 간격 균일도 "
                        f"{round(greg, 2)}(기준 {_SHEET_MIN_SPACING_RATIO}) / "
                        f"내용 유사도 {round(sim, 3)}(기준 "
@@ -4305,6 +4312,11 @@ class CameraDirector:
             # VLM 이 유일한 발/발가락 검출 수단이다. 있으면 ⚠ 로 알리고 negative 에
             # 합쳐 다음 생성이 피하게 한다. 없으면(키 생략) 조용히 넘어간다.
             llm_anatomy = str(llm_obj.get("anatomy") or "").strip()
+            # 왜(Why) 200자로 자르고 영문·숫자·기본 구두점으로만 남기나:
+            # LLM 출력이 통째로 negative(diffusion 프롬프트)에 들어간다.
+            # 장황하거나 탈주한 응답이 프롬프트를 오염시킨다. 로그(위)와
+            # 텔레메트리(아래)는 자르기 전 길이를 알 수 있게 별도 표기 없이 둔다.
+            llm_anatomy = re.sub(r"[^A-Za-z0-9 ,.\-()]+", " ", llm_anatomy).strip()[:200]
             if llm_anatomy:
                 _log(f"[Camera Director] ⚠ LLM이 참조 이미지에서 해부학 이상을 "
                      f"보고했습니다: {llm_anatomy[:150]}")
@@ -4313,8 +4325,6 @@ class CameraDirector:
                 # 합치는 게 맞다. 로그는 위에서 따로 남겼으므로 추적 가능하다.
                 llm_extra = (llm_extra.rstrip("., ") + ", " + llm_anatomy
                              if llm_extra.strip() else llm_anatomy)
-            else:
-                llm_anatomy = ""
 
         if not topic:
             _log("[Camera Director] ⚠ 주제가 비어 있습니다 — 카메라 조항만 출력됩니다.")
