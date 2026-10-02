@@ -2774,6 +2774,35 @@ class GoRiConsistencyKeeper:
                     if _pts:
                         _verdict = judge_points(_pts)
                         _allow = judge_region_allowance(_verdict)
+                    # 손가락 판정 (2026-10-02): 포즈 33점은 손가락 개수를 못 센다.
+                    # 손 모델로 손 개수·끝점 분리를 보고, 손상됐으면 손 부위를 막는다.
+                    # 포즈 게이트와 AND — 어느 한쪽이라도 막으면 막는다.
+                    _hand_verdict = None
+                    if _allow is not None:
+                        try:
+                            import numpy as _np_h
+                            _h_rgb = _decode_latent_rgb(vae, _orig_ref, cache=_dcache)
+                            _h_hs = None
+                            if _h_rgb is not None:
+                                _h_u8 = (_np_h.clip(_h_rgb, 0, 1) * 255).astype(_np_h.uint8)
+                                _h_hs = _hand_landmarks_from_tasks(_h_u8)
+                            if _h_hs:
+                                _h_j = judge_hands(_h_hs)
+                                _hand_verdict = _h_j.get("verdict")
+                                if _hand_verdict == _JUDGE_DAMAGED:
+                                    # 손상된 손은 원본에서 당겨오면 오류를 재주입한다.
+                                    # 손 부위만 막고 나머지는 포즈 판정을 따른다.
+                                    for _hr in ("hand_left", "hand_right"):
+                                        if _hr in _allow:
+                                            _allow[_hr] = 0.0
+                                    _log("[GoRi Consistency Keeper] 손가락 게이트: "
+                                         "원본 손 손상 — 손 부위를 당기지 않습니다")
+                        except Exception as _he:
+                            # 손 판정 실패는 포즈 판정을 덮지 않는다. 조용히 넘어가되
+                            # 사유는 남긴다 (조용한 무력화 방지).
+                            _note_pose_why("hand_gate",
+                                           _pose_gate_message("손 판정 예외 %s: %s" % (
+                                               type(_he).__name__, str(_he)[:50])))
                     if _allow is None:
                         # 왜(Why) 판단하지 않고 그대로 말하나 (2026-10-01):
                         # "사람이 없는 이미지" 라고 단정하면 추측이 된다.
@@ -2787,8 +2816,12 @@ class GoRiConsistencyKeeper:
                                           if float(v) <= 0.0)
                         _verdict_name = (_verdict.get("verdict")
                                          if _verdict else "?")
+                        # 손 판정도 함께 보고한다 — 실행됐는지 구분하기 위해.
+                        # _hand_verdict 가 None 이면 손 검출 없음/미실행이다.
+                        _hand_txt = (" 손=%s" % _hand_verdict
+                                     if _hand_verdict else "")
                         _log("[GoRi Consistency Keeper] 판정 게이트 "
-                             f"(verdict={_verdict_name}) — 미확인 부위 "
+                             f"(verdict={_verdict_name}{_hand_txt}) — 미확인 부위 "
                              f"{_blocked if _blocked else '없음'}")
                 _darr, _regions = detail_boost(_pm, _pm, eff, allow=_allow)
                 if _darr is not None:
