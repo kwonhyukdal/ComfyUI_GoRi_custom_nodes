@@ -4606,6 +4606,27 @@ _g84 = cd.reference_guard(1, image_labels=["1"], topic="a woman sitting")
 check("R84: 인물 topic 은 guard 유지",
       "same facial structure" in _g84, _g84[:100])
 
+# ── R85. MIT 앵글 5종이 드롭다운·절에 반영된다 (2026-10-02) ─────────────────
+# 왜(Why): xoxxel/camera-prompts (MIT) 40종 중 기존 8종에 없는 5종을
+# ANGLE 테이블에 추가했다. 드롭다운(INPUT_TYPES)과 영어 절 생성에 둘 다
+# 들어가야 한다. 하나만 되면 UI에는 보이는데 프롬프트에 안 나간다.
+_say("-- R85: MIT 앵글 5종 --")
+_new85 = ["일인칭 (POV)", "반사 (reflection)", "파노라마 (panoramic)",
+          "후면 3/4 (three-quarter rear)", "와이드 히어로 (wide hero)"]
+for _k85 in _new85:
+    check("R85: ANGLE 테이블에 있음 [%s]" % _k85[:12],
+          _k85 in cd.ANGLE, _k85)
+    check("R85: 영어 절이 비어 있지 않음 [%s]" % _k85[:12],
+          bool(cd.ANGLE.get(_k85, "").strip()), cd.ANGLE.get(_k85, "")[:60])
+_inp85 = cd.CameraDirector.INPUT_TYPES()
+_ang85 = _inp85["required"]["angle"][0]
+for _k85 in _new85:
+    check("R85: 드롭다운에 노출 [%s]" % _k85[:12], _k85 in _ang85, _k85[:20])
+check("R85: ANGLE 8→13개", len(cd.ANGLE) == 13, str(len(cd.ANGLE)))
+# 기존 8종이 그대로인지 (덮어쓰기 방지)
+for _k85 in ["수평 (eye-level)", "로우앵글 (low angle)", "측면 (side profile)"]:
+    check("R85: 기존 항목 보존 [%s]" % _k85[:12], _k85 in cd.ANGLE, _k85[:20])
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)

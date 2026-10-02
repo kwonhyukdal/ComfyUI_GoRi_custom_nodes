@@ -157,6 +157,18 @@ ANGLE = {
     "개미눈 (worm's eye)": "worm's-eye view from ground level",
     "어깨뒤 (OTS)": "over-the-shoulder framing",
     "측면 (side profile)": "side profile framing",
+    # 아래 5종은 MIT 라이선스 자료를 규격에 맞게 변형한 것이다 (2026-10-02).
+    # 출처: xoxxel/camera-prompts (MIT) — 40종 카메라 앵글의 영어 키워드와
+    # 효과 서술. 한글 라벨 + 영어 절(clause) 형식으로 맞추고, 서술은 우리
+    # 프롬프트 톤(짧은 절, 마침표 없음)에 맞게 줄였다. 원문 예시는 자동차
+    # 기준이라 인물·장면에 통용되는 부분만 취했다.
+    # 왜(Why) 새로 넣나: POV·반사·파노라마·후면3/4·히어로는 기존 8종에 없고
+    # 사용자가 topic 에 써도 매칭이 안 됐다. 드롭다운에 나오게 한다.
+    "일인칭 (POV)": "first-person point of view shot, immersive eye-level presence",
+    "반사 (reflection)": "reflection shot with mirrored surface, symmetric depth",
+    "파노라마 (panoramic)": "ultra-wide panoramic shot, expansive horizon and scale",
+    "후면 3/4 (three-quarter rear)": "three-quarter rear view, back and side visible",
+    "와이드 히어로 (wide hero)": "wide hero shot from low angle, subject monumental in environment",
 }
 
 COMPOSITION = {

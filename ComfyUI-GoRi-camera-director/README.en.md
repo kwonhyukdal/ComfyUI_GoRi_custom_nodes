@@ -403,4 +403,5 @@ Chaining (reusing each output as the next reference) is a **copy of a copy** —
 ## 10. Credits·License
 
 - Camera prompt composition rules: `higgsfield-ai/skills` (MIT) — prompt-engineering / thumbnail house-structure / video explainer blocks
+- 5 camera angles (POV·reflection·panoramic·three-quarter rear·wide hero): `xoxxel/camera-prompts` (MIT) — English keywords and effect descriptions adapted to this node's format (Korean label + English clause)
 - This node: MIT (same as the source)
