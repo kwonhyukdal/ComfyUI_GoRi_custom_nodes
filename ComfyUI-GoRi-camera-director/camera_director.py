@@ -1561,6 +1561,63 @@ def _has_outfit_apply_verb(text: str) -> bool:
     return bool(re.search(_OUTFIT_VERB, t))
 
 
+# 텍스트 단독 의상 교체의 영어 의류 어휘. 왜(Why) 슬롯 패턴과 분리하나:
+# `_clothing_role_slots` 는 "이미지 N 의 옷" 처럼 슬롯 번호를 요구한다.
+# 그런데 "red evening dress 로 교체" 처럼 **옷 자체를 지목**하는 경우는
+# 슬롯이 없다. 슬롯을 요구하면 텍스트 단독 교체를 영영 못 잡는다.
+_EN_GARMENT_WORDS = (
+    r"outfit|clothing|clothes|dress|gown|sweater|skirt|shirt|blouse|"
+    r"pants|trousers|jeans|jacket|coat|suit|uniform|wardrobe|garment|"
+    r"apparel|top|bottoms|knit|denim"
+)
+
+
+def _is_text_outfit_change(text: str) -> bool:
+    """의상 참조 이미지 없이 텍스트만으로 옷 교체를 명시했는가.
+
+    왜(Why) 이 함수가 필요한가 (2026-10-02 실측): 카메라가 명시적 교체 요청에도
+    "same outfit" 을 함께 내보냈다. 같은 프롬프트에 "red evening dress" 와
+    "same outfit" 이 공존하자 모델은 참조 이미지를 보고 원본을 택했다.
+    0.00(키퍼 미동작)에서도 같은 옷이 나와 키퍼 문제가 아님을 확인했다.
+
+    왜(Why) 슬롯을 요구하지 않나: `_is_outfit_transfer` 는 "이미지 N 의 옷" 처럼
+    슬롯 번호를 요구한다. "빨간 드레스로 갈아입혀" 처럼 옷 자체를 지목하면
+    슬롯이 없어서 영영 못 잡는다. 이 함수는 슬롯 없이 옷 교체 의사만 본다.
+
+    왜(Why) 명시 유지가 우선하나: "same outfit", "keep the outfit" 처럼 유지를
+    명시하면 교체로 보지 않는다. 모순된 지시에서 유지를 택한 것은 모델이 아니라
+    코드가 먼저 정리해야 한다 — 둘 다 내보내면 모델이 참조 이미지를 보고
+    원본을 택한다(실측).
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    # 명시 유지는 교체가 아니다 — 먼저 제외한다.
+    if re.search(r"\b(?:same|keep|preserve|maintain)\b[^.]{0,24}?\b(?:outfit|clothing|clothes|dress)\b", low):
+        return False
+    if re.search(r"(?:같은|원래|기존)\s*(?:옷|의상|드레스|차림)", t):
+        return False
+    # 영어: 교체 동사 + 의류 ("replace A with B dress", "change into ...")
+    if re.search(r"\b(?:replace|change|swap|wear|dress in)\b", low) and re.search(
+            r"\b(?:" + _EN_GARMENT_WORDS + r")\b", low):
+        return True
+    # 영어: 형용사 + 의류 ("different outfit", "new dress", "red evening dress"
+    # 뒤에 교체 맥락이 있을 때 — 단독 "red dress" 는 묘사일 수 있다)
+    if re.search(r"\b(?:different|new|another|completely different)\b[^.]{0,32}?\b(?:"
+                 + _EN_GARMENT_WORDS + r")\b", low):
+        return True
+    # 한국어: 교체 동사 + 의류 (슬롯 불필요)
+    if re.search(_OUTFIT_VERB, low) and re.search(
+            r"(?:의상|옷|옷차림|드레스|셔츠|블라우스|바지|원피스|코트|재킷|자켓|슈트|정장|한복|"
+            r"outfit|clothing|dress|clothes)", low):
+        return True
+    # 한국어: "다른 옷", "새 드레스" (명시 교체)
+    if re.search(r"(?:다른|새|새로운|완전히 다른)\s*(?:옷|의상|드레스|차림|outfit|dress)", t):
+        return True
+    return False
+
+
 def _outfit_target_slots(text: str) -> set:
     """교체 대상 슬롯(1~10). 슬롯 N 교체 -> 그 슬롯이 의상 소스가 아니라
     이쪽에 입히는 대상이다.
@@ -1945,6 +2002,16 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
                 f"proportions), do not humanize it, do not give it human hands "
                 f"or facial features")
     if image_count == 1:
+        # 왜(Why) 의상 교체 명시면 "same outfit" 을 빼나 (2026-10-02 실측):
+        # 명시 요청("red evening dress 로 교체")에도 이 줄이 함께 나가면 같은
+        # 프롬프트에 교체 지시와 유지 지시가 공존한다. 모델은 참조 이미지를 보고
+        # 원본을 택하므로 교체가 일어나지 않는다 — 0.00(키퍼 미동작)에서도 같은
+        # 옷이 나와 키퍼 문제가 아님을 확인했다. 얼굴·헤어·체형 유지는 그대로
+        # 두고 옷만 뺀다. 신원은 유지하되 의상은 바꾸는 것이 요청의 의미다.
+        if _is_text_outfit_change(topic or ""):
+            return (f"preserve the same subject identity as reference image {main}, "
+                    "same facial structure, same hairstyle, "
+                    "same body proportions, same overall color identity")
         return (f"preserve the same subject identity as reference image {main}, "
                 "same facial structure, same hairstyle, same outfit, "
                 "same body proportions, same overall color identity")

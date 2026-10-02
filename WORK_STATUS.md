@@ -1992,5 +1992,77 @@ original 참조에서 4개 패널 검출 — 캐릭터 시트 형태로 보입�
 
 ```
 1. 미해결 5-2 의상 교체 (유일하게 남은 실측 과제)
+   → 17절에서 해결. 카메라가 모순 지시를 내고 있었다
 2. p1/p2 구 파일 삭제됨 — paired_curve.json 숫자만 남음. 16절이 대체 근거
 ```
+
+---
+
+## 17절. 5-2 의상 교체 — 카메라가 모순 지시를 내고 있었다 (2026-10-02)
+
+프롬프트에 "다른 옷으로 교체"를 넣어도 같은 니트가 나왔다. 이미지가 너무 강하게
+반영된다고 적혀 있었다.
+
+### 17-1. 키퍼가 아니다 — 0.00에서도 같은 옷
+
+하네스는 이미 의상 교체 프롬프트를 주입한다
+(`"replace only the clothing with a completely different outfit"`).
+0.00(키퍼 조기 반환, 순수 샘플러)과 0.40을 비교했더니 **둘 다 같은 옷**이었다.
+
+```
+원본       흰 니트 + 데님 스커트
+0.00 출력  흰 니트 + 데님 스커트  ← 키퍼가 안 돌았는데도 같음
+0.40 출력  흰 니트 + 데님 스커트
+```
+
+→ 키퍼 문제가 아니다. 카메라 또는 모델 문제다.
+
+### 17-2. 원인 — 같은 프롬프트에 교체와 유지가 공존
+
+카메라 단독 실행으로 확인했다. 명시적 교체 topic 을 줬는데도:
+
+```
+"replace the white knit sweater and denim skirt with a red evening dress.
+ [...카메라 조항...]
+ preserve the same subject identity as reference image 1,
+ same facial structure, same hairstyle, same outfit, ..."
+```
+
+**"red evening dress" 와 "same outfit" 이 동시에 들어간다.** 모델은 참조 이미지를
+보고 원본을 택하므로 교체가 일어나지 않는다.
+
+`reference_guard` (단일 이미지)가 "same outfit" 을 **무조건** 내보낸다
+(`camera_director.py:1949`). 의상 교체 경로는 `OUTFIT_GUARD` 인데 그건 이미지 2장
+이상 + 슬롯 번호를 요구한다 (`outfit_guard`: `image_count < 2` 면 탈락).
+텍스트 단독 교체("빨간 드레스로 갈아입혀")는 경로가 없었다.
+
+### 17-3. 수정 — 텍스트 단독 감지기 + 조건부 제거
+
+```
+추가   _is_text_outfit_change(topic) — 슬롯 없이 옷 교체 의사만 본다
+       영어 replace/change/swap/wear/dress in + 의류
+       영어 different/new/another/completely different + 의류
+       한국어 교체 동사 + 의류 / "다른 옷" "새 드레스"
+       명시 유지("same outfit" "같은 옷")는 먼저 제외 — 모순을 코드가 정리한다
+수정   reference_guard 단일 이미지 분기
+       교체 명시 → "same outfit" 제거 (얼굴·헤어·체형은 유지)
+       교체 없음 → 기존 그대로
+```
+
+감지기 단위 10/10 (오탐·미탐 0). `reference_guard` 단위 3/3. 카메라 전체에서
+모순 해소 확인 ("red evening dress" 있음 + "same outfit" 없음).
+
+### 17-4. 실물 검증 — 빨간 드레스로 바뀌었다
+
+카메라 topic 에 명시 지시를 넣어 0.00 으로 실행 (297초, LLM 호출 포함):
+
+```
+원본   흰 니트 + 데님 스커트
+출력   빨간 이브닝 드레스 — 같은 얼굴·같은 포즈·같은 배경
+```
+
+**신원은 유지되고 옷만 바뀌었다.** 5-2 해결.
+
+### 17-5. 테스트
+
+R82 (13건)이 감지기·가드·모순 해소를 고정한다. 전체 **1064 / 395 / 20** FAIL 0.

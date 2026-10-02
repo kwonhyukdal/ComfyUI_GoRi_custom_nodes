@@ -4519,6 +4519,46 @@ check("R81: clear_cache 가 히트 수를 리셋한다",
 check("R81: clear_cache 가 로그 기억도 지운다 (다음 히트가 다시 말한다)",
       not llm_client._cache_logged, str(llm_client._cache_logged))
 
+# ── R82. 명시적 의상 교체에 "same outfit" 을 내보내지 않는다 (2026-10-02) ──
+# 왜(Why) 이 검사가 필요한가: 실측에서 카메라가 명시적 교체 요청
+# ("replace ... with a red evening dress") 에도 "same outfit" 을 함께 내보냈다.
+# 같은 프롬프트에 교체 지시와 유지 지시가 공존하자 모델은 참조 이미지를 보고
+# 원본을 택했다. 0.00(키퍼 미동작)에서도 같은 옷이 나와 키퍼 문제가 아님을
+# 확인했다. 얼굴·헤어·체형 유지는 그대로 두고 옷만 뺀다.
+_say("-- R82: 명시 교체에 same outfit 미포함 --")
+check("R82: 텍스트 단독 교체 감지 (영어 replace)",
+      cd._is_text_outfit_change(
+          "replace the white knit sweater with a red evening dress") is True)
+check("R82: 텍스트 단독 교체 감지 (영어 different)",
+      cd._is_text_outfit_change(
+          "replace only the clothing with a completely different outfit") is True)
+check("R82: 단순 묘사는 교체 아님",
+      cd._is_text_outfit_change("a woman in a red dress") is False)
+check("R82: 현재 옷 묘사는 교체 아님",
+      cd._is_text_outfit_change("white knit sweater and denim skirt") is False)
+check("R82: 명시 유지는 교체 아님",
+      cd._is_text_outfit_change("preserve the same outfit") is False)
+check("R82: 명시 유지는 교체 아님 (keep)",
+      cd._is_text_outfit_change("keep the same outfit as reference") is False)
+check("R82: 텍스트 단독 교체 감지 (한국어)",
+      cd._is_text_outfit_change("빨간 드레스로 갈아입혀") is True)
+check("R82: 텍스트 단독 교체 감지 (한국어 다른)",
+      cd._is_text_outfit_change("다른 옷으로 교체") is True)
+check("R82: 빈 문자열은 교체 아님",
+      cd._is_text_outfit_change("") is False)
+_g82a = cd.reference_guard(1, image_labels=["1"], topic="")
+check("R82: 빈 topic 은 same outfit 유지",
+      "same outfit" in _g82a, _g82a[:120])
+_g82b = cd.reference_guard(
+    1, image_labels=["1"],
+    topic="replace the white knit sweater with a red evening dress")
+check("R82: 교체 topic 은 same outfit 제거",
+      "same outfit" not in _g82b, _g82b[:150])
+check("R82: 교체해도 얼굴 유지는 남김",
+      "same facial structure" in _g82b, _g82b[:150])
+check("R82: 교체해도 체형 유지는 남김",
+      "same body proportions" in _g82b, _g82b[:150])
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)
