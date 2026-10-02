@@ -4737,6 +4737,98 @@ check("R87: _thumb_sig 가 내용 해시를 준다",
       and not cd._thumb_sig(_img87).startswith("noid:"),
       cd._thumb_sig(_img87))
 
+# ── R88. 참조 캐시 계단 + 내용 해시 사각지대 ─────────────────────────────
+# (왜) 이 테스트가 있는지 (2026-10-02 실측): 노드는 `image_1` ~ `image_10`
+# 으로 참조 이미지 **10장**을 받는데 캐시 용량이 8이었다. L4805 가 라벨 순서로
+# 매 실행 순차 접근하므로 working set(10) > 용량(8) 이면 LRU 이 **전부 미스**
+# 가 된다 — 순차 스캔은 LRU 최악 패턴. 측정한 계단:
+#     1~8장 → 매 실행 0 encodes /  9장 → 9/9 /  10장 → 10/10
+# 즉 지원 설정 10개 중 2개에서 캐시가 영영 이득이 없다. 용량을 올리고
+# **1~10장 전부 정지 상태 0 encodes** 를 못 박는다.
+#
+# (왜) 해시 테스트도 있는가: 이전 `_thumb_digest` 는 `image[::h//16, ::w//16]`
+# 점 샘플이라 1024px 이미지에서 64px 간격 — 샘플 사이가 보이지 않는다. 실측
+# 8x8 워터마크 200개 중 199개(100%)가 해시를 못 바꿨다. 캐시가 "바뀐 이미지
+# 에 옛 latent" 를 조용히 주면 캐시가 없는 것보다 나쁘다. 블록 평균으로
+# 바꾸고 0/200 을 확인했다. 여기서는 200회를 다시 도는 게 아니라 **한 건만**
+# 확인한다 — 한 건이 깨지면 즉시 실패한다.
+_say("-- R88: 참조 캐시 계단 + 내용 해시 --")
+
+
+class _CountVae88:
+    """인코딩을 세는 VAE. 실제 encode 비용은 셀 수 없으니 횟수만 본다."""
+
+    def __init__(self):
+        self.device = "cpu"
+        self.encodes = 0
+
+    def encode(self, s):
+        self.encodes += 1
+        return _t87.zeros(1, 4, 8, 8)
+
+
+def _walk88(imgs, vae):
+    """L4805 루프와 같은 순서·같은 키 함수로 한 번 훑는다."""
+    misses = 0
+    for _lbl, img in imgs:
+        k = cd._qwen_ref_cache_key(img, 256, 256, vae)
+        if cd._qwen_ref_cache_get(k, vae) is None:
+            cd._qwen_ref_cache_put(k, (img, _t87.zeros(1, 4, 8, 8), vae))
+            misses += 1
+    return misses
+
+
+# 용량이 한 실행의 서로 다른 키 수(10) 이상이어야 한다.
+check("R88: 캐시 용량이 최대 참조 수(10) 이상",
+      cd._QWEN_REF_CACHE_MAX >= 10, str(cd._QWEN_REF_CACHE_MAX))
+
+_thrash88 = []
+for _n88 in range(1, 11):
+    cd.clear_qwen_ref_cache()
+    _v88 = _CountVae88()
+    _imgs88 = [(i, _t87.rand(1, 128, 128, 3) + i) for i in range(1, _n88 + 1)]
+    _walk88(_imgs88, _v88)                      # 첫 실행 = 전부 미스
+    _walk88(_imgs88, _v88)                      # 예열
+    _thrash88.append(_walk88(_imgs88, _v88))    # 정지 상태
+check("R88: 1~10장 모두 정지 상태 인코딩 0회 (계단 없음)",
+      all(m == 0 for m in _thrash88),
+      "미스=" + str(_thrash88))
+cd.clear_qwen_ref_cache()
+
+# 내용 해시 — 점 샘플이 놓치던 국소 변경을 블록 평균이 잡는지.
+_b88 = _t87.rand(1, 1024, 1024, 3)
+_m88 = _b88.clone()
+_m88[:, 300:308, 700:708, :] = 1.0
+check("R88: 8x8 로컬 변경이 해시를 바꾼다",
+      cd._thumb_digest(_b88)[1] != cd._thumb_digest(_m88)[1],
+      "한 점도 안 잡으면 옛 latent 가 나온다")
+check("R88: 같은 이미지는 같은 해시 (캐시 적중 유지)",
+      cd._thumb_digest(_b88)[1] == cd._thumb_digest(_b88.clone())[1], "안정성")
+check("R88: 다른 이미지는 다른 해시",
+      cd._thumb_digest(_b88)[1] != cd._thumb_digest(_t87.rand(1, 1024, 1024, 3))[1],
+      "서로 다른 이미지 구분")
+# 크기가 다르면 shape 와 target size 가 키에 들어가므로 애초에 충돌하지 않는다.
+check("R88: 목표 크기가 다르면 키가 다르다",
+      cd._qwen_ref_cache_key(_b88, 1024, 1024, _CountVae88())
+      != cd._qwen_ref_cache_key(_b88, 512, 512, _CountVae88()), "target size")
+
+# 입력 계열 — list/numpy 도 이제 해시를 얻어야 id 키로 내려가지 않는다.
+import numpy as _npr88  # noqa: E402
+
+for _lbl88, _obj88 in (("tensor", _t87.rand(1, 64, 64, 3)),
+                       ("numpy", _npr88.zeros((64, 64, 3), dtype="float32")),
+                       ("list", [[[0.1] * 3] * 8] * 8),
+                       ("RGBA", _t87.rand(1, 64, 64, 4)),
+                       ("노 배치", _t87.rand(64, 64, 3))):
+    _d88 = cd._thumb_digest(_obj88)[1]
+    check("R88: %s 입력이 id 키로 내려가지 않는다" % _lbl88,
+          _d88 is not None and not cd._thumb_sig(_obj88).startswith("noid:"),
+          str(_d88))
+# shape 조회가 불가능한 값만 noid 로 내려간다 — 그건 이미지가 아니다.
+check("R88: None/스칼라만 noid 로 내려간다",
+      cd._thumb_digest(None)[1] is None and cd._thumb_digest(5)[1] is None,
+      "이미지가 아닌 값")
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)

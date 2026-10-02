@@ -4561,7 +4561,21 @@ class CameraDirector:
 QWEN_REF_MAX_PIXELS = 1024 * 1024  # reference conditioning 1MP 상한
 _QWEN_REF_CACHE: dict = {}
 _QWEN_REF_CACHE_ORDER: list = []
-_QWEN_REF_CACHE_MAX = 8
+# (왜) 12 인가 (2026-10-02 실측): 노드가 받는 참조 이미지는 `image_1` ~ `image_10`
+# 으로 **최대 10장**(L4906-4915)인데 용량이 8 이었다. L4805 가 라벨 순서로
+# 매 실행 순차 접근하므로, working set(10) > 용량(8) 이면 LRU 이 매 실행
+# 전부 미스가 된다 — 순차 스캔은 LRU 최악 패턴이다. 측정한 계단:
+#   1~8장  → 매 실행 0 encodes (정상 동작)
+#   9장    → 매 실행 9/9 encodes  (적중률 0%)
+#   10장   → 매 실행 10/10 encodes (적중률 0%)
+# 즉 지원 설정 10개 중 2개에서 캐시가 영영 이득이 없다. 용량은 한 실행의
+# 서로 다른 키 수(10) 이상이어야 한다. 여유 2칸은 이미지를 갈아끼운 직후의
+# 혼합 구간용이다.
+# (왜) 12 면 되는가: latent 는 put 에서 `.cpu()` 로 내려간다(L4695) — 그래서
+# VRAM 이 아니라 시스템 RAM 을 쓴다. 1MP 기준 한 장 0.25MB, 12장 3MB.
+# (왜) 무한대 는 아닌가: 키가 VAE weakref 로 검증되므로 죽은 VAE 항목은
+# 걸러지지만, dict 는 자라기만 하므로 상한이 있어야 evict 규칙이 성립한다.
+_QWEN_REF_CACHE_MAX = 12
 _QWEN_REF_LOCK = threading.Lock()
 
 
@@ -4624,16 +4638,54 @@ def _thumb_digest(image, length: int = 16):
     왜(Why): _thumb_sig와 _qwen_ref_cache_key가 동일한 축소+해시 블록을
     중복로 가지고 있어 한쪽만 수정되는 퇴행 위험이 있었다.
     (..., H, W, C) 형태의 ComfyUI IMAGE 텐서/배열을 전제로 한다.
+
+    (왜) **블록 평균**인가, 점 샘플이 아닌가 (2026-10-02 실측): 이전에는
+    `image[::h//16, ::w//16]` 로 **점**을 골랐다. 1024x1024 면 64px 간격이라
+    샘플 사이 63x63 px 가 해시에서 사라진다. 실측 결과 8x8 워터마크 200개 중
+    **199개(100%)가 해시를 못 바꿨다** — 1024px 이미지 위 8px 표식은 흔한
+    작업이다. 캐시가 "바뀐 이미지에 옛 latent" 를 조용히 돌려주므로 캐시가
+    없느니 나빴다. 오프셋 그리드 3장은 100% → 98%로effect가 거의 없었다
+    (격자가 너무 성깁니다). 블록 평균(adaptive_avg_pool2d, 64x64)은 **0/200**.
+    비용은 이미지당 약 1.4ms — VAE 인코딩 1회(수십~수백 ms)보다 작고,
+    첫 캐시 적중에서 회수된다.
+    (왜) 64 인가: 16/32/64 모두 0/200 이라 가장 싼 16 을 고르면 되지만,
+    그물코가 촘촘할수록 국소 변경이 여러 셀에 걸려 더 안전하다. 64x64x3 =
+    12KB 해시. 32 는 측정값이 같아도 여유를 두지 않았다 — 근거 없는 상수
+    늘리기를 피했다.
+
+    (왜) list 같은 입력도 해시를 얻나: 이전엔 실패해 `noid:{id(image)}`
+    키로 내려갔고, CPython 은 GC 뒤 주소를 재배정한다(실측 299/300 = 100%).
+    그 키로 서로 다른 입력이 같은 캐시 항목을 맞는다. numpy 로 한 번 더
+    변환해 해시를 얻도록 했고, 이제 `noid` 로 내려가는 것은 shape 조회가
+    불가능한 값(예: None)뿐이다.
     """
     try:
-        shape = tuple(int(d) for d in image.shape)
-        h, w = shape[-3], shape[-2]
-        step_h, step_w = max(1, h // 16), max(1, w // 16)
-        thumb = image[0, ::step_h, ::step_w, :3] if len(shape) == 4 else image[::step_h, ::step_w, :3]
         import hashlib as _hl
         import numpy as _np
-        raw = thumb.detach().cpu() if hasattr(thumb, "detach") else thumb
-        return shape, _hl.sha1(_np.asarray(raw, dtype=_np.float32).tobytes()).hexdigest()[:length]
+        import torch as _t
+        import torch.nn.functional as _tf
+        # (왜) shape 를 원본에서 읽지 않는가: list 를 넘기면 `.shape` 가 없어
+        # 여기서 죽는다. numpy 로 먼저 바꿔야 list·numpy·tensor 가 한 갈래로
+        # 합쳐진다 — 이전엔 list 가 `noid:` 키로 내려갔다.
+        raw = image.detach().cpu() if hasattr(image, "detach") else image
+        x = _np.asarray(raw, dtype=_np.float32)
+        shape = tuple(int(d) for d in x.shape)
+        if x.ndim == 4:
+            x = x[0]
+        if x.ndim != 3 or x.shape[0] < 4 or x.shape[1] < 4:
+            if x.ndim < 3:
+                # 3차원이 아닌 값(예: None, 스칼라)은 식별할 수 없다.
+                return shape, None
+            # 너무 작아 블록 평균이 불가능하면 있는 범위만 해시한다.
+            return shape, _hl.sha1(_np.ascontiguousarray(
+                x[:, :, :3]).tobytes()).hexdigest()[:length]
+        t = _t.from_numpy(_np.ascontiguousarray(x[:, :, :3]))
+        pooled = _tf.adaptive_avg_pool2d(
+            t.permute(2, 0, 1)[None], (64, 64))[0]
+        return shape, _hl.sha1(
+            _np.ascontiguousarray(
+                pooled.permute(1, 2, 0).numpy()).tobytes()
+        ).hexdigest()[:length]
     except Exception:
         return None, None
 
