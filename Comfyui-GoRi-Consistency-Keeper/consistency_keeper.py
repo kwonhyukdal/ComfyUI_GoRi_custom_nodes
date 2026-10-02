@@ -2530,10 +2530,12 @@ def _release_vram() -> None:
     왜(Why) MPS도 같이 비우는가: macOS(M1/M2/M3)는 CUDA가 아니라 MPS 메모리
     파서를 쓴다. cuda만 비우면 맥에서는 아무것도 하지 않으므로, 이 노드가
     디코드한 잔재가 통합 캐시에 남는다. hasattr 가드로 없는 환경도 안전.
+    왜(Why) gc.collect(0) 인가 (2026-10-02 실측, 카메라와 동일):
+    풀 collect 는 106ms·수집 0개. gen 0은 0.5ms.
     """
     try:
         import gc as _gc
-        _gc.collect()
+        _gc.collect(0)
         try:
             import torch as _t
             if hasattr(_t, "cuda") and _t.cuda.is_available():

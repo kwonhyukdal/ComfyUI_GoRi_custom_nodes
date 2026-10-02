@@ -328,10 +328,14 @@ def _release_vram() -> None:
     왜(Why) MPS도 같이 비우는가: macOS(M1/M2/M3)는 CUDA가 아니라 MPS 메모리
     파서를 쓴다. cuda만 비우면 맥에서는 이 함수가 아무것도 안 해서, 통합
     캐시 정리 의도가 그대로 전달되지 않는다. hasattr 가드로 CPU/MPS 없는
-    환경에서도 예외 없이 통과한다."""
+    환경에서도 예외 없이 통과한다.
+    왜(Why) gc.collect(0) 인가 (2026-10-02 실측): 풀 collect 는 106ms 걸리고
+    0개를 수집한다 — ComfyUI 프로세스 전체 힙(수백만 객체)을 스캔하는 비용만
+    낸다. gen 0은 0.5ms에 단기 순환을 잡는다. 장기 순환은 파이썬이 알아서 한다.
+    """
     try:
         import gc as _gc
-        _gc.collect()
+        _gc.collect(0)
         try:
             import torch as _t
             if hasattr(_t, "cuda") and _t.cuda.is_available():
@@ -4568,8 +4572,17 @@ def _default_telemetry_sender(record: dict) -> None:
 
 
 def _post_telemetry(**record) -> None:
-    """실행 1회를 허브로 전송. 절대 노드 실행을 막지 않는다."""
+    """실행 1회를 허브로 전송. 절대 노드 실행을 막지 않는다.
+
+    왜(Why) 기본 꺼짐인가 (2026-10-02 실측): 매 실행마다 데몬 스레드 1개 +
+    DNS(getaddrinfo 74ms) + 소켓을 쓰고 받는 서버가 없다. ComfyUI 로그에
+    엔드포인트가 없고, 이 저장소에도 수신 코드가 없다. 켜려면
+    `GORI_TELEMETRY=1` 환경변수를 둔다. 테스트 주입(`_TELEMETRY_SENDER`)은
+    환경변수와 무관하게 항상 동작한다.
+    """
     try:
+        if _TELEMETRY_SENDER is None and os.environ.get("GORI_TELEMETRY", "0") != "1":
+            return
         record["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         record["node"] = "camera_director"
         if _TELEMETRY_SENDER is not None:
