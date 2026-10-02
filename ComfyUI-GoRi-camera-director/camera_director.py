@@ -1622,6 +1622,34 @@ def _is_text_outfit_change(text: str) -> bool:
     return False
 
 
+def _is_empty_scene(text: str) -> bool:
+    """참조에 사람이 없음을 명시했는가 (빈 배경·가구·풍경).
+
+    왜(Why) 명시만 보나: 빈 문자열은 사람이 있을 수 있다 (설명 생략).
+    "사람 없음" 이라고 써야 identity 문구를 뺀다. 오탐이면 신원 보존이
+    꺼져서 더 나쁘다 — 누락은 기존 동작 그대로라 안전하다.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    # 영어: empty / no person / background only
+    if re.search(r"\b(?:empty|vacant|unoccupied)\b[^.]{0,24}?\b(?:scene|bench|chair|bed|room|background)\b", low):
+        return True
+    if re.search(r"\bno\s+(?:person|one|people|human)\b", low):
+        return True
+    if re.search(r"\bbackground\s+only\b|\blandscape\s+only\b|\bstill\s+life\b", low):
+        return True
+    # 한국어: 빈 / 사람 없음 / 배경만
+    if re.search(r"(?:빈|비어\s*있는)\s*(?:벤치|의자|침대|방|배경|풍경|장면)", t):
+        return True
+    if re.search(r"사람\s*(?:없|없음|없이)|아무도\s*없", t):
+        return True
+    if re.search(r"(?:배경|풍경)만", t):
+        return True
+    return False
+
+
 def _outfit_target_slots(text: str) -> set:
     """교체 대상 슬롯(1~10). 슬롯 N 교체 -> 그 슬롯이 의상 소스가 아니라
     이쪽에 입히는 대상이다.
@@ -1988,6 +2016,14 @@ def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> 
 def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str:
     """단일/다중 레퍼런스 이미지용 positive guard 문구를 반환한다."""
     if image_count <= 0:
+        return ""
+    # 왜(Why) 빈 장면이면 빈 문자열인가 (2026-10-02 실측): 참조에 사람이 없는데
+    # "same person" 을 내보내면 모델이 누구를 만들지 몰라 유령(반투명 인물)을
+    # 만든다 — 의자·침대 참조에서 실측. pose 0점으로 게이트는 알지만 카메라는
+    # 몰랐다. 명시적 빈 장면 지시가 있으면 identity 문구를 내지 않는다.
+    # 빈 문자열 topic 은 해당 없음 (사람 사진에 설명 없을 수 있음) — 명시적
+    # 언급만 본다. 오탐보다 누락이 안전하다 (누락이면 기존 동작 그대로).
+    if _is_empty_scene(topic or ""):
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
     plan = _person_object_plan(topic, labels)

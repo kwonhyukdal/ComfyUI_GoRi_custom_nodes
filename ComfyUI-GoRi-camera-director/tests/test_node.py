@@ -4582,6 +4582,30 @@ _sys83 = cd.llm_system()
 check("R83: 시스템 프롬프트에 anatomy 스키마",
       '"anatomy"' in _sys83, _sys83[_sys83.find("anatomy")-40:_sys83.find("anatomy")+40][:100])
 
+# ── R84. 빈 장면은 identity 문구를 내지 않는다 (2026-10-02) ────────────────
+# 왜(Why): 참조에 사람이 없는데 "same person" 을 내보내면 모델이 유령
+# (반투명 인물)을 만든다 — 의자·침대 참조에서 실측. pose 0점으로 게이트는
+# 알지만 카메라는 몰랐다. 명시적 빈 장면 지시가 있으면 identity 를 뺀다.
+_say("-- R84: 빈 장면 identity 제거 --")
+check("R84: 빈 벤치 감지 (영어)",
+      cd._is_empty_scene("empty bench, no person") is True)
+check("R84: 배경만 감지 (영어)",
+      cd._is_empty_scene("background only, no people") is True)
+check("R84: 빈 의자 감지 (한국어)",
+      cd._is_empty_scene("빈 의자 사진") is True)
+check("R84: 사람 없음 감지 (한국어)",
+      cd._is_empty_scene("사람 없음, 배경만") is True)
+check("R84: 빈 문자열은 빈 장면 아님 (사람 있을 수 있음)",
+      cd._is_empty_scene("") is False)
+check("R84: 일반 인물 묘사는 빈 장면 아님",
+      cd._is_empty_scene("a woman sitting on a bench") is False)
+check("R84: 빈 장면은 guard 빈 문자열",
+      cd.reference_guard(1, image_labels=["1"], topic="empty bench, no person") == "",
+      "identity 없음")
+_g84 = cd.reference_guard(1, image_labels=["1"], topic="a woman sitting")
+check("R84: 인물 topic 은 guard 유지",
+      "same facial structure" in _g84, _g84[:100])
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)
