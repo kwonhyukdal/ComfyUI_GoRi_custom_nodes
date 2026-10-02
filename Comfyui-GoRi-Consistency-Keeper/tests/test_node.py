@@ -2556,7 +2556,7 @@ if ck is not None:
     # 상수 존재
     check("R81: 손끝 인덱스 상수", ck._HAND_TIPS == (4, 8, 12, 16, 20),
           str(ck._HAND_TIPS))
-    check("R81: 분리 임계 상수", abs(ck._HAND_TIP_MIN_SEP - 0.003) < 1e-9,
+    check("R81: 분리 임계 상수", abs(ck._HAND_TIP_MIN_SEP - 0.001) < 1e-9,
           str(ck._HAND_TIP_MIN_SEP))
 else:
     check("R81: keeper 없음 — 건너뜀", True)
