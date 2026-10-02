@@ -2272,6 +2272,17 @@ def _pose_landmarks(img_arr):
 
     (왜) 예전엔 `mediapipe.solutions.pose.Pose` 였는데 그 API 가 없다.
     같은 이유로 tasks API + .task 모델로 대체한다.
+
+    (왜) 범위 검사가 있다 (2026-10-02): 계약은 "float 0~1" 이다. 이 계약을
+    어기면 `clip(0,1)` 이 **조용히** 값을 뭉갠다 — uint8 0~255 를 넘기면 전부
+    255 가 되고 검출이 0개가 되며 예외도 안 난다. 그래서 "포즈가 죽었다" 는
+    오해를 샌다. 실제로 이 함수를 원본 PNG 로 직접 부른 프로브가 0/18 을
+    냈고(2026-09-30), 원인은 크기였다(1024px 캡 후 11/18).
+    **production 경로에서는 이 검사가 절대 발동하지 않는다.** 실측 근거:
+    두 호출자(L2427·L2435) 모두 `_decode_latent_rgb`/`_decode_small` 로
+    오는데 둘 다 마지막에 `_as_rgb_hwc` 를 지나고 그 L264 가 `clip(0,1)`
+    이다. 슬라이스(`ref_arr[:, x0:x1]`)와 `_content_crop` 도 범위를
+    보존한다. 즉 발동 조건은 "production 이 계약을 어겼을 때" 뿐이다.
     """
     # `_pose_model_path() is None` 검사는 여기에 있었다. 도달 불가라 뺐다 —
     # 그 함수는 항상 str 을 돌려준다. 진짜 "없음" (mediapipe.tasks 미설치)은
@@ -2281,8 +2292,20 @@ def _pose_landmarks(img_arr):
         import numpy as _np
         if img_arr is None:
             return None
-        u8 = (_np.clip(_np.asarray(img_arr, dtype=_np.float32), 0.0, 1.0)
-              * 255.0).astype(_np.uint8)
+        a = _np.asarray(img_arr, dtype=_np.float32)
+        if a.size:
+            _lo = float(a.min())
+            _hi = float(a.max())
+            if _lo < 0.0 or _hi > 1.0:
+                _note_once(
+                    "pose_input_range",
+                    "[GoRi Consistency Keeper] pose input outside 0..1 "
+                    "(min=%.4f max=%.4f dtype=%s) — uint8 0..255 를 float 로 "
+                    "간주했습니다. clip 결과가 전부 255/0 이 되어 검출이 0개가 "
+                    "됩니다. float 0~1 로 변환해 넘기거나 1024px 캡을 지키십시오."
+                    % (_lo, _hi, a.dtype))
+                return None
+        u8 = (_np.clip(a, 0.0, 1.0) * 255.0).astype(_np.uint8)
         return _pose_landmarks_from_tasks(u8)
     except Exception:
         return None

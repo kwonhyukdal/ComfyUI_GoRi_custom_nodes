@@ -2726,6 +2726,97 @@ if ck is not None:
 else:
     check("R86: keeper 없음 — 건너뜀", True)
 
+# ── R87. 포즈 입력 범위 계약 ────────────────────────────────────────────
+# (왜) 이 테스트가 있는지 (2026-10-02): `_pose_landmarks` 의 계약은 "float
+# 0~1" 인데 위반해도 **예외가 안 난다**. `clip(0,1)` 이 조용히 값을 뭉갠다 —
+# uint8 0~255 를 넘기면 전부 255, 검출 0개, 반환 None. 그래서 2026-09-30 에
+# 원본 PNG 를 직접 넘긴 프로브가 포즈 0/18 을 받았고 "포즈가 죽었다" 는
+# 오해를 샌다(진짜 원인은 1024px 캡). 조용한 틀린 답은 예외보다 나쁘다 —
+# 서버가 흔적도 안 남기고 정상 응답을 돌리기 때문이다. 그래서 범위를 벗어나면
+# 사유를 한 번 남기고 None 을 돌려준다.
+#
+# (왜) production 이 안전한지 단정하지 않고 증명한가: 두 호출자(L2427·L2435) 가
+# `_decode_latent_rgb` / `_decode_small` 로 오고, 둘 다 마지막에 `_as_rgb_hwc`
+# 를 지나며 그 L264 가 `clip(0,1)` 이다. 슬라이스와 `_content_crop` 도 범위를
+# 보존한다. 아래 3번이 그 클립을 직접 확인한다.
+#
+# (왜) 4번(성능)이 있는가: min/max 는 배열 전체를 두 번 훑는다. 이미 `clip`
+# 이 한 번 훑고 있고 배열은 `_DECODE_MAX_PIXELS`(1MP) 로 상한이 있어
+# mediapipe 추론 대비 무시할 수준이다. 상한이 없으면 이것도 근거가 깨진다.
+print("-- R87: 포즈 입력 범위 계약 --")
+if ck is not None:
+    import numpy as _npr87
+
+    _saved_seen87 = set(ck._ONCE_SEEN)
+    _KEY87 = "pose_input_range"
+
+    # 1) 계약 위반: uint8 0~255 → 막고 사유를 남긴다
+    ck._ONCE_SEEN.discard(_KEY87)
+    _u8_87 = _npr87.full((32, 32, 3), 255, dtype="uint8")
+    _r_u8 = ck._pose_landmarks(_u8_87)
+    check("R87: uint8 0~255 는 거부 (None 반환)", _r_u8 is None, str(type(_r_u8)))
+    check("R87: 거부 사유를 남겼다", _KEY87 in ck._ONCE_SEEN,
+          "한 번만 남아야 함")
+
+    # 2) 같은 위반을 반복해도 로그는 한 번 (per-frame 콘솔 폭주 방지)
+    _before87 = len(ck._ONCE_SEEN)
+    ck._pose_landmarks(_u8_87)
+    ck._pose_landmarks(_u8_87)
+    check("R87: 반복 호출에도 사유 1회", len(ck._ONCE_SEEN) == _before87,
+          "%d -> %d" % (_before87, len(ck._ONCE_SEEN)))
+
+    # 3) production 은 발동하지 않는다 — 클립이 실제로 0~1 로 만든다
+    _huge87 = _npr87.asarray(
+        _npr87.linspace(-150.0, 250.0, 16 * 16 * 3,
+                        dtype="float32").reshape(16, 16, 3),
+        dtype="float32")
+    _clipped87 = ck._as_rgb_hwc(_huge87)
+    check("R87: _as_rgb_hwc 가 폭발 입력을 0~1 로 만든다",
+          _clipped87 is not None and float(_clipped87.max()) <= 1.0
+          and float(_clipped87.min()) >= 0.0,
+          "min=%.3f max=%.3f" % (float(_clipped87.min()),
+                                 float(_clipped87.max())) if _clipped87 is not None
+          else "None")
+    ck._ONCE_SEEN.discard(_KEY87)
+    _via_prod87 = ck._pose_landmarks(_clipped87)
+    check("R87: 클립된 production 경로는 통과 (사유 없음)",
+          _KEY87 not in ck._ONCE_SEEN, "클립 후 입력이면 발동 안 함")
+    check("R87: 클립된 입력은 사유 없이 처리된다",
+          _via_prod87 is None or isinstance(_via_prod87, list),
+          str(type(_via_prod87)))
+
+    # 4) 경계값 — 정확히 0.0/1.0 은 허용, 조금만 넘어도 차단
+    ck._ONCE_SEEN.discard(_KEY87)
+    ck._pose_landmarks(_npr87.zeros((16, 16, 3), dtype="float32"))
+    _z_ok87 = _KEY87 not in ck._ONCE_SEEN
+    ck._ONCE_SEEN.discard(_KEY87)
+    ck._pose_landmarks(_npr87.ones((16, 16, 3), dtype="float32"))
+    _o_ok87 = _KEY87 not in ck._ONCE_SEEN
+    check("R87: 정확히 0.0 은 허용", _z_ok87, "경계 포함")
+    check("R87: 정확히 1.0 은 허용", _o_ok87, "경계 포함")
+    ck._ONCE_SEEN.discard(_KEY87)
+    ck._pose_landmarks(_npr87.full((16, 16, 3), 1.0001, dtype="float32"))
+    check("R87: 1.0 초과면 차단", _KEY87 in ck._ONCE_SEEN, "미세 초과도 차단")
+    ck._ONCE_SEEN.discard(_KEY87)
+    ck._pose_landmarks(_npr87.full((16, 16, 3), -0.0001, dtype="float32"))
+    check("R87: 음수로 내려가면 차단", _KEY87 in ck._ONCE_SEEN, "미세 음수도 차단")
+
+    # 5) list 입력 — `.dtype` 가 없는데 방어 경로가 죽지 않아야 한다
+    ck._ONCE_SEEN.discard(_KEY87)
+    _lst87 = ck._pose_landmarks([[[255, 255, 255]] * 8] * 8)
+    check("R87: list 입력도 예외 없이 처리",
+          _lst87 is None or isinstance(_lst87, list), str(type(_lst87)))
+
+    # 6) 빈 배열 — size 0 은 범위 검사 없이 기존 경로로
+    _empty87 = ck._pose_landmarks(_npr87.zeros((0, 0, 3), dtype="float32"))
+    check("R87: 빈 배열 예외 없음", _empty87 is None or isinstance(_empty87, list),
+          str(type(_empty87)))
+
+    ck._ONCE_SEEN.clear()
+    ck._ONCE_SEEN.update(_saved_seen87)
+else:
+    check("R87: keeper 없음 — 건너뜀", True)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)
