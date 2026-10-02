@@ -17,7 +17,7 @@
   "angle": [
     {"value": "탑다운 (top-down)", "keywords": ["탑다운", "평면 배치", "flat lay", "overhead", "위에서 내려다"]},
     {"value": "개미눈 (worm's eye)", "keywords": ["개미 눈", "worm's eye", "땅에서 올려"]},
-    {"value": "하이앵글 (high angle)", "keywords": ["위에서 내려다", "俯瞰", "아래를 내려다", "high angle", "birds-eye view"]},
+    {"value": "하이앵글 (high angle)", "keywords": ["위에서 내려다", "아래를 내려다", "high angle", "birds-eye view"]},
     {"value": "로우앵글 (low angle)", "keywords": ["웅장", "위용", "올려다보", "위대한", "heroic", "low angle", "towering"]}
   ],
   "lighting": [

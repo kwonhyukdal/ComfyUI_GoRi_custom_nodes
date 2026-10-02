@@ -44,9 +44,9 @@ _API_KEY_ENV = {
 _cache: dict = {}
 _cache_lock = threading.Lock()
 _CACHE_MAX = 256  # LLM 응답 캐시 상한 (장시간 세션의 무제한 성장 방지)
-# 캐시 히트/미스 횟수. `cache_stats()` 가 이걸 돌려준다.
+# 캐시 히트 횟수. `cache_stats()` 가 이걸 돌려준다.
+# 미스 카운터는 두지 않는다 — 읽는 곳이 없어 write-only 가 된다(2026-10-02 실측).
 _cache_hits = 0
-_cache_misses = 0
 # 캐시 히트 로그를 **키마다 한 번만** 찍기 위한 집합. 같은 입력이 스텝 수만큼
 # 되풀이돼도 로그가 한 줄로 유지된다.
 _cache_logged = set()
@@ -459,13 +459,11 @@ def chat(provider: str, model: str, api_key: str,
     # 다른 게이트웨이의 응답은 다를 수 있다).
     cache_provider = f"Custom|{endpoint}" if is_custom else provider
     key = _cache_key(cache_provider, model, system, user, image_b64, image_sig, image_list)
-    global _cache_hits, _cache_misses
+    global _cache_hits
     with _cache_lock:
         hit = key in _cache
         if hit:
             _cache_hits += 1
-        else:
-            _cache_misses += 1
         if hit:
             obj = _cache[key]
             # 왜(Why) 여기에 로그가 있나 (2026-10-02 실측): 캐시 히트는 네트워크
@@ -618,12 +616,11 @@ def cache_stats() -> tuple[int, int]:
 
 
 def clear_cache() -> None:
-    # 왜(Why) `global` 이 필수인가: 없으면 아래 세 줄이 **함수 지역변수** 가 되어
+    # 왜(Why) `global` 이 필수인가: 없으면 아래 두 줄이 **함수 지역변수** 가 되어
     # 모듈 수준 카운터가 리셋되지 않는다. 테스트가 `clear_cache()` 를 수십 번
     # 호출하므로 카운터가 누적되면 히트 수가 뒤섞인다(2026-10-02 실측).
-    global _cache_hits, _cache_misses
+    global _cache_hits
     with _cache_lock:
         _cache.clear()
         _cache_hits = 0
-        _cache_misses = 0
         _cache_logged.clear()

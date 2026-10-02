@@ -142,8 +142,6 @@ _DRIFT_NORM_KNEE = 0.50
 _PHYS_CEILING = 0.20
 _DRIFT_NORM_ZERO = 1.00
 
-_DRIFT_NORM_NOTED = False
-
 
 def _damp_norm(v) -> float:
     """정규화 불일치 -> 감쇠 계수 0~1. 비교 불가면 1.0(안 건드림).
@@ -404,7 +402,6 @@ def _decode_capped(vae, latent, max_pixels=None):
     """
     try:
         import torch.nn.functional as _f
-        import torch as _t
         h = int(latent.shape[-2])
         w = int(latent.shape[-1])
         # 왜(Why) 더 이상 8 을 박지 않는가 (2026-10-01): 이 8 은 SD 계열
@@ -539,7 +536,11 @@ _POSE_MODEL_FILENAME = "pose_landmarker_lite.task"
 
 
 def _pose_model_path():
-    """Return the .task model path to use, or None.
+    """사용할 .task 모델 경로 문자열을 돌려준다 (항상 str, None 아님).
+
+    호출부의 `is None` 검사는 방어용이다 — 지금은 도달하지 않는다.
+    파일이 실제로 없으면 `PoseLandmarker` 생성 시점에 예외가 나고,
+    그건 조용한 실패가 아니라 그 자리에서 드러나는 실패다(의도).
 
     (왜) 이게 없다면 관절 33점 이 꺼진다. 구 `mediapipe.solutions` API 는 Windows
     배포판에 없고(0.10.33 / 1.0.1 휠에 `mediapipe/python/` 항목 0개),
@@ -610,6 +611,15 @@ def _pose_landmarker():
         # 못한 탓이다. 정답은 긴 드이 아니라 그 안의 모듈 — landmarker 0.08초 생성, 33점
         # 검출까지 확인했다.
         _BaseOptions = _find_base_options()
+        if _BaseOptions is None:
+            # 왜(Why) 여기서 알리나 (2026-10-02): mediapipe.tasks 가 없으면
+            # 아래 `_BaseOptions(...)` 에서 TypeError 가 나고 `_note_pose_error` 로
+            # 잡힌다. 그런데 그건 "동작 중 실패" 로그지 "기능 꺼짐" 안내가 아니다.
+            # macOS(휠 없음) 사용자는 포즈 기능이 통째로 꺼진 줄 모른다.
+            # `_note_pose_unavailable` 은 그 안내인데 호출부가 dead 분기 안에
+            # 있어서 영영 안 불렸다. 진짜 "없음" 조건인 여기에 둔다.
+            _note_pose_unavailable()
+            return None
         options = _vision.PoseLandmarkerOptions(
             base_options=_BaseOptions(model_asset_path=model),
             running_mode=_vision.RunningMode.IMAGE,
@@ -689,7 +699,7 @@ def _pose_landmarks_from_tasks(u8, with_visibility=False):
             # 0.3 에서도 0 이다. 즉 0.3 재시도는 "사람 있는데 놓친 것" 과
             # "사람이 아예 없는 것" 을 **구별해 주는** 신호가 된다.
             # 그냥 0.5 에서 놓치면 게이트가 조용히 통과해 버린다.
-            res = _pose_retry_low_conf(lm, arr, _mp)
+            res = _pose_retry_low_conf(arr, _mp)
             groups = getattr(res, "pose_landmarks", None)
             if not groups:
                 return None
@@ -1026,7 +1036,6 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
     """
     try:
         import numpy as _np
-        import torch as _t
     except Exception:
         return None
     if _pose_landmarker() is None:
@@ -1220,10 +1229,6 @@ DETAIL_CRITICAL = ("hand_left", "hand_right", "leg_left", "leg_right",
 _NO_BOOST_NOTED = False
 
 
-_DETAIL_DIR_NOTED = False
-_DENS_PX = 640 * 360
-
-
 def _probe_detail_direction(vae, sampled, orig_ref, out):
     """원본을 당겼을 때 디테일이 늘는지 줄는지 **재서** 말한다 (미해결 5-1).
 
@@ -1280,7 +1285,7 @@ _POSE_LOOSE = [None]
 _POSE_LOOSE_CONF = 0.3
 
 
-def _pose_retry_low_conf(lm, arr, _mp):
+def _pose_retry_low_conf(arr, _mp):
     """임계값 0.3 세션으로 한 번 더 시도한다 (13장 실측 기반).
 
     왜(Why) 별도 세션인가: `min_pose_detection_confidence` 는 **생성 시점**에
@@ -1851,7 +1856,10 @@ def _judge_body_frame(tri):
         if scale < _JUDGE_TORSO_MIN:
             return None
         return (ox, oy, scale)
-    except (TypeError, ValueError, IndexError, ZeroDivisionError):
+    except (TypeError, ValueError, IndexError):
+        # ZeroDivisionError 는 올 수 없다 — 나눗셈이 없고 **0.5 제곱(**0.5)은
+        # 0 에서 0.0 을 돌려준다. 선언해두면 "여기서 0 나눔이 난다" 는 거짓
+        # 기대를 만든다.
         return None
 
 
@@ -2037,9 +2045,10 @@ def _pose_landmarks(img_arr):
     (왜) 예전엔 `mediapipe.solutions.pose.Pose` 였는데 그 API 가 없다.
     같은 이유로 tasks API + .task 모델로 대체한다.
     """
-    if _pose_model_path() is None:
-        _note_pose_unavailable()
-        return None
+    # `_pose_model_path() is None` 검사는 여기에 있었다. 도달 불가라 뺐다 —
+    # 그 함수는 항상 str 을 돌려준다. 진짜 "없음" (mediapipe.tasks 미설치)은
+    # `_pose_landmarker` 안에서 `_find_base_options() is None` 으로 잡아
+    # `_note_pose_unavailable()` 을 부른다. 두 검사를 한 곳에 두면 안 된다.
     try:
         import numpy as _np
         if img_arr is None:

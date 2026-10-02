@@ -2382,10 +2382,14 @@ def _num_or_zero(v) -> float:
         return 0
 
 
-def preflight_warnings(topic: str, camera: dict, latent_mp=None,
+def preflight_warnings(_topic: str, camera: dict, latent_mp=None,
                        steps: int = 0, cfg: float = 0.0,
                        denoise: float = 0.0) -> list:
     """출발 전 점검. 깨질 조합이면 경고 문구 목록 (0·빈값은 검사 안 함).
+
+    왜(Why) 첫 인자가 `_topic` 인가: 시그니처 호환용으로 받지만 본문에서 쓰지
+    않는다 (경고는 카메라·수치 조합만 본다). 호출부가 전부 positional 이라
+    안전하다. 지우면 호출부 14곳을 함께 고쳐야 해서 남긴다.
 
     왜(Why): 얼굴 클로즈업+저해상도, 극단 CFG/스텝, 과다 denoise는 실행 전에
     알 수 있는 확정 실패다. 모델 천장·시드 운은 여기서 못 잡는다.
@@ -3744,10 +3748,15 @@ def scene_camera_mismatch(scene: str, camera: dict) -> str | None:
 # 노드
 # ---------------------------------------------------------------------------
 
-def resolve_guard_plan(subject_text, camera, image_count, image_labels,
-                       image_items, primary_image, reference_images,
+def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
+                       image_items, primary_image, _reference_images,
                        tier="", llm_hint=""):
     """한 실행의 가드 판정을 **한 곳에서** 모아서 돌려준다.
+
+    왜(Why) `_camera`·`_reference_images` 는 받기만 하나: 예전 리팩터 전에는
+    여기서 썼다. 지금 본문은 subject_text·개수·라벨·tier·hint 만 본다.
+    호출부가 전부 positional 이라 안전하다. 시그니처를 줄이면 호출부 2곳과
+    테스트 5곳을 함께 고쳐야 해서 남긴다.
 
     왜(Why) 이 함수를 만드는가(2026-09-29):
     `run()` 과 `run_prompt()` 가 같은 가드 판정을 각자 반복하면서 결과를

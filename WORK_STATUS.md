@@ -1603,13 +1603,13 @@ consistency_keeper.py U+A294 1개 (2088)
 
 **복구하지 않은 것 3곳 (의도된 문자열이다 — 건드리면 안 된다)**
 ```
-PHYSICS_CONTACT_RULES 의 "拥抱"  U+62E5 U+62B1  → 앙고의 중국어 동义词
+PHYSICS_CONTACT_RULES 의 "拥抱"  U+62E5 U+62B1  → 안고의 중국어 동의어
 R37 테스트 픽스처 "同步"        U+540C U+6B65  → 중국어 입력 검증용
 R38 테스트 픽스처 "木质 테이블" U+6728 U+8D28  → 사물 주제 판정 검증용
 ```
 
 > **규칙 1 재확인**: 손상 문자를 **문서에 인용하지 않는다.** 코드포인트로 남긴다.
-> 이 표를 쓰면서 `物理` 라고 적었다가 파일에 다시 심을 뻔했다.
+> 이 표를 쓰면서 U+7269 U+7406 라고 적었다가 파일에 다시 심을 뻔했다.
 > **규칙 2**: 복사는 정규식으로 하지 않는다. 손상 바이트 **앞의 정상 글자**가
 > 남아 "계계산된다" 처럼 복사가 된다 — 실제로 한 번 그렇게 망했다. edit 로 직접
 > 교체했다.
@@ -1836,7 +1836,7 @@ vision  = '절약 (384)'
 ### 14-2. 내가 잘못 측정한 것
 
 `preflight → 📷 요약 로그` 구간만 재서 **19~25ms × 3회**를 보고 "캐시 히트"라고
-결론냈다. **LLM 블록은 그 구간보다 앞에 있다.** 로그 순서를只看면 안 된다 —
+결론냈다. **LLM 블록은 그 구간보다 앞에 있다.** 로그 순서만 보면 안 된다 —
 실행 순서와 로그 위치가 다르다. `elapsed_ms` 는 텔레메트리로만 가고 콘솔엔 안 나온다
 (`camera_director.py:4369`).
 
@@ -1995,6 +1995,73 @@ original 참조에서 4개 패널 검출 — 캐릭터 시트 형태로 보입�
    → 17절에서 해결. 카메라가 모순 지시를 내고 있었다
 2. p1/p2 구 파일 삭제됨 — paired_curve.json 숫자만 남음. 16절이 대체 근거
 ```
+
+---
+
+## 18절. 초 정밀 검토 — 데드 코드·한자 정리 (2026-10-02)
+
+### 18-1. 한자 6건 — 한글 문장 안의 중국어
+
+| 파일 | 위치 | 전 → 후 |
+|---|---|---|
+| WORK_STATUS.md | 1606 | "앙고의 중국어 동**义词**" → "안고의 중국어 동의어" |
+| WORK_STATUS.md | 1612 | `` `物理` `` 인용 → U+7269 U+7406 (규칙 2: 인용하면 다시 심힌다) |
+| WORK_STATUS.md | 1839 | "순서를**只看**면" → "순서만 보면" |
+| camera_Logic.md | 216 | "한국어에서**名词**" → "한국어에서 명사" |
+| camera_Logic.md | 287 | "**畸形**, 여분" → "기형, 여분" |
+| keywords_ko_en.json | 20 | `"俯瞰"` 제거 → 파일 용도가 "한/영 병기 사전"이라 중국어는 어긋남. 의존 0건 확인 후 제거 |
+
+남은 CJK는 전부 의도: `擁抱`(PHYSICS 키워드), `同步`·`木质`(중국어 입력 테스트),
+전각 문장부호(LLM 프롬프트용), 코드포인트 문서화.
+
+### 18-2. 데드 코드 — AST로 전수 확인 후 제거
+
+**키퍼 (7건):**
+```
+_DRIFT_NORM_NOTED / _DETAIL_DIR_NOTED / _DENS_PX  write-only 상수 3개 → 제거
+import torch as _t (×2)  _decode_capped·_part_detail_map 에서 미사용 → 제거
+_pose_retry_low_conf(lm, ...)  lm 파라미터 미사용 → 제거 (호출 1곳 함께)
+ZeroDivisionError  _judge_body_frame except 에서 제거 (나눗셈 없음, **0.5 는 0에서 0.0)
+```
+
+**카메라 (4건):**
+```
+_cache_misses  write-only 카운터 → 제거 (선언·증가·리셋·global 전부)
+preflight_warnings(topic, ...) → (_topic, ...) (호출 14곳 전부 positional)
+resolve_guard_plan(camera, ..., reference_images, ...) → (_camera, ..., _reference_images, ...)
+```
+
+**제거하지 않은 것 (검증 후 유지):**
+```
+_default_telemetry_sender  분석이 "0 호출" 이라 했으나 스레드 target 으로 사용 중.
+                           AST Call 탐지가 `target=` 참조를 놓친 것이다.
+                           지우기 전에 직접 확인해서 살렸다.
+_JUDGE_DAMAGED  의도된 플레이스홀더 (v1은 반환 안 함, 문서화됨)
+SHEET_MAX_WIDTH_RATIO  SHEET_ENFORCE_WIDTH_RATIO=False 일 때 runtime-dead.
+                       플래그가 뒤집히면 살아나므로 유지
+dict 키 문자열들  상수화하면 dict.get 기본값과 어긋날 리스크. 보류
+```
+
+### 18-3. 버그 1건 — `_note_pose_unavailable` 이 영영 안 불렸다
+
+경고 함수가 있는데 유일한 호출부가 dead 분기 안에 있었다
+(`if _pose_model_path() is None` — 함수는 항상 str 반환).
+
+진짜 "없음" 조건은 `_find_base_options() is None` (mediapipe.tasks 미설치)이다.
+거기에 경고를 연결했고, dead 분기는 제거했다. macOS 사용자는 이제 포즈 기능이
+꺼진 줄 안다 (기존엔 TypeError 로 빠져 `_note_pose_error` 만 남았다).
+
+### 18-4. 내 실수 2건 (같은 유형 반복)
+
+docstring에 왜(Why) 블록을 추가하면서 `"""` 로 조기 종료해 뒤의 (왜) 블록들을
+고아로 만들었다. 2번 했다 (키퍼 `_pose_model_path`, 카메라 `preflight_warnings`·
+`resolve_guard_plan` — 후자는 고치는 과정에서 한 번 더).
+`ast.parse` 로 잡아 합쳤다.
+
+> **원칙**: docstring을 고칠 땐 **전문을 읽고** 편집한다. 첫 줄만 보고 `"""` 를
+> 닫으면 뒤가 전부 깨진다. `ast.parse` 는 커밋 전 필수.
+
+테스트: **1064 / 395 / 20** FAIL 0. Jev approve. 인코딩 0건.
 
 ---
 
