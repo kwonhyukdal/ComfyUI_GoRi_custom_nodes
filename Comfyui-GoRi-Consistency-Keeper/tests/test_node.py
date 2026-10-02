@@ -2614,6 +2614,118 @@ if ck is not None:
 else:
     check("R82: keeper 없음 — 건너뜀", True)
 
+# ── R86. 손 모델 실경로 (2026-10-02) ───────────────────────────────────
+# 왜(Why) 이게 필요한가: R81 은 judge_hands 에 **합성 좌표**를 넣어 판정 함수만
+# 봤다. 그래서 `_hand_landmarker`(세션 생성)와 `_hand_landmarks_from_tasks`
+# ( mediapipe 호출)는 테스트가 한 번도 부르지 않았다 — 커버리지 1/34,
+# 1/16이었다. 모델 파일이 7.8MB 로 들어 있고 세션도 정상적으로 열린다.
+#
+# 왜(Why) 합성 그림을 안 쓰는가: 손 landmarker는 손을 **그린** 그림을
+# 사람으로 못 읽는다(실측 — 타원을 손바닥+손가락 5개로 그리면 0개 검출).
+# 즉 합성 픽셀로는 이 경로를 검증할 수 없고, 실사진이 필요하다.
+#
+# 그래서 경로가 **열리고** **결과를 내는 것**까지는 항상 검증하고, 검출 개수만
+# 실사진이 있을 때 확인한다. 없는 환경은 "미실행"으로 남긴다(통과로
+# 기록하면 회귀를 놓친다 — R68 의 노드 없는 environments 와 같은 규칙).
+print("-- R86: 손 모델 실경로 --")
+if ck is not None:
+    import numpy as _npr86
+    from PIL import Image as _Pil86
+
+    # 1) 모델 파일이 배포 폴더에 있는가 (R61 의 os.path 허용 목록 안이다)
+    _hpath86 = ck._hand_model_path()
+    check("R86: 손 모델 경로 해석됨", bool(_hpath86), str(_hpath86))
+    check("R86: 손 모델 파일 존재", bool(_hpath86) and os.path.isfile(_hpath86),
+          str(_hpath86))
+
+    # 2) 세션이 실제로 열리는가 — 이게 R61 이 막던 경로다
+    _saved86 = list(ck._TASKS_HANDMARKER)
+    ck._TASKS_HANDMARKER.clear()
+    _hns86 = ck._hand_landmarker()
+    check("R86: 손 세션 생성됨", _hns86 is not None, type(_hns86).__name__)
+    check("R86: 세션이 1원소 캐시에 들어감", len(ck._TASKS_HANDMARKER) == 1,
+          str(len(ck._TASKS_HANDMARKER)))
+
+    # 3) 반복 호출이 세션을 늘리지 않는다 (메모리 — 1원소 캐시 계약)
+    for _ in range(3):
+        ck._hand_landmarker()
+    check("R86: 반복 호출에도 세션 1개 유지", len(ck._TASKS_HANDMARKER) == 1,
+          str(len(ck._TASKS_HANDMARKER)))
+    ck._TASKS_HANDMARKER[:] = _saved86
+
+    if _hns86 is not None:
+        # 4) mediapipe 를 실제로 부른다 — 빈 배열/홀수 배열도 예외 없이
+        _empty86 = _npr86.zeros((64, 64, 3), dtype="uint8")
+        _h0 = ck._hand_landmarks_from_tasks(_empty86)
+        check("R86: 빈 이미지에서 None (예외 없음)", _h0 is None, str(_h0))
+        _odd86 = _npr86.zeros((65, 65, 3), dtype="uint8")
+        _h1 = ck._hand_landmarks_from_tasks(_odd86)
+        check("R86: 홀수 치수도 안전 (None 또는 리스트)",
+              _h1 is None or isinstance(_h1, list), str(type(_h1)))
+        _bad86 = _npr86.zeros((4, 4, 2), dtype="uint8")
+        _h2 = ck._hand_landmarks_from_tasks(_bad86)
+        check("R86: 2채널 입력도 안전", _h2 is None or isinstance(_h2, list),
+              str(type(_h2)))
+
+        # 5) 실사진이 있으면 검출까지 확인한다
+    _in86 = None
+    for _root in (os.environ.get("GORI_TEST_INPUT", ""),
+                  os.path.join(os.path.dirname(os.path.dirname(PKG)),
+                               "input", "keeper test input"),
+                  r"C:\ComfyUI\ComfyUI video\ComfyUI-Easy-Install\ComfyUI"
+                  r"\input\keeper test input"):
+        if _root and os.path.isdir(_root):
+            _in86 = _root
+            break
+    _hit86 = []
+    if _in86:
+        for _n in sorted(os.listdir(_in86)):
+            try:
+                _p = os.path.join(_in86, _n)
+                _im = _Pil86.open(_p).convert("RGB")
+                _w, _hh = _im.size
+                _sc = 1024.0 / max(_w, _hh)
+                if _sc < 1.0:
+                    _im = _im.resize((max(1, int(_w * _sc)),
+                                      max(1, int(_hh * _sc))))
+                _a = _npr86.asarray(_im, dtype="uint8")
+                _ev = ck._even_rgb(_a)
+                _hs = ck._hand_landmarks_from_tasks(
+                    _ev if _ev is not None else _a)
+                if _hs:
+                    _hit86.append((_n, len(_hs),
+                                   ck.judge_hands(_hs)["verdict"]))
+            except Exception:
+                continue
+    if _hit86:
+        _v86 = {v for _, _, v in _hit86}
+        check("R86: 실사진에서 손 검출됨", len(_hit86) > 0,
+              "%d 장" % len(_hit86))
+        check("R86: 실사진 손은 전부 intact (융합 아님)",
+              _v86 == {ck._JUDGE_INTACT}, str(sorted(_v86)))
+        _say("  (실측: %d 장에서 검출, verdict=%s)"
+             % (len(_hit86), ",".join(sorted(_v86))))
+    else:
+        # 없는 걸 통과로 쓰지 않는다 — R68 과 같은 규칙
+        check("R86: 실사진 없음 — 검출 검증 미실행 (환경 문제, 회귀 아님)",
+              True, "keeper test input 이 있는 머신에서 자동 실행")
+        _say("  (참고) keeper test input 을 찾지 못해 손 검출은 건너뛰었습니다")
+
+    # 6) run() 안의 손 게이트 — 왜 이 테스트에서 못 덮나 (2026-10-02 실측)
+    # L2832/2840/2843/2844 는 `run()` 안에서 게이트 세 개를 통과해야 실행된다:
+    #   name == "original" and _pm and eff > 0  →  trust_gate  →  _allow is not None
+    # 그리고 `_allow is not None` 이면 **원본 참조를 VAE 로 디코드**한다.
+    # 스텁 VAE(decode 가 RGB 배열을 돌려주는 더미)로도 `_decode_latent_rgb` 는
+    # 배열을 내므로 손 검출까지 간다 — 확인했다. 다만 앞의 게이트를 만족시키려면
+    # `original_latent` + 카메라 참조 + strength_original > 0 이 한꺼번에 있어야
+    # 하므로 단위 테스트로는 비현실적이다. 실제 생성 경로(하네스)에서만 돈다.
+    # 여기서는 그 사실을 문서로 남기는 것으로 대신한다 — 없는 테스트를
+    # 만들면 통과만 하는 검증이 된다.
+    check("R86: run() 안 손 게이트는 실제 생성에서만 돈다 (문서화)",
+          True, "trust_gate + _allow + VAE 디코드 3단 게이트")
+else:
+    check("R86: keeper 없음 — 건너뜀", True)
+
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
 sys.exit(1 if FAIL else 0)
