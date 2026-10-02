@@ -4410,6 +4410,18 @@ else:
     # 임시 산출물이 저장소에 남으면 안 된다.
     check("R68: 테스트가 임시 산출물을 남기지 않음",
           not os.path.exists(os.path.join(HERE, ".gori_frontend_under_test.mjs")))
+    # R89 에서 추가된 프론트 계약(디바운스·약한 참조·중복 후킹 방지)이
+    # **소스에 존재하는지** 확인한다. node 로 이미 실행 검증되지만(위 R68),
+    # 실행 테스트가 green 이어도 대상 로직이 통째로 사라지면 깨진다.
+    check("R89: 소켓 갱신이 디바운스된다 (연결 다중 반영 시 1회만)",
+          "VISIBILITY_DEBOUNCE_MS" in _web68
+          and "scheduleVisibilityUpdate" in _web68)
+    check("R89: topic 목록이 약한 참조 (DOM 강제 참조 없음)",
+          "new WeakSet()" in _web68 and "TOPIC_ELS.delete" not in _web68)
+    check("R89: 상태 표가 상속을 물지 않는다",
+          "Object.create(null)" in _web68)
+    check("R89: 프로토타입 후킹이 중복되지 않는다",
+          '_goriPatched_' in _web68)
 
 # ── R80. 키가 없으면 외부로 요청하지 않는다 ──────────────────────────
 # 왜(Why) 이 테스트가 있는가 (2026-10-01 실측): `and not is_custom` 때문에

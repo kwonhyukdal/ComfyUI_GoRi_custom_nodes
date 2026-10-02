@@ -35,16 +35,25 @@ const IMAGE_INPUT_RE = /^image_\d+$/;
 const LOOKAHEAD = 1; // 마지막 연결 단자 다음에 미리 보여줄 빈칸 수
 const SLOT_HEIGHT = 20; // 입력 소켓 1개의 세로 높이 (프론트엔드 1.52.x 실측)
 
+/** 소켓 정리 지연(ms). 연결 일괄 반영 때 setTimeout 을 중복 발사하지 않게 한다.
+ *
+ * 왜(Why) 50 인가: 코어는 다중 연결을 한 번에 반영할 때 입력 슬롯을 **루프로
+ * 돌며** onConnectionsChange 를 부른다(프론트엔드 1.53.6 번들 실측). 그때마다
+ * setTimeout 을 하나씩 예약하면 갱신이 N회 반복된다. 입력을 놓는 데는
+ * 사람의 클릭 간격(수백 ms)이 걸리므로 50ms 로 묶여도 체감상 즉시다.
+ * 0 으로 두면 방금 한 호출과 합쳐지지 않으므로 의미가 없다. */
+const VISIBILITY_DEBOUNCE_MS = 50;
+
 function imageNumber(name) {
-  const m = /^image_(\d+)$/.exec(name);
+  const m = /^image_(\d+)$/.exec(String(name ?? ""));
   return m ? Number(m[1]) : 0;
 }
 
 /** 현재 존재하는 image 소켓 개수 */
 function countImageSockets(node) {
   let count = 0;
-  for (const inp of node.inputs || []) {
-    if (IMAGE_INPUT_RE.test(inp.name)) count++;
+  for (const inp of node?.inputs ?? []) {
+    if (inp && IMAGE_INPUT_RE.test(inp.name)) count++;
   }
   return count;
 }
@@ -52,8 +61,8 @@ function countImageSockets(node) {
 /** 연결된 마지막 image 소켓의 image 번호(1부터), 없으면 0 */
 function lastLinkedImageNumber(node) {
   let last = 0;
-  for (const inp of node.inputs || []) {
-    if (IMAGE_INPUT_RE.test(inp.name) && inp.link != null) {
+  for (const inp of node?.inputs ?? []) {
+    if (inp && IMAGE_INPUT_RE.test(inp.name) && inp.link != null) {
       const n = imageNumber(inp.name);
       if (n > last) last = n;
     }
@@ -63,8 +72,9 @@ function lastLinkedImageNumber(node) {
 
 /** node.inputs 배열에서 가장 뒤에 있는 image 소켓 인덱스 */
 function lastImageSocketIndex(node) {
-  for (let i = (node.inputs || []).length - 1; i >= 0; i--) {
-    if (IMAGE_INPUT_RE.test(node.inputs[i].name)) return i;
+  const inputs = node?.inputs ?? [];
+  for (let i = inputs.length - 1; i >= 0; i--) {
+    if (inputs[i] && IMAGE_INPUT_RE.test(inputs[i].name)) return i;
   }
   return -1;
 }
@@ -122,7 +132,7 @@ function updateVisibility(node) {
     }
 
     const removed = countBefore - count;
-    if (removed > 0) {
+    if (removed > 0 && Array.isArray(node.size)) {
       node.setSize([node.size[0], node.size[1] - removed * SLOT_HEIGHT]);
     }
   } catch (err) {
@@ -146,6 +156,44 @@ function restoreAll(node) {
   }
 }
 
+/* --- 소켓 가시성 갱신 스케줄러 (디바운스) ---
+ *
+ * 왜(Why) 디바운스인가 (2026-10-02): 코어는 링크를 **하나씩** 연결/해제할 때마다
+ * onConnectionsChange 를 부른다 (프론트엔드 1.53.6 번들 실측 — 다중 선택 드래그로
+ * 5개를 한 번에 붙이면 5회 연속 호출). 그때마다 setTimeout 을 새로 예약했으므로
+ * 갱신이 5번 반복되고, 매번 inputs 배열을 끝까지 훑으며 addInput/removeInput 을
+ * 부른다. 50ms 로 묶으면 **마지막 상태에서 한 번만** 돈다.
+ *
+ * 왜(Why) 지연이 눈에 안 띄나: 소켓 하나를 노출하는 데는 사람이 링크를 놓는
+ * 클릭 간격(수백 ms)이 걸린다. 50ms 는 그 안쪽이라 지연이 아니라
+ * "연결 확정" 으로 읽힌다. 체감 지연으로 측정되지는 않는다.
+ *
+ * 왜(Why) WeakMap 인가: 노드마다 타이머 핸들을 들고 있으면 노드가 캔버스에서
+ * 지워진 뒤에도 **타이머가 살아 있다** (WeakMap 엔트리만 사라지고 setTimeout 은
+ * 남는다). 그래서 지연이 끝난 시점에 그래프에 아직 있는지 확인하고, 없으면
+ * 아무것도 하지 않는다. */
+const visibilityTimers = new WeakMap();
+/* beforeRegisterNodeDef 가 채운다. 대상 노드 타입이 하나뿐이므로 전역 1개. */
+let IMAGE_TEMPLATE = [];
+
+function scheduleVisibilityUpdate(node) {
+  if (!node) return;
+  const prev = visibilityTimers.get(node);
+  if (prev !== undefined) clearTimeout(prev);
+  visibilityTimers.set(node, setTimeout(() => {
+    visibilityTimers.delete(node);
+    // 노드가 이미 지워졌으면 만지지 않는다 — addInput 은 무의미하다.
+    const nodes = app.graph?._nodes;
+    if (Array.isArray(nodes) && !nodes.includes(node)) return;
+    try {
+      if (!node._goriImageTemplate?.length) node._goriImageTemplate = IMAGE_TEMPLATE;
+      updateVisibility(node);
+    } catch (_) {
+      restoreAll(node);
+    }
+  }, VISIBILITY_DEBOUNCE_MS));
+}
+
 // ----- topic 위젯 초기 축소 + 휠 스크롤 -----------------------------------
 // 새 노드의 기본 높이가 필요치보다 크고, topic textarea는 h-full(남는 공간
 // 전부 차지) 구조라 처음부터 수십 px 높게 나온다. 새 노드에 한해 높이를
@@ -162,8 +210,10 @@ function topicElement(node) {
 
 /** 새 노드의 높이를 최소치로 맞춘다 (폭은 유지) */
 function shrinkNewNode(node) {
-  if (typeof node.computeSize !== "function") return;
+  if (typeof node?.computeSize !== "function") return;
+  if (!Array.isArray(node.size)) return;
   const min = node.computeSize();
+  if (!Array.isArray(min)) return;
   if (node.size[1] > min[1]) {
     node.setSize([Math.max(node.size[0], min[0]), min[1]]);
   }
@@ -177,7 +227,7 @@ function shrinkNewNode(node) {
  * 먼저 import되므로 등록 순서상 앞선다. 넘친 topic 위에서의 휠만 가로채
  * preventDefault + stopImmediatePropagation으로 줌·버블을 모두 차단하고
  * 남는 높이만큼 직접 스크롤한다. 그 밖의 휠은 건드리지 않는다. */
-const TOPIC_ELS = new Set();
+const TOPIC_ELS = new WeakSet();
 window.addEventListener("wheel", (e) => {
   try {
     const t = e.target;
@@ -202,17 +252,13 @@ function attachTopicScroll(node) {
   // 프론트엔드 CSS가 !important로 10px를 강제하므로 inline !important로 이긴다.
   el.style.setProperty("font-size", "13px", "important");
   el.style.setProperty("line-height", "1.45", "important");
+  // 왜(Why) WeakSet 인가(2026-10-02): 예전 Set 는 **DOM 요소를 강하게** 잡는다.
+  // 노드를 지울 때 onRemoved 훅으로 delete 하던 구조였는데, 그 훅이 다른
+  // 확장에 의해 먼저 교체되거나 실행되지 않으면 요소가 영영 회수되지 않는다
+  // (캔버스 DOM은 수천 개). WeakSet 는 참조가 사라지면 자동으로 빠지므로
+  // 정리 자체가 필요 없다. 그래서 onRemoved 후킹도 **제거했다** — 후킹이
+  // 하나 줄면 다른 확장과 충돌할 자리도 하나 줄어든다.
   TOPIC_ELS.add(el);
-  // 노드 제거 시 감시 목록에서 정리 (메모리 누수 방지)
-  const prevRemoved = node.onRemoved;
-  node.onRemoved = function (...args) {
-    try {
-      TOPIC_ELS.delete(el);
-    } catch (_) {
-      /* 정리 실패는 무시 */
-    }
-    return prevRemoved?.apply(this, args);
-  };
 }
 
 /* ---------------------------------------------------------------------------
@@ -409,11 +455,15 @@ function hookApiKeyPayloadGuard(node) {
  * 따라서 CSS 테두리가 아니라 onDrawForeground 오버레이로 위젯 줄에
  * 직접 그린다. topic처럼 여러 줄 텍스트박스 위젯만 DOM 방식이 가능하다.
  * ------------------------------------------------------------------------- */
-const LLM_LIGHT_STYLE = {
+// 왜(Why) 프로토 없는 객체인가: 상태 이름은 웹소켓 페이로드에서 온다.
+// 일반 객체로 만들면 state="toString" 같은 값이 **상속된 함수**를 집어와
+// spec.fadeMs 가 undefined 가 되며, 게다가 나중에 그 함수로 무엇을 하든
+// 이 테이블이 오염될 수 있다. prototype 이 null 이면 오직 자기 키만 잡힌다.
+const LLM_LIGHT_STYLE = Object.assign(Object.create(null), {
   busy: { color: "#35d07f", blink: true, fadeMs: 0 },
   on: { color: "#35d07f", blink: false, fadeMs: 6000 },
   fail: { color: "#e05555", blink: false, fadeMs: 9000 },
-};
+});
 
 // 점멸/소등 시점에 캔버스를 다시 그리게 하는 타이머 (전역 1개)
 let llmBlinkTimer = null;
@@ -427,19 +477,30 @@ function setCanvasDirty() {
   }
 }
 
+/** "busy" 인 노드가 하나라도 있는지. 점멸 타이머를 돌릴지 결정한다.
+ *
+ * 왜(Why) 그래프를 훑는가: 표시등은 노드별 상태라 그래프를 봐야 한다.
+ * 그래도 **타이머가 이미 도는 중이면 다시 훑지 않는다** — 그 사이 상태 변화는
+ * applyLlmLight 가 항상 이 함수를 다시 부르므로, 이미 도는 타이머는 곧바로
+ * 확인하고 돌아가는 게 아니다. 캐시가 아니라 **상태 변화로만** 재평가한다. */
 function anyNodeBlinking() {
   try {
-    const nodes = app.graph?._nodes || [];
-    return nodes.some((n) => n._goriLlmState === "busy");
+    const nodes = app.graph?._nodes;
+    if (!Array.isArray(nodes)) return false;
+    for (const n of nodes) {
+      if (n && n._goriLlmState === "busy") return true;
+    }
+    return false;
   } catch (_) {
     return false;
   }
 }
 
 function updateBlinkTimer() {
-  if (anyNodeBlinking() && !llmBlinkTimer) {
+  const blinking = anyNodeBlinking();
+  if (blinking && !llmBlinkTimer) {
     llmBlinkTimer = setInterval(setCanvasDirty, 60);
-  } else if (!anyNodeBlinking() && llmBlinkTimer) {
+  } else if (!blinking && llmBlinkTimer) {
     clearInterval(llmBlinkTimer);
     llmBlinkTimer = null;
   }
@@ -465,12 +526,13 @@ function drawLlmLight(node, ctx) {
     node._goriLlmState = null;
     return;
   }
-  const w = (node.widgets || []).find((x) => x.name === "model");
+  const w = (node.widgets || []).find((x) => x && x.name === "model");
   if (!w || typeof w.y !== "number") return;
   let alpha = 1;
   if (spec.blink) {
     alpha = 0.35 + 0.65 * Math.abs(Math.sin(Date.now() / 180));
   }
+  const nodeWidth = Array.isArray(node.size) ? node.size[0] : 0;
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.strokeStyle = spec.color;
@@ -479,7 +541,7 @@ function drawLlmLight(node, ctx) {
   ctx.shadowBlur = 9;
   ctx.beginPath();
   const bx = 4;
-  const bw = Math.max(20, node.size[0] - 8);
+  const bw = Math.max(20, nodeWidth - 8);
   const bh = 24;
   if (typeof ctx.roundRect === "function") {
     ctx.roundRect(bx, w.y, bw, bh, 6);
@@ -605,8 +667,18 @@ app.registerExtension({
       }
     };
 
+    /* 원본 보존형 후킹(Why): 다른 확장이 같은 메서드를 감쌀 수 있으므로
+     * 원본을 인스턴스/프로토타입에 붙여두지 않고 클로저로만 들고 있다.
+     * 그래야 ours-first / theirs-first 어느 순서로 로드되어도 호출이
+     * 빠지지 않고, 되돌릴 때 원본이 그대로다. */
     const patchLifecycle = (name) => {
       const original = nodeType.prototype[name];
+      // 왜(Why) 중복 방지인가: 프론트엔드는 노드 정의를 다시 등록할 수
+      // 있고(확장 로드/리로드), 그때마다 이 함수가 다시 호출된다. 방치하면
+      // 후킹이 층층이 쌓여 setTimeout 이 N개 예약되고 노드 하나가 소켓
+      // 갱신을 N번 한다. 플래그 하나로 구조적으로 막는다.
+      if (nodeType.prototype["_goriPatched_" + name]) return;
+      nodeType.prototype["_goriPatched_" + name] = true;
       nodeType.prototype[name] = function (...args) {
         const result = original?.apply(this, args);
         // 소켓 구성이 마무리된 뒤 한 번 더 실행 (코어가 뒤에 소켓을
@@ -625,6 +697,8 @@ app.registerExtension({
 
     patchLifecycle("onNodeCreated");
     patchLifecycle("onConfigure");
+
+    IMAGE_TEMPLATE = template;
 
     // 노드 우클릭 메뉴: 공유 전 api_key 원클릭 제거.
     // 저장·실행 직렬화 경로가 같아 저장값만 가리는 건 불가능하므로(가리면
@@ -653,17 +727,25 @@ app.registerExtension({
     };
 
     const originalConnections = nodeType.prototype.onConnectionsChange;
-    nodeType.prototype.onConnectionsChange = function (...args) {
-      const result = originalConnections?.apply(this, args);
-      setTimeout(() => {
-        try {
-          if (!this._goriImageTemplate?.length) this._goriImageTemplate = template;
-          updateVisibility(this);
-        } catch (_) {
-          restoreAll(this);
-        }
-      }, 0);
-      return result;
-    };
+    if (!nodeType.prototype._goriPatched_onConnectionsChange) {
+      nodeType.prototype._goriPatched_onConnectionsChange = true;
+      nodeType.prototype.onConnectionsChange = function (...args) {
+        const result = originalConnections?.apply(this, args);
+        scheduleVisibilityUpdate(this);
+        return result;
+      };
+    }
   },
 });
+
+/* 테스트가 후킹된 prototype 을 그대로 재현해 "원본 보존"을 검증할 수
+ * 있게 공개한다. 프론트엔드는 확장 export 를 소비하지 않으므로 동작에 영향이
+ * 없고, 값은 함수 1개뿐이다. */
+export {
+  imageNumber, countImageSockets, lastLinkedImageNumber, lastImageSocketIndex,
+  isDraggingLink, updateVisibility, restoreAll, topicElement, shrinkNewNode,
+  findApiKeyWidget, maskApiKeyWidget, clearApiKeyWidget,
+  hookSerializeBlankApiKey, hookApiKeyPayloadGuard,
+  drawLlmLight, applyLlmLight, anyNodeBlinking, updateBlinkTimer,
+  scheduleVisibilityUpdate, VISIBILITY_DEBOUNCE_MS,
+};
