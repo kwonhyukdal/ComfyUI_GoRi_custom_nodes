@@ -210,6 +210,23 @@ for _n in _subpkgs:
     check(f"{_n} 는 단독 설치 가능 (__init__.py 보유)",
           os.path.isfile(os.path.join(PKG, _n, "__init__.py")))
 
+# ── 노드별 독립 버전: 각 하위 패키지는 __version__ 을 둔다 ──
+# 왜(Why) 팩 버전(pyproject.toml)만으로는 안 되나 (2026-10-02):
+# 팩은 여러 노드를 한 번에 배포하는 관리 단위일 뿐이다. 카메라만 고쳤는데
+# 팩 버전을 올리면 키퍼도 바뀐 것처럼 보인다. 각 노드는 자기 변경에만
+# 버전을 올린다. 새 노드를 만들면 첫날부터 __version__ 을 둔다 —
+# 이 검사가 없으면 빠뜨리고 지나간다.
+_say("-- 노드별 독립 버전 --")
+for _n in _subpkgs:
+    _mod = sys.modules.get(_n)
+    _ver = getattr(_mod, "__version__", None) if _mod is not None else None
+    import re as _re
+    _ok = isinstance(_ver, str) and bool(_re.match(r"^\d+\.\d+\.\d+$", _ver))
+    check(f"{_n} 는 독립 버전 보유 (__version__ x.y.z)",
+          _ok, str(_ver)[:20])
+# 팩 버전과 노드 버전이 같은 출발선에 있는지 (발산 감지용, 강제 아님)
+# 팩이 릴리스될 때 노드 버전을 따라잡는다. 어긋나면 로그로만 남긴다.
+
 # ── 크로스 폴더 교차 검사: 시트 판정 임계값이 두 노드에서 어긋나면 안 된다 ──
 # 왜(Why) 여기서 하나만 같게 강제하는가 (2026-10-01 실측): 두 노드는 **각각
 # 단독 배포 단위**다(CI 가 `cd 폴더 && python tests/test_node.py` 로 각자 돌고,

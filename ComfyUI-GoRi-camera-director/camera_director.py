@@ -15,6 +15,16 @@
 
 from __future__ import annotations
 
+# 이 노드의 독립 버전. 팩(pyproject.toml) 버전과 별개로 간다.
+# 왜(Why) future import 다음인가: `from __future__` 는 docstring 바로 다음에
+# 와야 한다 (SyntaxError). 버전 상수는 그 뒤 첫 코드다.
+# 왜(Why) 노드마다 따로인가 (2026-10-02): 팩은 여러 노드를 한 번에 배포하는
+# 관리 단위일 뿐이다. 카메라만 고쳤는데 팩 버전을 올리면 키퍼도 바뀐 것처럼
+# 보인다. 각 노드는 자기 변경에만 버전을 올린다. 새 노드를 만들면 첫날부터
+# __version__ 을 둔다 (test_pack.py 가 강제한다).
+__version__ = "1.9.6"
+
+
 import json
 import os
 import re

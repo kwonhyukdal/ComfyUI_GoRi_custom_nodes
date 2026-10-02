@@ -8,12 +8,21 @@
 
 try:
     from .consistency_keeper import GoRiConsistencyKeeper
+    from .consistency_keeper import __version__
 except ImportError:
     # 단독 실행(테스트)이면 상대 임포트가 안 되므로 절대 임포트로 폴백한다.
     # 단, 모듈 **내부**에서 난 ImportError 까지 삼키면 원인 없는
     # ImportError 로 보인다(그리고 클래스 객체가 두 개 생긴다).
     # 그래서 폴백이 실제로 성공했는지 확인한다.
     from consistency_keeper import GoRiConsistencyKeeper
+    from consistency_keeper import __version__
+
+# 로드 시 버전을 남긴다. 여러 노드가 섞여 있을 때 어느 버전이 떴는지
+# 로그로 알 수 있다.
+try:
+    print("[GoRi] Consistency Keeper v%s loaded" % (__version__,), flush=True)
+except Exception:
+    pass
 
 NODE_CLASS_MAPPINGS = {
     "GoRi_ConsistencyKeeper": GoRiConsistencyKeeper,
@@ -23,4 +32,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GoRi_ConsistencyKeeper": "(GoRi) Consistency Keeper",
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "__version__"]
