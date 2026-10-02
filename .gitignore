@@ -277,3 +277,13 @@ tests/
 .github/workflows/ci.yml
 .githooks/
 __pycache__/
+# ── 릴리스 자동화: 배포물에 포함하지 않는다 (2026-10-02) ─────────────────
+# publish_action.yml 은 main 에 push 하면서 pyproject.toml 이 바뀌면
+# Comfy Registry 에 자동으로 올리는 GitHub Actions 트리거다. 462 바이트이고
+# 민감 정보도 없지만 노드 구동에는 전혀 관여하지 않는다. 배포 저장소는
+# 사용자가 노드를 쓰기 위해 받는 산출물이므로 여기서 제외한다.
+#
+# 다음 판을 올릴 때는 비공개 원본 저장소에서 이 파일을 복사해
+# .github/workflows/ 에 되돌려야 Registry 발행이 일어난다.
+# 원본 보관 위치: Private_Comfyui_GoRi_camera_director/.github/workflows/
+.github/
