@@ -3285,7 +3285,7 @@ def _column_profile(arr, width: int = _SHEET_PROFILE_W):
         a = _np.asarray(arr, dtype=_np.float32)
         if a.shape[0] < 8 or a.shape[1] < 8:
             return None
-        h, w = a.shape[0], a.shape[1]
+        w = a.shape[1]
         if w > width:                       # 축소해 비용을 제한한다
             step = max(1, w // width)
             a = a[:, ::step, :]
@@ -3315,7 +3315,7 @@ def _row_profile(arr, height: int = _SHEET_PROFILE_W):
         a = _np.asarray(arr, dtype=_np.float32)
         if a.shape[0] < 8 or a.shape[1] < 8:
             return None
-        h, w = a.shape[0], a.shape[1]
+        h = a.shape[0]
         if h > height:
             step = max(1, h // height)
             a = a[::step, :, :]
@@ -3845,7 +3845,6 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     """
     text = subject_text or ""
     is_human = _is_human_subject(text)
-    is_animal = _is_animal_subject(text)
     labels = list(image_labels or [])
 
     # 다중 참조(2장 이상)면 믹스 변형 가드를 양쪽에 자동 첨부.
@@ -3866,7 +3865,10 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     phys_pos, phys_neg = physics_contact_guard(text)
     # 픽셀 공간 측정: topic에 접촉 동사가 없어도 참조에서 거리를 읽는다.
     # 거리 지사는 topic 동사가 있을 때 중복되므로 생략하고 negative 만 보강.
-    spacing_pos, spacing_neg = "", ""
+    # 왜(Why) spacing_neg 이 없는가(2026-10-02 실측): 거리 negative 는 이미
+    # phys_neg 에 합쳐진다(아래 3줄). 여기 다시 담으면 같은 문구가 두 벌로
+    # 들어가고, 반환 dict 에는 조각이 없어 읽을 곳이 없다 — write-only 였다.
+    spacing_pos = ""
     spacing_measure = None
     if image_count >= 2:
         spacing_measure = subject_spacing(primary_image)

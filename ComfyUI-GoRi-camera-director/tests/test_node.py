@@ -2754,7 +2754,7 @@ check("R37: standalone negative 고정관념 방어", "westernized" in _neg_eth)
 check("R37: Skills negative 고정관념 방어",
       "westernized" in cd.build_camera_negative(
           dict(cd.DEFAULTS), topic="일본 여성"))
-check("R37: negative도 참조 억제同步",
+check("R37: negative도 참조 억제 동기화",
       "westernized" not in cd.build_camera_negative(
           dict(cd.DEFAULTS), topic="한국 여성", image_count=1, image_labels=[1]))
 check("R37: LLM 시스템 규칙 포함", "nationality" in cd.llm_system())
@@ -4626,6 +4626,104 @@ check("R85: ANGLE 8→13개", len(cd.ANGLE) == 13, str(len(cd.ANGLE)))
 # 기존 8종이 그대로인지 (덮어쓰기 방지)
 for _k85 in ["수평 (eye-level)", "로우앵글 (low angle)", "측면 (side profile)"]:
     check("R85: 기존 항목 보존 [%s]" % _k85[:12], _k85 in cd.ANGLE, _k85[:20])
+
+# ── R86. write-only 지역변수 3건 제거 (2026-10-02) ───────────────────────
+# 왜(Why) 테스트로 고정하나: 죽은 코드는 **되살아나지 않는다**가 아니라
+# 리팩터가 다시 만들어낸다. 18-2 의 모듈 전수 감사(8절)는 전역 심볼만 봤고
+# 함수 안 지역변수는 못 봤다. 이번에 그 구멍을 AST 로 메웠다.
+# 검사는 문자열 탐색이 아니라 **실제 함수 객체를 파싱**한다 — 주석에
+# 이름이 적혀 있어도 통과해선 안 되고, 본문의 실제 대입만 본다.
+import ast as _ast86  # noqa: E402
+import inspect as _inspect86  # noqa: E402
+import textwrap as _tw86  # noqa: E402
+
+
+def _store_only_locals(fn):
+    """fn 안에서 한 번도 읽히지 않는 지역변수 이름 집합 ( underscore 제외).
+
+    왜(Why) textwrap.dedent 인가: `inspect.cleandoc` 은 docstring 안쪽 들여쓰기
+    까지 지워서 파싱이 깨진다(실측: IndentationError). 이 저장소 함수는 왜(Why)
+    블록이 docstring 안에 길게 들어가 있어 cleandoc 이 항상 실패한다.
+    18-4 의 "docstring 은 전문을 읽고 편집하라" 와 같은 계열의 함정이다.
+    """
+    tree = _ast86.parse(_tw86.dedent(_inspect86.getsource(fn)))
+    fndef = tree.body[0]
+    loads = {s.id for s in _ast86.walk(fndef)
+             if isinstance(s, _ast86.Name) and isinstance(s.ctx, _ast86.Load)}
+    dead = set()
+    for s in _ast86.walk(fndef):
+        if isinstance(s, _ast86.Assign) and isinstance(s.targets[0], _ast86.Name):
+            name = s.targets[0].id
+            if not name.startswith("_") and name not in loads:
+                dead.add(name)
+    return dead
+
+
+_dead86 = _store_only_locals(cd.resolve_guard_plan)
+check("R86: resolve_guard_plan 에 write-only 지역변수 없음",
+      "is_animal" not in _dead86, str(sorted(_dead86)))
+# 거리 negative 는 phys_neg 로 합쳐진다(중복 방지). 반환 dict 에 조각이
+# 없으므로 지역변수로 가질 이유가 없다.
+check("R86: spacing_neg 지역변수 제거",
+      "spacing_neg" not in _dead86 and "spacing_pos" not in _dead86,
+      str(sorted(_dead86)))
+# 프로파일 함수는 자축축 길이만 쓴다. 반대축을 튼 자리에서 write-only 였다.
+_dead_col86 = _store_only_locals(cd._column_profile)
+_dead_row86 = _store_only_locals(cd._row_profile)
+check("R86: _column_profile 은 가로 길이만 읽음",
+      _dead_col86 <= {"w"}, str(sorted(_dead_col86)))
+check("R86: _row_profile 은 세로 길이만 읽음",
+      _dead_row86 <= {"h"}, str(sorted(_dead_row86)))
+# 제거가 판정을 바꾸지 않았다는 증거 — 같은 입력이 같은 plan 을 낸다.
+_p86 = cd.resolve_guard_plan("1번 이미지 여성, 2번 배경", dict(cd.DEFAULTS),
+                             2, ["1", "2"], [], None, [], tier="auto")
+check("R86: 제거 후에도 plan 키/플래그 그대로",
+      set(_p86["positive"]) == {"mix_guard", "appearance_hair", "body_balance",
+                                "detail_def", "anatomy_count", "furniture",
+                                "character_sheet", "pose", "spacing", "physics"}
+      and _p86["flags"]["mix_guard"] is True, str(sorted(_p86["positive"])))
+check("R86: 물리 negative 는 계속 반환된다",
+      isinstance(_p86["physics_neg"], str), type(_p86["physics_neg"]).__name__)
+
+# ── R87. reference 캐시 키가 id() 로만 구분되지 않는다 (2026-10-02) ───────
+# 왜(Why) 이게 위험한가: CPython 은 GC 뒤 주소를 재활용한다. 이 머신 실측
+# 텐서 200개 중 **199개**가 이전에 쓰였던 주소에 떨어졌다. 그래서 주소만으론
+# "같은 이미지로 착각"할 수 있다. 방어 수단은 캐시 항목 옆에 둔 VAE weakref.
+import torch as _t87  # noqa: E402
+
+
+class _Vae87:
+    """weakref-able. device 속성은 캐시가 GPU 복원 경로를 읽는다."""
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.device = "cpu"
+
+
+cd.clear_qwen_ref_cache()
+_img87 = _t87.rand(1, 32, 32, 3)
+_vae87 = _Vae87("A")
+_k87 = cd._qwen_ref_cache_key(_img87, 256, 256, _vae87)
+cd._qwen_ref_cache_put(_k87, (_img87, _t87.zeros(1, 4, 8, 8), _vae87))
+check("R87: 같은 VAE 재조회는 적중 (캐시 동작 유지)",
+      cd._qwen_ref_cache_get(_k87, _vae87) is not None, "MISS = 회귀")
+# 다른 VAE 로 같은 키를 조회하면 미스여야 한다 — 주소가 같아도.
+_vae87b = _Vae87("B")
+check("R87: 다른 VAE 는 캐시 미스 (오염 차단)",
+      cd._qwen_ref_cache_get(_k87, _vae87b) is None, "HIT = 다른 VAE 결과 반환")
+cd.clear_qwen_ref_cache()
+# 내용 해시가 실제로 종속된다: 픽셀이 다르면 키가 달라야 한다.
+_k87c = cd._qwen_ref_cache_key(_t87.rand(1, 32, 32, 3), 256, 256, _vae87)
+check("R87: 다른 픽셀 → 다른 캐시 키 (내용 종속)",
+      _k87c != _k87, "내용을 못 읽었다")
+check("R87: 목표 크기가 키에 반영",
+      cd._qwen_ref_cache_key(_img87, 512, 256, _vae87)
+      != cd._qwen_ref_cache_key(_img87, 256, 256, _vae87), "size 무시됨")
+# LLM 캐시 폴백 키도 내용 해시를 쓴다.
+check("R87: _thumb_sig 가 내용 해시를 준다",
+      cd._thumb_sig(_img87) not in ("", None)
+      and not cd._thumb_sig(_img87).startswith("noid:"),
+      cd._thumb_sig(_img87))
 
 print(f"\n결과: PASS={PASS}  FAIL={FAIL}")
 
