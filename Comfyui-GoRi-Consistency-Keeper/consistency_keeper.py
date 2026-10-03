@@ -22,7 +22,7 @@ from __future__ import annotations
 # 관리 단위일 뿐이다. 키퍼만 고쳤는데 팩 버전을 올리면 카메라도 바뀐 것처럼
 # 보인다. 각 노드는 자기 변경에만 버전을 올린다. 새 노드를 만들면 첫날부터
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
-__version__ = "1.9.11"
+__version__ = "1.9.12"
 
 
 import importlib as _importlib
@@ -444,6 +444,57 @@ def _decode_capped(vae, latent, max_pixels=None):
         return vae.decode(latent)
 
 
+def _latent_cache_key(latent):
+    """latent 의 내용을 나타내는 캐시 키. (shape_tuple, sha1_hex) 또는 None.
+
+    왜(Why) `id()` 가 아니라 내용인가 (2026-10-03 실측):
+    CPython 은 GC 뒤 주소를 재배정한다. 실측 400개 연속 텐서 → 캐시 항목 2개,
+    주소 재사용 398회. 그리고 재사용이 **틀린 픽셀**로 이어진다:
+    프로브(tests/probe_cache_collision.py) 기준
+        강한 참조 유지   20회 중 20회 정확
+        참조 하나씩 해제  60회 중 **56회 오답**
+    즉 `id()` 키는 "대부분 맞는데 가끔 엉뚱한 결과" 라 가장 나쁜 상태다.
+    위의 `_VAE_FACTOR_BY_CLASS` 도 같은 이유로 클래스 키로 바꿨다(2026-10-01).
+
+    왜(Why) pooled 인가, flat sha1 이 아닌가 (probe_key_cost.py 실측):
+        shape              flat_ms   pooled_ms
+        (1,16,64,64)         0.120      0.057
+        (1,16,128,128)       0.797      0.067    ← 이 노드가 가장 많이 보는 크기
+        (1,16,256,256)       2.879      0.168
+        (1,16,512,512)      10.983      0.463
+    큰 텐서일수록 pooled 가 훨씬 싸고(24배), 이 캐시는 VAE 디코드를 피하려고
+    존재하는데 해시 비용이 디코드보다 크면 목적이 없다. VAE 디코드는
+    128 latent → 2048px 이미지 수준이므로 수십 밀리초 이상이고 0.067ms 로
+    회수된다. 카메라의 `_thumb_digest` 와 같은 방식이며 거기도 블록 평균이
+    필요했다(점 샘플은 8px 워터마크 200개 중 199개를 못 잡아냈고,
+    블록 평균은 0/200).
+    구분 실패 위험: 1원소 변화와 1채널 변화를 둘 다 구분함을 같은 프로브가
+    확인했다. 값이 0/1 사이로 클리핑되므로 키는 float32 원본에서 읽는다.
+
+    실패하면 None 을 돌려 호출부가 **캐시를 쓰지 않게** 한다. 키를 못 만드는
+    것보다 틀린 키로 엉뚱한 픽셀을 주는 것이 훨씬 나쁘다.
+    """
+    try:
+        import hashlib as _hl
+        import numpy as _np
+        import torch as _t
+        import torch.nn.functional as _tf
+        raw = latent.detach().cpu() if hasattr(latent, "detach") else latent
+        a = _np.asarray(raw, dtype=_np.float32)
+        shape = tuple(int(d) for d in a.shape)
+        if a.ndim < 2:
+            return None
+        t = _t.from_numpy(_np.ascontiguousarray(a)).float()
+        while t.ndim < 4:
+            t = t.unsqueeze(0)
+        if t.shape[0] != 1:
+            t = t[:1]
+        pooled = _tf.adaptive_avg_pool2d(t, (16, 16))
+        return (shape, _hl.sha1(pooled.numpy().tobytes()).hexdigest())
+    except Exception:
+        return None
+
+
 def _decode_latent_rgb(vae, latent, cache=None):
     """latent -> RGB numpy 배열(H,W,3). 실행당 캐시로 중복 디코딩을 없앤다.
 
@@ -451,15 +502,18 @@ def _decode_latent_rgb(vae, latent, cache=None):
     **전 해상도로 두 번** 디코딩했다(인체 마스크용 + 부위맵용). 128x128
     latent 기준 1024x1024 이미지 2회 — VAE 디코딩이 이 노드에서 가장 비싼
     연산인데 같은 결과를 두 번 만들고 있었다. `original` 도 마찬가지.
-    캐시 키는 (id(latent), 1.0) 이라 서로 다른 텐서를 섞지 않는다.
+    캐시 키는 **내용 해시**다 — `id()` 였을 때 60회 중 56회가 엉뚱한 픽셀을
+    반환했다(2026-10-03 실측, 주석은 `_latent_cache_key` 참조).
     """
     try:
         if vae is None or latent is None:
             return None
         import torch as _t
         import numpy as _np
-        key = (id(latent), 1.0)
-        if cache is not None and key in cache:
+        # 키를 못 만들면(None) 캐시를 아예 쓰지 않는다. 틀린 키로 엉뚱한
+        # 픽셀을 주는 것보다 디코딩을 한 번 더 하는 것이 나쁘지 않다.
+        key = _latent_cache_key(latent)
+        if key is not None and cache is not None and key in cache:
             return cache[key]
         with _t.no_grad():
             img = _decode_capped(vae, latent)
@@ -492,7 +546,7 @@ def _decode_latent_rgb(vae, latent, cache=None):
                         arr = arr2
         except Exception as _e:
             _note_retry_error(_e)
-        if cache is not None:
+        if cache is not None and key is not None:
             cache[key] = arr
         return arr
     except Exception:

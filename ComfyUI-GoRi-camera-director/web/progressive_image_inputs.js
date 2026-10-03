@@ -71,6 +71,30 @@ function lastLinkedImageNumber(node) {
   return last;
 }
 
+/** image 소켓 개수와 연결된 마지막 번호를 한 번의 순회로 함께 낸다.
+ *
+ * 왜(Why) 둘을 합쳤나 (2026-10-03 실측): updateVisibility 가 이 둘을 따로
+ * 불러 inputs 배열을 두 번 훑었다. 순회당 읽기가 두 배였고, 그 수는
+ * probe_visibility_scans.mjs 로 실제로 셌다. 값이 둘 다 같은 배열에서 나오므로
+ * 합칠 수 있다.
+ *
+ * 왜(Why) 기존 둘을 안 지웠나: `countImageSockets` 는 restoreAll 이 쓰고,
+ * `lastLinkedImageNumber` 는 테스트가 검증한다(R68). **export 계약이므로
+ * 지우면 테스트가 깨진다.** 중복처럼 보여도 한쪽은 남기는 이유가 이것이다. */
+function scanImageSockets(node) {
+  let count = 0;
+  let last = 0;
+  for (const inp of node?.inputs ?? []) {
+    if (!inp || !IMAGE_INPUT_RE.test(inp.name)) continue;
+    count++;
+    if (inp.link != null) {
+      const n = imageNumber(inp.name);
+      if (n > last) last = n;
+    }
+  }
+  return { count, last };
+}
+
 /** node.inputs 배열에서 가장 뒤에 있는 image 소켓 인덱스 */
 function lastImageSocketIndex(node) {
   const inputs = node?.inputs ?? [];
@@ -95,12 +119,29 @@ function updateVisibility(node) {
     const template = node._goriImageTemplate;
     if (!Array.isArray(template) || !template.length) return;
 
-    const lastLinked = lastLinkedImageNumber(node);
+    const scan = scanImageSockets(node);
+    const lastLinked = scan.last;
+    // 왜(Why) 조기 반환인가 (2026-10-03 실측): 이 함수는 debounce 로 묶여 있어
+    // 호출 횟수는 줄었지만, **호출될 때마다 inputs 배열을 훑는다.**
+    // 실측(probe_visibility_scans.mjs, 연결 5장 · 반복 20회):
+    //   수정 전  호출당 54회 읽기, 20회 반복 = 1080회
+    //   수정 후  호출당 21회 읽기, 20회 반복 =  420회
+    // scan 은 위에서 한 번 훑은 결과다 — 판정을 위해 추가로 훑지 않는다.
+    //
+    // 판정 조건이 "scan 전체" 인 이유: desired 는 lastLinked 로만 정해지지만,
+    // restoreAll 이 실패 경로에서 lastLinked 와 무관하게 소켓을 늘릴 수 있어서
+    // count 도 함께 봐야 한다. 둘 다 같으면 정말로 할 일이 없다.
+    // 드래그 중에는 isDraggingLink() 가 true 여서 판정을 아예 하지 않는다.
+    if (node._goriScanKey === scan.count + ":" + lastLinked && !isDraggingLink()) {
+      return;
+    }
+    node._goriScanKey = scan.count + ":" + lastLinked;
+
     const desired = lastLinked === 0
       ? 1
       : Math.min(template.length, lastLinked + LOOKAHEAD);
 
-    let count = countImageSockets(node);
+    let count = scan.count;
     if (count === desired) return;
 
     // 소켓 수 변화만큼 노드 높이도 같이 조정한다(연결 시 +, 해제 시 -).
