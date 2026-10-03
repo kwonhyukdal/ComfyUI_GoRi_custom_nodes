@@ -31,6 +31,7 @@
 import { app } from "../../scripts/app.js";
 
 const EXT_ID = "GoRi.CameraDirector.ProgressiveImageInputs";
+const CAMERA_NODE_TYPE = "GoRi_CameraDirectorEncodeSkills";
 const IMAGE_INPUT_RE = /^image_\d+$/;
 const LOOKAHEAD = 1; // 마지막 연결 단자 다음에 미리 보여줄 빈칸 수
 const SLOT_HEIGHT = 20; // 입력 소켓 1개의 세로 높이 (프론트엔드 1.52.x 실측)
@@ -328,11 +329,26 @@ function maskApiKeyWidget(node) {
               try {
                 const prov = String(
                   (node.widgets || []).find((x) => x && x.name === "provider")?.value || "");
+                const key = input.value ?? "";
                 fetch("/gori_api_key", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ provider: prov, key: input.value ?? "" }),
-                }).catch(() => {});
+                  body: JSON.stringify({ provider: prov, key }),
+                })
+                  .then((r) => (r && typeof r.json === "function" ? r.json() : null))
+                  .then((data) => {
+                    // 저장 확인 전에 위젯을 지우면 키를 잃는다. 서버가
+                    // "루트 .env 에 넣었다" 고 확인해 준 경우에만 지운다.
+                    // 그래서 실행은 .env 에서 키를 읽는다(llm_client.py:494-503).
+                    if (!data || !data.ok) return;
+                    if (String(key).trim() &&
+                        String(w.value ?? "").trim() === String(key).trim()) {
+                      clearApiKeyWidget(node);
+                    }
+                  })
+                  .catch(() => {
+                    /* 전송 실패는 무시 — 위젯값 그대로 실행되므로 안전하다 */
+                  });
               } catch (_) {
                 /* 전송 실패는 무시 — 위젯값 실행에는 영향 없음 */
               }
@@ -367,19 +383,106 @@ function clearApiKeyWidget(node) {
   }
 }
 
+/** 이 노드의 api_key 가 widgets_values 에 들어가는 위치 인덱스.
+ *
+ * 왜(Why) 이 계산인가: 저장 payload 의 widgets_values 는 위젯 순서대로
+ * 채워지되 serialize === false 인 위젯은 코어 규칙대로 건너뛴다.
+ * 그 규칙을 모르면 다른 위치(예: 15 가 아니라 16)를 빈칸으로 만들어
+ * provider 나 pf_steps 를 망가뜨린다. 못 찾으면 -1 이고 호출측이 방어한다. */
+function apiKeyWidgetIndex(node) {
+  try {
+    let index = 0;
+    for (const w of node?.widgets || []) {
+      if (w && w.serialize === false) continue;
+      if (w && w.name === "api_key") return index;
+      index++;
+    }
+    return -1;
+  } catch (_) {
+    return -1;
+  }
+}
+
+/** 저장 payload 한 건에서 이 노드의 api_key 를 세 군데 전부 비운다.
+ *
+ * 왜(Why) 세 군데인가: 프론트엔드 1.53.6 실측에서 워크플로 파일에 키가
+ * 들어가는 자리는 정확히 두 곳이었다 (widgets_values[n], widgets_values_named).
+ * properties 는 그때 깨끗했지만(측정함) 다른 버전에서 값이 남는 경우가
+ * 있어 비용이 0 인 보험으로 함께 비운다.
+ *
+ * 반환값은 그대로 내보낸다. 실행 경로(app.graphToPrompt)는 이 함수를
+ * 호출하지 않으므로 실행은 영향을 받지 않는다. */
+function blankApiKeyInWorkflowData(data, graph) {
+  try {
+    const nodes = data?.nodes;
+    if (!Array.isArray(nodes)) return;
+    for (const saved of nodes) {
+      if (!saved || saved.type !== CAMERA_NODE_TYPE) continue;
+      if (saved.widgets_values_named &&
+          Object.prototype.hasOwnProperty.call(saved.widgets_values_named, "api_key")) {
+        saved.widgets_values_named.api_key = "";
+      }
+      const live = graph?._nodes_by_id?.[saved.id];
+      const index = live ? apiKeyWidgetIndex(live) : -1;
+      if (index >= 0 && Array.isArray(saved.widgets_values) && index < saved.widgets_values.length) {
+        saved.widgets_values[index] = "";
+      }
+      // index < 0(라이브 노드가 없음)이면 위치 대응을 지어내지 않는다.
+      // 나머지 두 곳은 이름이라서 상관없이 지워진다.
+      if (saved.properties &&
+          Object.prototype.hasOwnProperty.call(saved.properties, "api_key") &&
+          saved.properties.api_key) {
+        saved.properties.api_key = "";
+      }
+    }
+  } catch (_) {
+    /* 저장 경로 실패를 파급시키지 않는다 */
+  }
+}
+
+/** 저장 payload 전용 그래프 후킹. 실행 payload 는 app.graphToPrompt 라
+ * 별개 경로이고 이 훅은 건드리지 않는다.
+ *
+ * 왜(Why) 그래프 단위인가: **실측함.** 프론트엔드 1.53.6 의 app.graph.serialize()
+ * 는 LGraphNode.serialize() 를 호출하지 않는다(호출 추적 결과 0회).
+ * 워크플로 파일에 쓰이는 값은 그래프가 widgets_values / widgets_values_named 를
+ * 직접 만든다. 그래서 노드 단위 후킹만 해 두면 저장 시 100% 새어 나간다 —
+ * 2026-10-03 14:08 저장 파일에서 실제로 두 곳에 키가 들어 있었다. */
+function hookGraphSerializeBlankApiKey(graph) {
+  try {
+    if (!graph || graph._goriGraphSerializeHooked) return false;
+    const orig = graph.serialize;
+    if (typeof orig !== "function") return false;
+    graph._goriGraphSerializeHooked = true;
+    graph.serialize = function (...args) {
+      const data = orig.apply(this, args);
+      blankApiKeyInWorkflowData(data, this);
+      return data;
+    };
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 /* ---------------------------------------------------------------------------
- * 워크플로 저장 시 api_key 빈칸 직렬화 (공유 안전)
+ * 워크플로 저장 시 api_key 빈칸 직렬화 (공유 안전) — 노드 단위 후킹
  *
- * 저장 파일·공유·PNG 내장 workflow는 node.serialize() 결과를 쓰고,
- * 실행 페이로드는 live 위젯 값을 직접 읽는다(1.52.7 graphToPrompt 실측).
- * 그래서 serialize 결과에서만 api_key를 비우면 실행은 그대로 되고
- * 밖으로 나가는 파일에는 키가 안 담긴다.
- * (PNG 내장 prompt 복사본은 서버 실행 시 이 노드가 기록에서 제거한다)
+ * **옛 설명 (1.52.7 기준) 이 맞지 않았다. 정정한다.**
+ * "저장 파일은 node.serialize() 결과를 쓴다" 는 1.53.6 에서 성립하지 않는다.
+ * 실측  app.graph.serialize() → LGraphNode.serialize() 호출 0회.
+ * 그래서 이 함수는 이제 **두 번째 방어선** 이다. 첫 방어선은 위의
+ * hookGraphSerializeBlankApiKey 다. 프론트엔드가 node.serialize() 를 다시
+ * 쓰기 시작하면 이쪽도 그대로 동작한다. 둘 다 남긴다.
  *
- * 미연결 방치 노드: computeExecutionOrder는 미연결 노드도 실행 목록에
+ * 실행 페이로드는 live 위젯 값을 직접 읽는다(app.graphToPrompt 실측 3회).
+ * serialize 결과만 고쳐서 실행은 그대로 두고 밖으로 나가는 파일에서만
+ * 키를 뺀다. (PNG 내장 prompt 사본은 서버 실행 시 이 노드가 제거한다)
+ *
+ * 미연결 방치 노드: computeExecutionOrder 는 미연결 노드도 실행 목록에
  * 포함하므로, 출력이 하나도 연결 안 된 노드는 실행 페이로드에도 키를
  * 내보내지 않는다(serializeValue 가드). 출력 연결 노드는 실값 그대로.
- * 뮤트/우회는 코어가 output에서 제외하므로 별도 처리 불필요.
+ * 뮤트/우회는 코어가 output 에서 제외하므로 별도 처리 불필요.
  * ------------------------------------------------------------------------- */
 function hookSerializeBlankApiKey(node) {
   try {
@@ -397,14 +500,16 @@ function hookSerializeBlankApiKey(node) {
         }
         // 위치 배열 (코어와 같은 순서로 serialize 제외 위젯 건너뜀)
         if (info && Array.isArray(info.widgets_values)) {
-          let vi = 0;
-          for (const w of this.widgets || []) {
-            if (w && w.serialize === false) continue;
-            if (w && w.name === "api_key" && vi < info.widgets_values.length) {
-              info.widgets_values[vi] = "";
-            }
-            vi++;
+          const index = apiKeyWidgetIndex(this);
+          if (index >= 0 && index < info.widgets_values.length) {
+            info.widgets_values[index] = "";
           }
+        }
+        // properties 사본 (1.53.6 저장 경로에서는 깨끗했지만 방어선)
+        if (info?.properties &&
+            Object.prototype.hasOwnProperty.call(info.properties, "api_key") &&
+            info.properties.api_key) {
+          info.properties.api_key = "";
         }
       } catch (_) {
         /* 직렬화 실패 파급 방지 */
@@ -532,22 +637,30 @@ function drawLlmLight(node, ctx) {
   if (spec.blink) {
     alpha = 0.35 + 0.65 * Math.abs(Math.sin(Date.now() / 180));
   }
-  const nodeWidth = Array.isArray(node.size) ? node.size[0] : 0;
+  // 왜(Why) 작은 원 하나인가 (2026-10-03 실측): 여기 원래 **노드 전체 너비의
+  // 테두리 사각형**을 그렸다(bw = nodeWidth - 8). 문서화된 의도("초록 점멸",
+  // 이 파일 447행 · camera_director.py:329)는 LED 였는데 화면에는 가로 바로
+  // 보였다. 노드를 늘리면 바도 함께 늘어나고, shadowBlur 9 가 그 테두리를
+  // 발광시켜 "이상한 가로 빛" 으로 읽혔다. 표시등은 **크기가 고정**이어야 한다.
+  const cx = 10;
+  const cy = w.y + 12;
+  const r = 4;
   ctx.save();
   ctx.globalAlpha = alpha;
+  ctx.fillStyle = spec.color;
   ctx.strokeStyle = spec.color;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 1;
   ctx.shadowColor = spec.color;
-  ctx.shadowBlur = 9;
+  ctx.shadowBlur = 6;
   ctx.beginPath();
-  const bx = 4;
-  const bw = Math.max(20, nodeWidth - 8);
-  const bh = 24;
-  if (typeof ctx.roundRect === "function") {
-    ctx.roundRect(bx, w.y, bw, bh, 6);
+  if (typeof ctx.arc === "function") {
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
   } else {
-    ctx.rect(bx, w.y, bw, bh);
+    // arc 가 없는 캔버스 구현 대비. 사각형이어도 크기는 고정이다.
+    ctx.rect(cx - r, cy - r, r * 2, r * 2);
   }
+  ctx.fill();
+  // 얇은 테두리를 한 겹 더 그린다. 어두운 노드 배경에서도 확실히 보인다.
   ctx.stroke();
   ctx.restore();
 }
@@ -601,6 +714,15 @@ app.api?.addEventListener?.("execution_start", clearAllLlmLights);
 
 app.registerExtension({
   name: EXT_ID,
+  setup() {
+    // 카메라 노드가 하나도 없는 빈 그래프를 저장하는 경우까지 대비한다.
+    // (그 경우엔 이 노드가 없으니 지울 키도 없다 — 그래도 훅은 심어 둔다)
+    try {
+      hookGraphSerializeBlankApiKey(app.graph);
+    } catch (_) {
+      /* 무시 */
+    }
+  },
   beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData?.name !== "GoRi_CameraDirectorEncodeSkills") return;
 
@@ -639,6 +761,12 @@ app.registerExtension({
         hookSerializeBlankApiKey(node);
       } catch (_) {
         /* 직렬화 후킹 실패는 조용히 무시 */
+      }
+      try {
+        // 저장 payload 후킹 (1.53.6 실측상 이것이 실제 방어선이다)
+        hookGraphSerializeBlankApiKey(node.graph);
+      } catch (_) {
+        /* 그래프 후킹 실패는 조용히 무시 */
       }
       try {
         hookApiKeyPayloadGuard(node);
@@ -744,8 +872,9 @@ app.registerExtension({
 export {
   imageNumber, countImageSockets, lastLinkedImageNumber, lastImageSocketIndex,
   isDraggingLink, updateVisibility, restoreAll, topicElement, shrinkNewNode,
-  findApiKeyWidget, maskApiKeyWidget, clearApiKeyWidget,
+  findApiKeyWidget, maskApiKeyWidget, clearApiKeyWidget, apiKeyWidgetIndex,
   hookSerializeBlankApiKey, hookApiKeyPayloadGuard,
+  blankApiKeyInWorkflowData, hookGraphSerializeBlankApiKey,
   drawLlmLight, applyLlmLight, anyNodeBlinking, updateBlinkTimer,
   scheduleVisibilityUpdate, VISIBILITY_DEBOUNCE_MS,
 };

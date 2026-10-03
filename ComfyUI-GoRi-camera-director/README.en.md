@@ -310,6 +310,31 @@ GEMINI_API_KEY=...
 - `.env` lives outside the node folder, so folder-zip sharing never carries keys along
 > No key or dead network → **auto rule(auto) fallback** (runs always succeed)
 
+### No API key travels with a shared workflow — with one exception
+
+**Moving the key to `.env` is enough.** Type it into the `api_key` field and press
+**OK** in the dialog: it is written to the root `.env` and **the field empties
+itself.** Saved from there, no file carries the key.
+
+```
+type key + OK      →  stored in .env  →  field empties  →  saving and sharing are both clean
+type key + Esc     →  nothing applied at all (cancel)
+```
+
+`Save` / `Save As` / `Export` blank `api_key` during serialization, so they are
+**safe even with the field still filled in.**
+
+> ⚠️ **Exception: `Export (API)`**
+> An API-format file is not a display workflow, it is the execution request itself
+> (`{"nodeId": {"class_type": "...", "inputs": {...}}}`). That format puts values
+> straight into `inputs`, so the save-time blanking does not reach it.
+>
+> - The eight common providers (OpenAI·Anthropic·Gemini·OpenRouter·Groq·DeepSeek·Mistral)
+>   empty the field automatically, so **you have to do nothing.**
+> - `Custom` · `Ollama` · `LM Studio` have no `.env` slot, so the value stays put.
+>   Only for these, clear the field before `Export (API)`.
+> - In a hurry: right-click the node → **`api_key 지우기 (공유용)`**.
+
 > 💡 **Model-name auto-fix:** switching providers with a stale name
 > (`gpt-4o-mini` etc.) still in `model` auto-corrects to that provider's
 > default with a console warning. Empty `model` always uses the provider default.
