@@ -108,6 +108,8 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 - At 3MP+, KSampler steps, preview, and VAE decode dominate total time. When speed matters, generate at 2–3MP first, then upscale.
 - Video (I2V): `motion` is selectable. `image_1`–`image_10` are prompt-judgment inputs only, so connect the original `LoadImage` output straight into the I2V node for the start frame.
 - Compound motion: pick a second move in `motion2` to combine two camera moves (e.g. push-in + pan). Empty = single motion. Carries into video-model conditioning and H3 prompts as-is.
+- Motion strength: `amplitude` sets how far the move goes (`약간 (subtle)` / `보통 (normal)` / `강하게 (dramatic)`, default `자동 (auto)`). `speed` is how fast and `amplitude` is how strong, so they are separate axes. Nothing is added when the chosen `motion` is `없음 (none)`.
+- Colour grade: `grade` sets the final tone (`시네마틱 필릭 (cinematic)` / `비비드 포스터 (vivid)` / `틸-오렌지 (teal & orange)` / `35mm 필름 (film look)` / `느와르 (noir)`, default `자동 (auto)`).
 
 ### Two prompt input paths (usable together)
 
@@ -344,6 +346,12 @@ type key + Esc     →  nothing applied at all (cancel)
 
 > 💡 **Local LLM timeouts:** Ollama/LM Studio can respond slowly
 > (local vision inference takes tens of seconds to minutes), so call timeout is **300s**.
+
+> 💡 **Vision payload size:** `vision_detail` sets the resolution sent to a
+> vision LLM — `선명 (768)` / `균형 (512)` / `절약 (384)`, default `선명 (768)`.
+> The slow part is the server doing the inference, not the upload, so the only
+> thing this buys you is payload. Lowering it can cost judging detail, so it is
+> an option rather than a default change.
 > Cloud providers (OpenAI/Anthropic/Gemini/OpenRouter/Groq/DeepSeek/Mistral) and
 > remote Custom endpoints default to 45s; `localhost`/`127.0.0.1`
 > Custom Base URLs get the local timeout (300s).

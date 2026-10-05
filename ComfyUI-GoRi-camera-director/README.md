@@ -108,6 +108,8 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 - 3MP 이상에서는 KSampler 스텝, preview, VAE decode 비용이 전체 시간에서 더 큰 비중을 차지할 수 있습니다. 속도가 필요하면 2~3MP를 기준으로 생성한 뒤 upscale하는 편이 안전합니다.
 - 영상(I2V): `motion`을 선택할 수 있습니다. `image_1`~`image_10` 입력은 프롬프트 판단용이므로, I2V 시작 프레임은 원래 `LoadImage` 출력을 I2V 노드에 직접 연결하십시오.
 - 복합 무빙: `motion2`에 두 번째 움직임을 고르면 두 카메라 이동이 합성됩니다(예: 푸시인+팬). 비워두면 단일 무빙. 영상 모델 conditioning·H3 프롬프트에 그대로 반영됩니다.
+- 무빙 세기: `amplitude`가 그 크기를 정합니다(`약간 (subtle)` / `보통 (normal)` / `강하게 (dramatic)`, 기본은 `자동 (auto)`). `speed`가 이동 속도라면 `amplitude`는 세기 쪽이라 둘은 서로 다른 축입니다. 선택한 `motion`에 `없음 (none)`이 있으면 붙지 않습니다.
+- 색보정: `grade`가 최종 톤을 정합니다(`시네마틱 필릭 (cinematic)` / `비비드 포스터 (vivid)` / `틸-오렌지 (teal & orange)` / `35mm 필름 (film look)` / `느와르 (noir)` 등, 기본은 `자동 (auto)`).
 
 ### 프롬프트 입력 2경로 (동시 겸용 가능)
 

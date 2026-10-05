@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """ComfyUI_GoRi_custom_nodes 의 GoRi-Consistency-Keeper — ComfyUI 커스텀 노드 등록.
 
-설치: 이 폴더(GoRi-Consistency-Keeper)를 ComfyUI/custom_nodes/에 복사 후 재시작.
+설치: 이 폴더(Comfyui-GoRi-Consistency-Keeper)를 ComfyUI/custom_nodes/에 복사 후 재시작.
 의존성: torch·numpy (ComfyUI 환경에 이미 있음). mediapipe 는 선택 의존이라
-       없으면 인체 마스크·부위별 복원만 조용히 꺼진다.
+       없으면 인체 마스크·부위별 복원·포즈 프레이밍이 꺼지며, 그 이유를
+       콘솔에 한 번 알린다.
 """
 
 try:

@@ -9,8 +9,12 @@
   corrected = sampled + a*(camera - sampled) + b*(original - sampled)
   - a (strength_camera): 연출 방향 당김
   - b (strength_original): 원본 신원 당김
+  - strength_sampler(s) 는 이 당김 전체에 배율을 곱한다:
+    corrected = sampled + s * (a*(camera - sampled) + b*(original - sampled)
+                               + 부위별 보강)
 크기가 다르면 bicubic 리사이즈로 맞춘다. 배치·채널이 다르면 해당 기준은
-건너뛴다(로그 후 계속). 외부 pip 패키지 없음 — ComfyUI 환경의 torch만 사용.
+건너뛴다(로그 후 계속). 필수 의존성은 torch·numpy 뿐 — mediapipe 는
+선택 의존(없으면 포즈 기반 기능만 꺼진다).
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from __future__ import annotations
 # 관리 단위일 뿐이다. 키퍼만 고쳤는데 팩 버전을 올리면 카메라도 바뀐 것처럼
 # 보인다. 각 노드는 자기 변경에만 버전을 올린다. 새 노드를 만들면 첫날부터
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
-__version__ = "1.9.12"
+__version__ = "1.9.13"
 
 
 import importlib as _importlib
@@ -38,6 +42,22 @@ def _get_samples(latent) -> object:
     except Exception:
         pass
     return None
+
+
+def _with_samples(latent, out) -> tuple:
+    """입력 LATENT dict 의 부가 키(noise_mask, batch_index)를 보존해 돌려준다.
+
+    왜(Why) {"samples": out} 만 다시 만들지 않나 (2026-10-04 감사 12차):
+    ComfyUI 의 `common_ksampler` 는 `latent.copy()` 로 noise_mask 와
+    batch_index 를 다음 노드로 **전파한다**(nodes.py). 이 노드가 samples 만
+    돌려주면 인페인트 마스크가 여기서 사라지고, 뒤에 이어진 KSampler 가
+    마스크 밖까지 통째로 다시 그린다 — 오류도 로그도 없는 조용한 오답이다.
+    ComfyUI 자체 샘플러들이 지키는 전파 관례를 그대로 따른다. dict 가
+    아니면(방어) samples 만 있는 새 dict 를 돌려준다.
+    """
+    d = dict(latent) if isinstance(latent, dict) else {}
+    d["samples"] = out
+    return (d,)
 
 
 def _match_spatial(ref, target) -> object:
@@ -154,7 +174,8 @@ _DRIFT_NORM_ZERO = 1.00
 
 
 def _damp_norm(v) -> float:
-    """정규화 불일치 -> 감쇠 계수 0~1. 비교 불가면 1.0(안 건드림).
+    """정규화 불일치 -> 감쇠 계수 0~1. None 은 1.0(안 건드림), NaN 은
+    0.0(전파 차단, R71 계약).
 
     왜(Why) `_damp_factor`(절대 MSE) 대신 별개 함수인가: 기존 함수는 그대로
     둔다. 새 기준을 켜도 예전 경로를 잃지 않고, **두 규칙이 각각 무슨 뜻인지**
@@ -272,30 +293,33 @@ def _as_rgb_hwc(arr):
 _VAE_PIXEL_FACTOR_FALLBACK = 8
 
 
-# VAE 의 "latent 1칸 = 이미지 몇 픽셀" 을 **클래스별로** 기억한다.
+# VAE 의 "latent 1칸 = 이미지 몇 픽셀" 을 기억하는 **보조 맵**이다.
+# production 은 `_vae_pixel_factor_for` 의 `spacial_compression_decode()`
+# 경로가 1순위라 이 맵을 지나지 않는다 — 메서드가 없는 테스트 가짜 전용.
 # **프로브로 재지 않는다** — 2026-10-01 실측으로 프로브는 사치다:
 # 6.9GB 모델이 VRAM 에 오른 상태에서 128/256/512 인코딩을 시도하면 ms 가
 # 아니라 초 단위가 걸렸고, 그 여파로 하네스 폴링이 타임아웃났다.
 # 실제 디코드를 **이미 하고 있으니** 거기서 비율을 읽으면 공짜다.
-# 왜(Why) 키가 클래스인가: 이 워크플로는 `WanVAE` 와 `QwenImage21` 를 **함께**
-# 로드한다. `id()` 는 GC 뒤 주소를 재사용하므로 캐시 키로 쓰면 엉뚱한 VAE 의
-# 배율이 나오고(실측 50회 중 35회 재사용), 배율은 아키텍처의 속성이므로
-# 같은 클래스면 같다.
+# 왜(Why) 키가 클래스인가: `id()` 는 GC 뒤 주소를 재사용하므로 쓰면
+# 엉뚱한 VAE 의 배율이 나온다(실측 50회 중 35회 재사용). 단, production
+# VAE 는 전부 한 클래스라(nodes.py:862) 이 키는 아키텍처를 구분하지
+# 못한다 — 그래서 아래 spacial 경로가 1순위가 되었다.
 _VAE_FACTOR_BY_CLASS = {}
 
 
 def _vae_factor_key(vae):
     """VAE 를 구조적으로 구분하는 키.
 
-    왜(Why) VAE 클래스로 잡는가 (2026-10-01 실측): 처음엔 모듈 전역 하나로
-    저장했다가 테스트가 오염되었고, production 도 같은 이유로 위험했다 —
-    **한 세션에서 VAE 가 여러 개 로드된다.** 실제로 이 워크플로는 `WanVAE`
-    와 `QwenImage21` 를 함께 쓴다. 전역 하나로 두면 한쪽에서 배운 배율이
-    다른 쪽에 그대로 적용되어 조용히 틀린다.
+    왜(Why) 이 키가 이제는 **가짜 VAE 전용**인가 (2026-10-04 감사
+    실측): production VAE 는 전부 `comfy.sd.VAE` 한 클래스라
+    (nodes.py:862) 이 키로 Wan 과 Qwen 을 구분할 수 없다 — 슬롯이
+    하나라 배율이 서로 새어 오염된다. production 은
+    `_vae_pixel_factor_for` 의 `spacial_compression_decode()` 경로가
+    1순위라 이 키를 지나지 않는다. 메서드가 없는 테스트 가짜를 위한
+    안전망으로만 남긴다.
 
-    왜(Why) `id()` 가 아니라 클래스인가: `id()` 는 주소 재사용 때문에 위험하다
-    (Jev 게이트가 명시적으로 금지). 그리고 배율은 **아키텍처의 속성**이므로
-    같은 클래스면 같은 배율이다 — 이건 성질이지 우연이 아니다.
+    왜(Why) `id()` 가 아니라 클래스인가: `id()` 는 주소 재사용 때문에
+    위험하다 (Jev 게이트가 명시적으로 금지).
     """
     t = type(vae)
     return (getattr(t, "__module__", ""),
@@ -303,9 +327,23 @@ def _vae_factor_key(vae):
 
 
 def _vae_pixel_factor_for(vae) -> int:
-    """이 VAE 에서 배운 배율. 배운 적 없으면 안전망."""
+    """이 VAE 의 배율. VAE 가 스스로 아는 값이면 그것을 쓴다.
+
+    왜(Why) 1순위가 `spacial_compression_decode` 인가 (2026-10-04
+    감사 실측): production 의 VAE 는 전부 `comfy.sd.VAE` 한
+    클래스라(nodes.py:862) 클래스 키로 Wan 과 Qwen 을 구분할 수
+    없다. 아키텍처 배율(8/16/…)은 VAE 가 자기 메서드로 이미
+    들고 있다. 학습 맵은 이 메서드가 없는 가짜 VAE (테스트) 전용
+    안전망이다.
+    """
     if vae is None:
         return _VAE_PIXEL_FACTOR_FALLBACK
+    try:
+        _f = vae.spacial_compression_decode()
+        if isinstance(_f, (int, float)) and 1 <= _f <= 64:
+            return int(_f)
+    except Exception:
+        pass
     try:
         return _VAE_FACTOR_BY_CLASS.get(_vae_factor_key(vae),
                                         _VAE_PIXEL_FACTOR_FALLBACK)
@@ -314,13 +352,16 @@ def _vae_pixel_factor_for(vae) -> int:
 
 
 def _vae_pixel_factor_learn(vae, latent, decoded) -> int:
-    """디코드 결과로 축소 비율을 **배운다**. 배운 값을 돌려준다.
+    """디코드 결과로 축소 비율을 배운다. 값을 돌려준다.
+
+    production 은 호출 전 이미 `spacial_compression_decode` 로 정확한
+    값을 가졌으므로 이 learn 은 가짜 VAE (메서드 없음) 전용이다.
 
     왜(Why) 별도 프로브가 아닌가: 위 주석 — 프로브는 비싸고, 디코드는 이미
     하고 있다. `decoded` 의 높이가 latent 높이의 몇 배인지만 보면 끝이다.
 
-    왜(Why) 실패해도 조용히 두는가: 처음엔 안전망을 쓴다. 그건 지금과 **같은**
-    동작이므로 새로 나빠지는 것이 아니다. 첫 디코드 뒤부터 정확해진다.
+    왜(Why) 실패해도 조용히 두는가: 실패해도 이전 값(안전망 또는
+    spacial 이 준 값)이 그대로 남는다 — 새로 나빠지는 것이 아니다.
     배율은 최적화 파라미터라 틀어도 **결과물의 정확성**을 해치지 않고 속도만
     달라진다.
     """
@@ -328,7 +369,18 @@ def _vae_pixel_factor_learn(vae, latent, decoded) -> int:
         if vae is None or latent is None or decoded is None:
             return _vae_pixel_factor_for(vae)
         lh = int(latent.shape[-2])
-        ih = int(getattr(decoded, "shape", [-1, -1, -1, -1])[-2])
+        # 왜(Why) 축을 채널로 고르나 (2026-10-04 감사 실측):
+        # production decoded 는 BHWC 다 (comfy.sd.VAE.decode 의
+        # movedim(1,-1), sd.py:1347). 그때 shape[-2] 는 W 이라
+        # W_img / H_lat 을 배율로 배우게 된다 — 비정사각에서 틀리고
+        # 정사각에서만 우연히 맞는다. 테스트 가짜는 BCHW 라
+        # shape[-2] 가 H 인 반대 상황이라 검사가 통과해 못 찾았다.
+        # 마지막 축이 1/3/4 면 채널이 마지막(BHWC)이므로 H 는 [-3],
+        # 아니면 BCHW 이므로 H 는 [-2].
+        _sh = getattr(decoded, "shape", None)
+        if _sh is None or len(_sh) != 4:
+            return _vae_pixel_factor_for(vae)
+        ih = int(_sh[-3]) if int(_sh[-1]) in (1, 3, 4) else int(_sh[-2])
         if lh > 0 and ih > 0 and ih % lh == 0:
             f = ih // lh
             if 1 <= f <= 64:
@@ -380,7 +432,7 @@ def _encode_image_ref(vae, image):
         #     def encode(self, pixel_samples):        # ← (B,H,W,C)
         #         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         #         pixel_samples = pixel_samples.movedim(-1, 1)     # 여기서 전치
-        # 원래 `VAEEncode` 노드도 `vae.encode(pixels[:, :, :, :3])` 로 그대로
+        # 원래 `VAEEncode` 노드도 `vae.encode(pixels)` 로 그대로
         # 넘긴다. 내가 미리 `movedim(-1, 1)` 하면 **전치가 두 번** 되고,
         # ComfyUI 는 dims 를 (3, 1544, ...) 로 읽어 크롭까지 망가뜨린다
         # (실측: "Calculated padded input size per channel: (1 x 1601)").
@@ -397,8 +449,11 @@ def _encode_image_ref(vae, image):
         del px
         _release_vram()
         return lat
-    except Exception as _e:
-        _note_pose_error('_encode_image_ref', _e)
+    except Exception:
+        # 왜(Why) 로그를 여기 남기지 않나 (2026-10-04 감사 52차): 유일한
+        # 호출부(run 의 original_image 분기)가 실패 시 "인코딩 실패 —
+        # original_latent 경로로 진행합니다" 를 항상 남긴다. 여기서 또
+        # 남기면 한 실패에 경고 2개가 찍힌다.
         _release_vram()
         return None
 
@@ -417,15 +472,16 @@ def _decode_capped(vae, latent, max_pixels=None):
         # 왜(Why) 더 이상 8 을 박지 않는가 (2026-10-01): 이 8 은 SD 계열
         # 기준이고 Qwen 은 16 이다. 그 차이로 픽셀 상한이 **4배 느슨하게**
         # 동작했다 — 즉 상한이 있어도 실제로는 상한을 못 넘는다.
-        # 값은 이전 디코드에서 **배웠다**(`_vae_pixel_factor_learn`). 처음엔
-        # 안전망(8)이므로 첫 호출은 지금과 같다가, 두 번째부터 정확해진다.
+        # 값은 `_vae_pixel_factor_for` 가 준다 — production VAE 는
+        # 자기 메서드(spacial_compression_decode)로 **첫 호출부터**
+        # 정확하다. 이전 디코드에서 배우는 경로는 가짜 VAE 전용이다.
         _fac = _vae_pixel_factor_for(vae)
         px = float(max(1, h) * max(1, w) * _fac * _fac)
         cap = _DECODE_MAX_PIXELS if max_pixels is None else int(max_pixels)
         if px <= cap:
             img = vae.decode(latent)
-            # 왜(Why) 결과를 버리지 않는가: `_vae_pixel_factor_learn` 은 **배운
-            # 배율**을 돌려준다. 그 값을 그대로 반환하면 디코드된 이미지가
+            # 왜(Why) 결과를 버리지 않는가: `_vae_pixel_factor_learn` 은
+            # 배율을 돌려주는데, 그 값을 그대로 반환하면 디코드된 이미지가
             # 숫자로 바뀌고 디코딩이 조용히 무력화된다(실측: 마스크·캐시·
             # 디코드 검사 8건이 한꺼번에 깨졌다). 배율은 부수 효과이므로 버린다.
             _vae_pixel_factor_learn(vae, latent, img)
@@ -441,6 +497,19 @@ def _decode_capped(vae, latent, max_pixels=None):
         _release_vram()
         return img
     except Exception:
+        # 왜(Why) release 후 재시도인가 (2026-10-04 감사): 위 경로가
+        # OOM 으로 죽었다면 VRAM 이 아직 차 있다 — 그 상태로 4배 큰
+        # 전 해상도 디코드를 바로 시도하면 두 번째 OOM 이 난다.
+        _release_vram()
+        # 왜(Why) 이 fallback 을 지키나 (2026-10-04 감사 4차):
+        # "축소를 안 탔으면 같은 부르기 재시도는 보장 실패" 라고
+        # raise 로 고쳤다가 실측으로 되돌렸다. 예외는 shape 접근·learn
+        # 등 decode **전후** 어디서나 나는데, 이 fallback 은 그 복구
+        # 경로다 — 실측(2026-10-04 감사 6차): raise 로 바꾸면
+        # `tests/verify_cache_full.py` 의 "키가 없어도 디코드는
+        # 수행된다" 1건만 실패하고, 그 입력은 `T.ones(4)` **1차원**
+        # 이다(2차원은 shape[-2] 가 안 터진다). 중복 부르기의 비용은
+        # 1회 decode 뿐이고 그조차 성공할 수 있다.
         return vae.decode(latent)
 
 
@@ -470,6 +539,10 @@ def _latent_cache_key(latent):
     블록 평균은 0/200).
     구분 실패 위험: 1원소 변화와 1채널 변화를 둘 다 구분함을 같은 프로브가
     확인했다. 값이 0/1 사이로 클리핑되므로 키는 float32 원본에서 읽는다.
+    **배치는 첫 원소만** 본다(2026-10-04 감사 5차 실측: batch 2 의 두 번째
+    원소만 바꿔도 키가 같다). 현재 캐시 경로는 전부 `not _multi` 뒤라
+    batch>1 이 여기 안 오지만, `not _multi` 를 하나라도 풀면 전부 조용히
+    첫 원소로 디코드된다.
 
     실패하면 None 을 돌려 호출부가 **캐시를 쓰지 않게** 한다. 키를 못 만드는
     것보다 틀린 키로 엉뚱한 픽셀을 주는 것이 훨씬 나쁘다.
@@ -479,8 +552,28 @@ def _latent_cache_key(latent):
         import numpy as _np
         import torch as _t
         import torch.nn.functional as _tf
-        raw = latent.detach().cpu() if hasattr(latent, "detach") else latent
-        a = _np.asarray(raw, dtype=_np.float32)
+        # 왜(Why) 풀링을 장치에서 하는가 (2026-10-04 감사):
+        # 전체 latent 를 CPU 로 옮기는 전송은 이 키를
+        # 만들려는 목적(디코드 회피, 수십 ms) 의 10분의 1
+        # 이상이 될 수 있다(512² latent = 16MB 전송).
+        # 풀링은 장치에서 돌리고 **16x16 결과(16KB, 채널 유지)** 만
+        # 옮긴다. 키는 한 실행 안의 캐시에서만 쓰이므로
+        # (`_dcache` — run() 지역) 장치별 부동소수점
+        # 순서 차이가 키를 뒤집지 않는다.
+        if hasattr(latent, "detach") and hasattr(latent, "ndim"):
+            shape = tuple(int(d) for d in latent.shape)
+            if len(shape) < 2:
+                return None
+            t = latent.detach().float()
+            while t.ndim < 4:
+                t = t.unsqueeze(0)
+            if t.shape[0] != 1:
+                t = t[:1]
+            pooled = _tf.adaptive_avg_pool2d(t, (16, 16))
+            digest = _hl.sha1(
+                pooled.detach().cpu().numpy().tobytes()).hexdigest()
+            return (shape, digest)
+        a = _np.asarray(latent, dtype=_np.float32)
         shape = tuple(int(d) for d in a.shape)
         if a.ndim < 2:
             return None
@@ -512,7 +605,9 @@ def _decode_latent_rgb(vae, latent, cache=None):
         import numpy as _np
         # 키를 못 만들면(None) 캐시를 아예 쓰지 않는다. 틀린 키로 엉뚱한
         # 픽셀을 주는 것보다 디코딩을 한 번 더 하는 것이 나쁘지 않다.
-        key = _latent_cache_key(latent)
+        # cache 가 없으면 키를 계산하지도 않는다 — 0.36ms 와 device->host
+        # 전송을 공짜로 아낀다 (2026-10-04 감사 5차).
+        key = _latent_cache_key(latent) if cache is not None else None
         if key is not None and cache is not None and key in cache:
             return cache[key]
         with _t.no_grad():
@@ -531,19 +626,39 @@ def _decode_latent_rgb(vae, latent, cache=None):
         try:
             _lh = int(latent.shape[-2])
             _lw = int(latent.shape[-1])
-            if _lh * _lw * 64 > _DECODE_MAX_PIXELS:
-                u8 = (_np.clip(arr, 0.0, 1.0) * 255.0).astype(_np.uint8)
-                if not _pose_landmarks_from_tasks(u8):
-                    _release_vram()
-                    with _t.no_grad():
-                        img = _decode_capped(vae, latent,
-                                             max_pixels=_DECODE_RETRY_PIXELS)
-                    if hasattr(img, "detach"):
-                        img = img.detach().cpu()
-                    arr2 = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
-                    arr2 = _as_rgb_hwc(_np.asarray(arr2, dtype=_np.float32))
-                    if arr2 is not None:
-                        arr = arr2
+            # 왜(Why) 하드코딩 64 가 아니라 학습 배율인가 (2026-10-04
+            # 감사): 64 는 SD 계열 기준(8²)이고 Qwen 은 16²=256 이다.
+            # 가드가 작으면 **재시도가 아예 걸리지 않는다** — Qwen
+            # 표준 해상도(1024~2048px, latent 64²~128²) 에서는 상한
+            # 디코드가 실제로 일어나도 이 가드를 통과하지 않는다
+            # (128² 기준 128*128*64 = 정확히 1MP 로 `>` 가 성립하지
+            # 않음). `_decode_capped` 의 상한 조건과 같은 식으로 두면
+            # "재시도 대상 = 실제로 상한이 걸린 디코드" 가 된다.
+            if _lh * _lw * _vae_pixel_factor_for(vae) ** 2 \
+                    > _DECODE_MAX_PIXELS:
+                # 왜(Why) 포즈 가용성 게이트 (2026-10-04 감사):
+                # mediapipe 없이는 `_pose_landmarks_from_tasks` 가
+                # 무조건 None — "검출 실패"와 "검출 자체 불가" 가 같아
+                # 재시도가 항상 돌고 4MP 배열이 캐시를 오염시킨다
+                # (목적을 이룰 수 없는 재시도). 나머지 포즈 호출부도
+                # `_pose_landmarker() is None` 으로 먼저 막는다.
+                if _pose_landmarker() is not None:
+                    u8 = (_np.clip(arr, 0.0, 1.0)
+                          * 255.0).astype(_np.uint8)
+                    if not _pose_landmarks_from_tasks(u8):
+                        _release_vram()
+                        with _t.no_grad():
+                            img = _decode_capped(
+                                vae, latent,
+                                max_pixels=_DECODE_RETRY_PIXELS)
+                        if hasattr(img, "detach"):
+                            img = img.detach().cpu()
+                        arr2 = (img.numpy() if hasattr(img, "numpy")
+                                else _np.asarray(img))
+                        arr2 = _as_rgb_hwc(
+                            _np.asarray(arr2, dtype=_np.float32))
+                        if arr2 is not None:
+                            arr = arr2
         except Exception as _e:
             _note_retry_error(_e)
         if cache is not None and key is not None:
@@ -699,7 +814,7 @@ def _pose_landmarker():
         # _part_detail_map 이 None 을 돌려주면서 그 아래 픽셀 공간 부위 분석
         # (detail_boost / _apply_region_strength) 이 통째로 죽었다. 단위
         # 테스트 223 건이 포즈 세션을 stub 으로 주입해서 이 경로를 검증하지
-        # 못한 탓이다. 정답은 긴 드이 아니라 그 안의 모듈 — landmarker 0.08초 생성, 33점
+        # 못한 탓이다. 정답은 mediapipe 최상위가 아니라 그 안의 모듈 — landmarker 0.08초 생성, 33점
         # 검출까지 확인했다.
         _BaseOptions = _find_base_options()
         if _BaseOptions is None:
@@ -726,7 +841,16 @@ def _pose_landmarker():
             output_segmentation_masks=False)
         lm = _vision.PoseLandmarker.create_from_options(options)
     except Exception as _e:
-        _note_pose_error('_pose_landmarker', _e)
+        # 왜(Why) import 실패는 안내로, 나머지는 오류로 (2026-10-05 감사 67차):
+        # mediapipe 미설치 환경의 첫 얼굴이 "ModuleNotFoundError: No module
+        # named 'mediapipe'" 스택류 메시지면 사용자는 무엇을 해야 하는지
+        # 모른다. __init__ 이 약속한 "이유를 콘솔에 한 번 알린다" 는 이
+        # 안내(`_note_pose_unavailable`)다. import 성공 후의 실패는
+        # 동작 중 오류라 기존 채널이 맞다.
+        if isinstance(_e, ImportError):
+            _note_pose_unavailable()
+        else:
+            _note_pose_error('_pose_landmarker', _e)
         return None
     _TASKS_LANDMARKER.append(lm)
     return lm
@@ -763,7 +887,13 @@ def _hand_landmarker():
             min_tracking_confidence=_HAND_MIN_CONF)
         lm = _vision.HandLandmarker.create_from_options(options)
     except Exception as _e:
-        _note_pose_error('_hand_landmarker', _e)
+        # 왜(Why) 포즈와 같은 분기인가 (2026-10-05 감사 67차): 미설치 첫
+        # 얼굴은 안내여야지 스택류 오류가 아니다. import 성공 후의 실패는
+        # 동작 중 오류라 기존 채널이 맞다.
+        if isinstance(_e, ImportError):
+            _note_hand_unavailable()
+        else:
+            _note_pose_error('_hand_landmarker', _e)
         return None
     _TASKS_HANDMARKER.append(lm)
     return lm
@@ -777,8 +907,9 @@ def _note_hand_unavailable():
     _HAND_NOTED = True
     _log("[GoRi Consistency Keeper] 손가락 판정이 꺼져 있다. "
          "mediapipe tasks 의 " + _HAND_MODEL_FILENAME + " 을 못 읽는다. "
-         "설치 폴더에 파일이 있는지, 또는 GORI_HAND_MODEL 환경변수 경로가 "
-         "맞는지 확인해 주세요. 포즈 기반 판정은 계속 동작한다.")
+         "mediapipe 설치 여부, 설치 폴더에 파일이 있는지, 또는 "
+         "GORI_HAND_MODEL 환경변수 경로가 맞는지 확인해 주세요. "
+         "포즈 기반 판정은 계속 동작한다.")
 
 
 def _hand_landmarks_from_tasks(u8):
@@ -928,8 +1059,8 @@ def _note_retry_error(exc):
     if _DECODE_RETRY_NOTED:
         return
     _DECODE_RETRY_NOTED = True
-    _log("[GoRi Consistency Keeper] 포즈가 안 잡혀 상한을 올려 다시 디코드했지만 "
-         "실패했다. 해상도를 낮춘 상태로 진행한다: "
+    _log("[GoRi Consistency Keeper] ⚠ 상한 재시도 경로에서 오류 — 원래(상한본) "
+         "해상도 결과로 진행한다: "
          + type(exc).__name__ + ": " + str(exc))
 
 
@@ -942,7 +1073,7 @@ def _note_pose_error(where, exc):
     if _POSE_ERR_NOTED:
         return
     _POSE_ERR_NOTED = True
-    _log('[GoRi Consistency Keeper] pose inference failed in ' + where + ': '
+    _log('[GoRi Consistency Keeper] ⚠ pose inference failed in ' + where + ': '
          + type(exc).__name__ + ': ' + str(exc))
 
 
@@ -954,8 +1085,9 @@ def _note_pose_unavailable():
     _POSE_NOTED = True
     _log("[GoRi Consistency Keeper] 인체 마스크·부위별 강도·프레이밍 판정이 꺼져 있다. "
          "mediapipe tasks 의 " + _POSE_MODEL_FILENAME + " 을 못 읽는다. "
-         "설치 폴더에 파일이 있는지, 또는 GORI_POSE_MODEL 환경변수 경로가 "
-         "맞는지 확인해 주세요. 인물 위치만 쓰는 강도 조절은 계속 동작한다.")
+         "mediapipe 설치 여부, 설치 폴더에 파일이 있는지, 또는 "
+         "GORI_POSE_MODEL 환경변수 경로가 맞는지 확인해 주세요. "
+         "인물 위치만 쓰는 강도 조절은 계속 동작한다.")
 
 
 def _person_mask_from_rgb(u8):
@@ -986,12 +1118,19 @@ def _person_mask_from_rgb(u8):
         h, w = int(arr.shape[0]), int(arr.shape[1])
         if h < 2 or w < 2:
             return None
-        ys, xs = _np.mgrid[0:h, 0:w]
-        xs = (xs + 0.5) / float(w)
-        ys = (ys + 0.5) / float(h)
+        # 왜(Why) float32 격자인가 (2026-10-04 감사 11차): mgrid 는 int64 를
+        # 돌려주고 (격자 + 0.5) / w 는 float64 로 승격된다. 1024 픽셀 프레임
+        # 기준 33회 루프가 float64 임시 배열을 프레임마다 수백 MB 흘린다.
+        # 최종 출력은 어차피 astype(float32) 이라 float64 정밀도는 아무것도
+        # 사지 않는다 — 좌표 격자를 처음부터 float32 로 만든다.
+        xs = ((_np.arange(w, dtype=_np.float32) + _np.float32(0.5))
+              / _np.float32(w))[None, :]
+        ys = ((_np.arange(h, dtype=_np.float32) + _np.float32(0.5))
+              / _np.float32(h))[:, None]
         best = None
         for (px, py) in pts[:33]:
-            d = (xs - float(px)) ** 2 + (ys - float(py)) ** 2
+            d = ((xs - _np.float32(px)) ** 2
+                 + (ys - _np.float32(py)) ** 2)
             best = d if best is None else _np.minimum(best, d)
         dist = _np.sqrt(best)
         # 왜(Why) 반경을 **체격**으로 재나 (2026-09-30 실측): 처음엔 이미지 최대
@@ -1008,8 +1147,9 @@ def _person_mask_from_rgb(u8):
         # ① 랜드마크가 몇 점에 몰리면 bbox->0 이 되어 마스크가 한 점으로
         # 수축한다. ② 사람이 화면을 꽉 차면 bbox->1 이 되어 배경을 삼킨다.
         r = min(max(r, _MASK_FALLOFF_MIN), _MASK_FALLOFF_MAX)
-        if r <= 0.0:
-            return None
+        # (2026-10-04 감사 11차) 위 clamp 뒤의 `if r <= 0.0: return None` 은
+        # 도달 불가능한 죽은 절이었다 — _MASK_FALLOFF_MIN=0.15 가 하한을
+        # 보장하므로 r<=0 은 거짓이다. 지웠다.
         mask = _np.clip(1.0 - dist / r, 0.0, 1.0)
         return mask.astype(_np.float32)
     except Exception as _e:
@@ -1020,7 +1160,15 @@ def _person_mask_from_rgb(u8):
         # "조용히 실패한 것" 이 구분되지 않는다 — 실제로 이 경로는 3개 버그
         # (import 경로 / SIGABRT / 디코드 레이아웃)를 한참 숨겼다. 넓게 잡되
         # 반드시 한 번 말한다.
-        _note_pose_error('_person_mask_from_rgb', _e)
+        # 왜(Why) 포즈 채널이 아닌가 (2026-10-04 감사 5차): 이 try 안의
+        # 유일한 포즈 callee 는 자기 안에서 실패를 삼키므로 여기까지 오는
+        # 것은 numpy 지오메트리다. 포즈 채널을 쓰면 진짜 포즈 실패가
+        # 묻히고, 그 채널은 한 번뿐이라 구조적 실패가 폭주도 막는다 —
+        # 그래서 별도 once 채널로 보낸다.
+        _note_once('person_mask',
+                   "[GoRi Consistency Keeper] ⚠ person mask failed in "
+                   "_person_mask_from_rgb: %s: %s"
+                   % (type(_e).__name__, str(_e)))
         return None
 
 
@@ -1047,10 +1195,12 @@ def _person_mask_for_latent(vae, sampled, cache=None):
             return None
         arr = _decode_latent_rgb(vae, sampled, cache=cache)
         if arr is None:
+            _release_vram()
             return None
         u8 = (_np.clip(arr, 0.0, 1.0) * 255.0).astype(_np.uint8)
         seg = _person_mask_from_rgb(u8)
         if seg is None or seg.max() <= 0.01:
+            _release_vram()
             return None
         # 왜(Why) 임계 0.35 인가 (2026-09-30 실측): 감쇠 마스크를 그대로 쓰면
         # 배경에도 0.2~0.4 가 남아 "인물 영역만" 이라는 목적이 흐려진다(실측
@@ -1069,6 +1219,7 @@ def _person_mask_for_latent(vae, sampled, cache=None):
         _release_vram()
         return m
     except Exception:
+        _release_vram()
         return None
 
 
@@ -1266,9 +1417,10 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
                 _POSE_WHY[name] = "에지 맵 계산 실패"
                 continue
             u8 = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
-            if _pose_landmarker() is None:
-                _POSE_WHY[name] = "포즈 모델 없음 (세션 생성 실패)"
-                continue
+            # (2026-10-04 감사): 여기서 "포즈 모델 없음" reason 을
+            # 남기던 블록을 지웠다 — 진입부의 같은 검사가 이미 return
+            # 하고 세션 캐시는 evict 되지 않으므로 도달 불가였고,
+            # 소비자 게이트도 이 경로에서는 읽지 않았다.
             pts3 = _pose_landmarks_from_tasks(u8, with_visibility=True)
             if not pts3:
                 # 왜(Why) "사람 없음" 과 "탐지 실패" 를 나눠 말하나 (2026-10-01
@@ -1308,7 +1460,8 @@ def _part_detail_map(vae, latents, cache=None) -> "dict | None":
 
 def _apply_region_strength(base_strength, matched, sampled,
                            strength_vec, parts, mask):
-    """강도 벡터(33) → 공간 마스크 → 부위별 가중 블렌드. 새 텐서를 반환한다.
+    """강도 벡터(33) → 공간 마스크 → 부위별 가중 블렌드. 보강할 부위가
+    없거나 실패하면 None 을 반환한다.
 
     왜(Why): 33점 벡터만으로는 화면의 어느 영역을 강화할지 알 수 없다.
     sampled의 landmark 좌표로 각 점 주위에 원형 가중치를 뿌려 33×W 맵을 만든다.
@@ -1337,11 +1490,17 @@ def _apply_region_strength(base_strength, matched, sampled,
     3) **경계 역전(M-2):** 예전 `active = vec > min(vec)` 판정은 단조 벡터에서
        전부 False가 되어 당김이 0이 되었고(강도 1.0에서 효과 소멸),
        **음수 강도에서는 정반대로** 부스트된 부위만 제외됐다.
-       → "기준 강도 대비 실제로 올랐는지"로 판정한다(부호 무관).
+       → "기준 강도 대비 실제로 올랐는지"로 판정한다(부호와 무관하게 설계.
+         다만 현재 run() 은 eff>0 일 때만 region 경로에 진입하므로
+         음수 강도는 여기에 도달하지 않는다 — 2026-10-04 감사 14차 확인).
 
-    **한계(정확):** strength가 이미 1.0이면 `min(1.0, 1.0*1.6) = 1.0`이라
-    상향 자체가 불가능하다 → region 보강이 적용되지 않는다(정상). 100%보다
-    더 당길 수는 없으므로 의도한 동작이다.
+    **한계(2026-10-05 감사 75차 정정):** run() 은 위젯 strength 가 아니라
+    감쇠와 물리 상한(0.20)을 지난 eff 를 이 함수에 넘긴다. 따라서 옛
+    문단의 "strength=1.0 → w=1.0 → 보강 불가" 시나리오는 도달 불가능하고,
+    실제 bound 는 w = min(1.0, eff*1.6) ≤ 0.32 이다. 전역 당김 eff 위에
+    이 증분이 **가산**되므로 합계 계수는 eff + w ≤ 0.52 — 원본을 넘치는
+   (합계 1 초과) 일은 eff 상한이 막아준다. boost=1.6 은 기본 배율이며,
+    올려도 이 bound 는 eff 쪽 상한이 지켜준다.
     """
     import torch as _t
     xy = (parts.get("sampled") or {}).get("xy")
@@ -1441,8 +1600,8 @@ def _probe_detail_direction(vae, sampled, orig_ref, out):
             # 왜(Why) `_decode_latent_rgb` 인가 (2026-10-01): `_decode_capped`
             # 는 **torch 텐서 (1,C,H,W)** 를 돌려준다. `_edge_map_from_rgb` 는
             # numpy **HWC 배열**을 받는다. 다른 디코더를 썼다가
-            # `too many indices for tensor of dimension 4` 로Measurement가
-            # 조용히 실패했다. 이 함수가 RGB numpy 를 반환하는 계약이다.
+            # `too many indices for tensor of dimension 4`
+            # 오류로 조용히 실패했다. 이 함수가 RGB numpy 를 반환하는 계약이다.
             arr = _decode_latent_rgb(vae, lat)
             if arr is None:
                 raise RuntimeError("디코드 결과 없음")
@@ -1463,12 +1622,18 @@ def _probe_detail_direction(vae, sampled, orig_ref, out):
     _d_ref = (_o - _r) / _r * 100.0 if _r > 1e-9 else 0.0
     _verdict = ("당기면 살아난다" if _d_out > 0 else "당기면 뭉개진다")
     _log("[GoRi Consistency Keeper] 물리 방향 실측 "
-         f"시본 {_s:.4f} / 원본 {_r:.4f} / 결과 {_o:.4f} — "
-         f"결과는 시본 대비 {_d_out:+.1f}%, 원본 대비 {_d_ref:+.1f}% "
+         f"샘플 {_s:.4f} / 원본 {_r:.4f} / 결과 {_o:.4f} — "
+         f"결과는 샘플 대비 {_d_out:+.1f}%, 원본 대비 {_d_ref:+.1f}% "
          f"⇒ {_verdict}")
 
 
 _POSE_WHY = {}
+
+# 심각 사유 접두어. `_pose_gate_message` 가 ⚠ 승격을 이 값으로만 판정한다.
+# 생산지는 `_part_detail_map` 안의 세 문자열이다 — "디코드 결과 없음" /
+# "에지 맵 계산 실패" / "예외 %s: ...". 사유 문구를 고칠 때 이 짝을 함께
+# 고치지 않으면 ⚠ 가 조용히 사라진다 (2026-10-04 감사 46차, 승인 처리).
+_SEVERE_WHY_PREFIXES = ("디코드", "에지", "예외")
 
 # 낮춘 임계값 세션. 0.5 세션이 놓친 **사람 있는** 이미지를 되찾기 위한 것.
 _POSE_LOOSE = [None]
@@ -1512,10 +1677,10 @@ def _pose_gate_message(why):
     로그를 만들었는데, 그 **메시지 내용**을 테스트할 방법이 없었다. 사유별
     ⚠ 표시 규칙이 조용히 바뀌면 아무도 몰랐다. 함수로 빼면 규칙 자체를 고정한다.
     """
-    severe = (why.startswith("포즈 모델 없음")
-              or why.startswith("디코드")
-              or why.startswith("에지")
-              or why.startswith("예외"))
+    # 왜(Why) "포즈 모델 없음" 이 빠졌나 (2026-10-04 감사 5차): 그 유일한
+    # producer 는 4차에서 dead branch 로 지웠다. 소비자만 남아 있으면
+    # 규칙이 죽은 문자열을 관리한다.
+    severe = why.startswith(_SEVERE_WHY_PREFIXES)
     tag = "⚠ " if severe else ""
     return (f"[GoRi Consistency Keeper] {tag}판정 게이트: "
             f"원본 landmark 없음 — {why}"
@@ -1554,9 +1719,13 @@ def _note_no_boost(worst, region, thresh, max_r=0.0, max_rg=""):
                  f"(원본 에지는 있으나 결과물이 더 날카로움 — 원본 에지 최대 "
                  f"{max_r:.4f} @{max_rg})")
         return
-    _log(f"[GoRi Consistency Keeper] 부위별 복원: 상향할 부위 없음 "
-         f"(가장 손실 큰 부위 {region} {worst:.0%} < 임계 {thresh:.0%}) — "
-         f"결과물이 원본만큼 살아 있습니다")
+    # 왜(Why) 숫자 비교를 단정하지 않나 (2026-10-04 감사 13차): 이 로그는
+    # "손실이 임계 미달"과 "판정 게이트가 부위를 막음" 두 경우가 같이 온다.
+    # 부위별 손실 재계산(아래 루프)은 게이트를 모르므로 worst 가 임계 이상일
+    # 수도 있다 — "{x}% < 임계" 를 무조건 쓰면 거짓말이 된다.
+    _log(f"[GoRi Consistency Keeper] 부위별 복원: 상향하지 않았습니다 "
+         f"(가장 손실 큰 부위 {region} {worst:.0%} — 임계 {thresh:.0%} 미달이거나 "
+         f"판정 게이트가 막은 부위)")
 
 
 def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35,
@@ -1662,7 +1831,17 @@ def detail_boost(parts_ref, parts_samp, strength, boost=1.6, thresh=0.35,
              + " / ".join(_stats))
         _note_no_boost(_worst, _worst_r, thresh, _max_r, _max_rg)
         return None, ""
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) 로그를 남기나 (2026-10-04 감사 47차): 여기서 침묵하면
+        # trust_gate=False 기본값에서는 이 브랜치에 다른 로그가 전혀 없어
+        # 부위별 복원이 조용히 꺼진다 — "조용히 꺼버린다(silent
+        # degradation)" 주석이 말하는 것이다.
+        # 호출부의 "부위별 복원 실패" 로그는 _apply_region_strength 예외만
+        # 잡는다. (None, "") 은 정상 무개입 경로도 반환하므로 호출부 else
+        # 로그는 옳지 않다.
+        _log("[GoRi Consistency Keeper] ⚠ 부위별 디테일 분석 실패 "
+             f"({type(_e).__name__}: {_e}) — 부위별 복원을 건너뛰고 "
+             "전역 당김만 적용")
         return None, ""
 
 
@@ -1751,11 +1930,13 @@ def _panels_from_profile(profile, width: int, on_ratio: float = _PANEL_ON_RATIO,
 #   실사용 시트 3장 : n=4 / 간격비 0.77~0.95
 #   실사용 사진 10장: n=1~2
 #
-# ⚠ 이 값은 카메라 노드의 `_SHEET_MIN_PANELS` · `_SHEET_MIN_SPACING_RATIO` 와
-# **같은 값이어야 한다.** 2026-10-01 실측: 키퍼만 `SHEET_MIN_PANELS=3`,
+# ⚠ `SHEET_MIN_PANELS` 는 카메라 노드의 것과 **같은 값이어야 한다.**
+# 2026-10-01 실측: 키퍼만 `SHEET_MIN_PANELS=3`,
 # `SHEET_MAX_WIDTH_RATIO=1.60` 이었고 그 결과 시트 3장 중 **2장**이 "시트 아님"
 # 으로 판정되어 강도 감쇠와 패널 대체가 통째로 건너뛰어졌다. 카메라만 고쳤던
 # 것이었다(8d2fd86 이전). 두 판정이 어긋나면 키퍼만 잘못 동작한다.
+# 간격비(`SHEET_MIN_SPACING_RATIO`)는 **일부러 다르다**(키퍼 0.60 / 카메라
+# 0.45, 2026-10-01 실측 근거) — `tests/test_pack.py` 가 두 관계를 함께 고정한다.
 # 크로스 폴더 공용 모듈은 만들지 않는다 — 각 폴더가 **단독 배포 단위**라
 # (CI 가 `cd 폴더 && python tests/test_node.py` 로 독립 실행하고 __init__.py
 # docstring 도 "이 폴더를 복사 후 재시작" 이라고 적었다) 공용 모듈을 두면
@@ -1811,8 +1992,9 @@ def detect_panels(arr) -> list:
     """RGB 배열 → 세로 패널 구간 [(x0, x1), ...]. 시트가 아니면 [].
 
     왜(Why) 열 방향만 보는가: 실사용 표준 시트는 정면·후면·측면을 **일자로**
-    늘어놓은 형태다(사용자 실사용 구조). 2개 이상 콘텐츠 구간이 나오면 시트로
-    본다. 세로로 쌓인 시트는 이번 단계에서 다루지 않는다(미검출 시 조용히
+    늘어놓은 형태다(사용자 실사용 구조). 최종 시트 판정은 `looks_like_sheet` 가
+    하며 패널 4개 이상 + 간격 정규성(≥0.60)을 요구한다 — 이 함수는 구간 후보만
+    만든다. 세로로 쌓인 시트는 이번 단계에서 다루지 않는다(미검출 시 조용히
     기존 동작 — 오탐보다 누락이 안전하다).
     """
     prof = column_profile(arr)
@@ -1906,7 +2088,12 @@ def signature_similarity(a, b) -> float:
         nb = float(_np.linalg.norm(vb))
         if na <= 1e-8 or nb <= 1e-8:
             return 0.0
-        return max(0.0, min(1.0, float(_np.dot(va, vb) / (na * nb))))
+        # 왜(Why) min 이 바깥에 있나 (2026-10-04 감사 56차): `max(0.0, nan)`
+        # 은 0.0 이지만 `min(1.0, nan)` 은 1.0 이다(_safe_strength
+        # docstring 참조). 바깥을
+        # min 으로 두면 NaN 입력이 docstring 대로 0.0(비교 불가)로 떨어진다.
+        # 유한 입력에는 순서와 무관하게 같은 값.
+        return min(1.0, max(0.0, float(_np.dot(va, vb) / (na * nb))))
     except Exception:
         return 0.0
 
@@ -2068,6 +2255,7 @@ def judge_points(pts):
          "confidence": float,
          "checks": [{"check_id", "ok", "detail"}],
          "low_visibility": [관절 이름],
+         "low_indices": [관절 인덱스],
          "frame": (ox, oy, scale) or None}
 
     왜(Why) v1 은 damaged 를 **반환하지 않는다**: 기하 판정을 실측해 봤는데
@@ -2193,7 +2381,7 @@ _HAND_TIP_MIN_SEP = 0.001
 def judge_hands(hands):
     """손 21점 리스트 → 손가락 개수·분리 판정 dict (순수 함수, 검출 없음).
 
-    반환은 `judge_points` 와 같은 형식:
+    반환은 `judge_points` 와 같은 형식이되 `low_indices` 는 없다:
         {"verdict": "intact"|"damaged"|"undetermined",
          "confidence": float,
          "checks": [{"check_id", "ok", "detail"}],
@@ -2283,7 +2471,10 @@ def framing_similarity(box_a, box_b) -> float:
         h_a = min(box_a[3], 1.0) - max(box_a[1], 0.0)
         h_b = min(box_b[3], 1.0) - max(box_b[1], 0.0)
         h_sim = min(h_a, h_b) / max(max(h_a, h_b), 1e-6)     # 상대 높이 0~1
-        return max(0.0, min(1.0, 0.5 * ar_sim + 0.5 * h_sim))
+        # 왜(Why) min 이 바깥에 있나 (2026-10-04 감사 56차): NaN 좌표가 들어오면
+        # `min(1.0, nan)` 이 1.0 이 돼 게이트가 fail-open 했다. 바깥을 min 으로
+        # 두면 docstring 대로 0.0(비교 불가)이 된다. 유한 입력에는 무영향.
+        return min(1.0, max(0.0, 0.5 * ar_sim + 0.5 * h_sim))
     except Exception:
         return 0.0
 
@@ -2298,6 +2489,9 @@ def _decode_small(vae, latent, scale: float = 0.5):
     왜(Why) 기본 0.5인가: 패널 구조는 가로 해상도가 있어야 보인다(1/4로
     줄이면 6패널 시트의 패널 폭이 몇 픽셀까지 줄어 판별이 무너진다).
     샘플러 결과는 MediaPipe 랜드마크만 쓰므로 더 작아도 된다 → 호출부가 0.25.
+    단, 아래 4MP 픽셀 예산이 걸리면 배율이 0.23 까도 내려갈 수 있다 —
+    판정은 히스토그램 정규화라 해상도에 둔감하지만 무한정 작아지는 건
+    아니다(예산이 하한이다).
     """
     try:
         import torch as _t
@@ -2308,6 +2502,26 @@ def _decode_small(vae, latent, scale: float = 0.5):
         s = float(scale)
         if not (0.05 <= s <= 1.0):
             return None
+        # 왜(Why) 축소 디코드에도 상한이 필요한가 (2026-10-04
+        # 감사): 0.5 배는 예외가 아니다. 74MP 캐릭터 시트
+        # 참조를 0.5 배로 디코드하면 **18MP** 가 되어
+        # `_DECODE_RETRY_PIXELS`(4MP — 이 노드가 실측에서
+        # 감당한 최댓값) 를 4 배 넘는다. RTX 3080 10GB 에서
+        # 2MP 통째 디코드가 멈춘 전례가 있는 구간이다
+        # (`_DECODE_MAX_PIXELS` 주석). 상한 안으로 배율을
+        # 더 낮춘다. 판정은 해상도에 둔감하다(시그니처는
+        # 히스토그램 총합 정규화 — `analyze_reference_sheet`
+        # 주석). 다만 6패널 시트의 패널 폭이 몇 픽셀로 줄면
+        # 판별이 무너지므로(이 함수 docstring) 상한은 재시도
+        # 디코드와 같은 4MP 로 둔다. "0.23 배 이상" 은 74MP 실측에서
+        # 나온 수치라 **보장이 아니다** — 100MP 라면 0.20 이 된다
+        # (실제 하한은 아래 `max(0.05, ...)`).
+        _lh = int(latent.shape[-2])
+        _lw = int(latent.shape[-1])
+        _px = float(max(1, _lh) * max(1, _lw)
+                    * _vae_pixel_factor_for(vae) ** 2 * s * s)
+        if _px > _DECODE_RETRY_PIXELS:
+            s = max(0.05, s * (_DECODE_RETRY_PIXELS / _px) ** 0.5)
         with _t.no_grad():
             small = (_f.interpolate(latent.float(), scale_factor=s, mode="area")
                      if s < 1.0 else latent.float())
@@ -2316,8 +2530,16 @@ def _decode_small(vae, latent, scale: float = 0.5):
             img = img.detach().cpu()
         arr = img.numpy() if hasattr(img, "numpy") else _np.asarray(img)
         arr = _np.asarray(arr, dtype=_np.float32)
-        return _as_rgb_hwc(arr)
+        out_s = _as_rgb_hwc(arr)
+        # 왜(Why) release (2026-10-04 감사): 이 헬퍼는 **디코드가
+        # 일어난** exit 에서 release 한다 (초기 return 두 곳은 할당 전).
+        # 호출부가 나중에 release 해도 지금 이 자리가 마지막이 되는
+        # 경로가 있다. (`_decode_latent_rgb` / `_decode_capped` 는
+        # 호출부 위임이라 여기와 규칙이 다르다.)
+        _release_vram()
+        return out_s
     except Exception:
+        _release_vram()
         return None
 
 
@@ -2333,8 +2555,11 @@ def _pose_landmarks(img_arr):
     오해를 샌다. 실제로 이 함수를 원본 PNG 로 직접 부른 프로브가 0/18 을
     냈고(2026-09-30), 원인은 크기였다(1024px 캡 후 11/18).
     **production 경로에서는 이 검사가 절대 발동하지 않는다.** 실측 근거:
-    두 호출자(L2427·L2435) 모두 `_decode_latent_rgb`/`_decode_small` 로
-    오는데 둘 다 마지막에 `_as_rgb_hwc` 를 지나고 그 L264 가 `clip(0,1)`
+    두 호출자(`analyze_reference_sheet` 의
+    `_full`·`_samp_src`) 모두
+    `_decode_latent_rgb`/`_decode_small` 로
+    오는데 둘 다 마지막에 `_as_rgb_hwc` 를 지나고 그 마지막 return 이
+    `clip(0,1)`
     이다. 슬라이스(`ref_arr[:, x0:x1]`)와 `_content_crop` 도 범위를
     보존한다. 즉 발동 조건은 "production 이 계약을 어겼을 때" 뿐이다.
     """
@@ -2350,7 +2575,14 @@ def _pose_landmarks(img_arr):
         if a.size:
             _lo = float(a.min())
             _hi = float(a.max())
-            if _lo < 0.0 or _hi > 1.0:
+            # 왜(Why) 부정형(NaN 을 통과시키는 형태가 아니라 만족을 요구하는
+            # 형태)인가 (2026-10-04 감사 12차): `_lo < 0.0 or _hi > 1.0` 은
+            # NaN 에서 두 비교가 전부 거짓이라 가드를 통과한다. 그러면
+            # clip 이 NaN 을 그대로 남기고 uint8 캐스트가 미정의 동작이 된다
+            # (검출이 조용히 죽거나 쓰레기 프레임을 본다). fp16 VAE 의
+            # 디코드 오버플로가 실제 NaN 생산자다. "0..1 안에 있음" 을
+            # 요구하면 NaN 은 자동으로 거부된다.
+            if not (_lo >= 0.0 and _hi <= 1.0):
                 _note_once(
                     "pose_input_range",
                     "[GoRi Consistency Keeper] pose input outside 0..1 "
@@ -2361,7 +2593,17 @@ def _pose_landmarks(img_arr):
                 return None
         u8 = (_np.clip(a, 0.0, 1.0) * 255.0).astype(_np.uint8)
         return _pose_landmarks_from_tasks(u8)
-    except Exception:
+    except Exception as _e:
+        # 왜(Why) once 로그를 남기나 (2026-10-04 감사 54차): out-of-range 는
+        # 위 once 로그가 잡지만 그 이전 변환 단계(asarray/min)의 예외는
+        # 여기서 무음으로 소멸했다. callee 는 자체 보고가 있지만 그 **전**의
+        # 실패는 callee 에 도달하지 않는다. 실행 결과 자체는 매 런 "마스크
+        # 없음" 로그로 보이므로 근본 원인만 once 로 남긴다.
+        _note_once(
+            "pose_input_conv",
+            "[GoRi Consistency Keeper] pose input 변환 실패 (%s: %s) — "
+            "포즈 검출을 건너뛰고 전역 당김으로 진행합니다"
+            % (type(_e).__name__, _e))
         return None
 
 
@@ -2369,7 +2611,7 @@ def _panel_reference_latent(vae, ref_latent, panel_n, cache=None):
     """시트의 한 패널만 잘라 **진짜 latent** 로 돌려준다. 실패하면 None.
 
     왜(Why) 다시 VAE 로 인코딩하나: 패널 좌표는 픽셀 배열에서 얻었으므로
-    여기서Ended 픽셀 텐서를 만들어 그대로 넘기고 싶지만, downstream 은 전부
+    여기서는 픽셀 텐서를 만들어 그대로 넘기고 싶지만, downstream 은 전부
     latent 를 기대한다(`_part_detail_map` 은 VAE 디코드, drift MSE 와 전역 블렌드
     도 latent 간 연산). 픽셀을 latent 자리에 넣으면 조용히 깨진다. 그래서
     **진짜 latent** 로 되돌려야 아무도 안 깨진다. 비용은 시트를 물었을 때만
@@ -2382,11 +2624,13 @@ def _panel_reference_latent(vae, ref_latent, panel_n, cache=None):
             return None
         full = _decode_latent_rgb(vae, ref_latent, cache=cache)
         if full is None:
+            _release_vram()
             return None
         h, w = int(full.shape[0]), int(full.shape[1])
         x0 = max(0, min(w - 2, int(float(panel_n[0]) * w)))
         x1 = max(x0 + 1, min(w, int(float(panel_n[1]) * w)))
         if x1 - x0 < 8:
+            _release_vram()
             return None
         crop = full[:, x0:x1]
         # 세로로 긴 패널은 정사각에 가깝게 잘라낸다 — VAE 물결에 덜 예민하다.
@@ -2400,7 +2644,13 @@ def _panel_reference_latent(vae, ref_latent, panel_n, cache=None):
         _release_vram()
         return lat
     except Exception as _e:
-        _note_pose_error('_panel_reference_latent', _e)
+        # 왜(Why) 포즈 채널을 안 쓰나 + release (2026-10-04 감사):
+        # 실패 원인은 encode/decode 이지 포즈가 아니다. 예외 경로가
+        # release 를 안 해 crop/full 이 남았었다 — 그래서 이 자리에서
+        # release 한다.
+        _log("[GoRi Consistency Keeper] ⚠ panel reference encode "
+             "failed: %s" % _e)
+        _release_vram()
         return None
 
 
@@ -2445,8 +2695,15 @@ def analyze_reference_sheet(vae, ref_latent, sampled, cache=None) -> dict:
             # 아니다" 와 "디코드가 실패했다") 를 구분해 주는 유일한 자리다.
             # `_decode_small` 이 예외를 삼키고 None 을 돌려주므로, 로그가
             # 없으면 사용자가 "패널 0개" 를 보고 원본 문제를 의심하게 된다.
-            # 디코드 경로 자체가 이미 사유를 남기므로 여기서는 경고만 준다.
-            _note_pose_error('analyze_reference_sheet.decode', None)
+            # 왜(Why) `_note_pose_error` 를 안 쓰나 (2026-10-04 감사):
+            # 여기는 **디코드 실패**지 포즈 추론 실패가 아니고 예외도
+            # 없다(None). 그 채널로 보내면 "NoneType: None" 이라는
+            # 거짓 메시지가 남고 `_POSE_ERR_NOTED` 까지 소모돼 뒤에
+            # 오는 진짜 포즈 실패가 조용히 묻힌다. 디코드 실패는
+            # 여기서 직접 경고한다(한 실행에 이 경로는 한 번).
+            _log("[GoRi Consistency Keeper] ⚠ 참조 시트 디코드 실패 — "
+                 "시트 판정을 건너뛰고 원본 경로로 진행합니다")
+            _release_vram()
             return out
         raw = detect_panels(ref_arr)
         out["raw"] = len(raw)
@@ -2493,7 +2750,7 @@ def analyze_reference_sheet(vae, ref_latent, sampled, cache=None) -> dict:
             # 왜(Why) 여기서만 원본 해상도로 다시 잡나 (2026-09-30 실측):
             # `ref_arr` 은 0.5배 축소본이라 패널 폭이 216 -> 108 px 로 줄어
             # 33점 검출이 실패한다. 그 결과 "인물 bbox 미검출" -> 프레이밍 게이트가
-            # 항상 False -> 2단계 (A) 경로로 영영 못 들어간다. 패널 검감출·유사도
+            # 항상 False -> 2단계 (A) 경로로 영영 못 들어간다. 패널 검출·유사도
             # 판정은 축소본으로 충분하니 **포즈만** 원본 크기로 본다.
             _pose_src = ref_arr[:, x0:x1]
             _full = _decode_latent_rgb(vae, ref_latent, cache=cache)
@@ -2521,13 +2778,19 @@ def analyze_reference_sheet(vae, ref_latent, sampled, cache=None) -> dict:
         # "안 되는 이유"를 아예 말하지 않는다. 실제로 예외 하나가 시트 분석
         # 전체를 삼켜 로그가 0건이었고, 밖에서는 그것이 "시트가 아니다" 와
         # 구분되지 않았다.
-        _note_pose_error('analyze_reference_sheet', _e)
+        # 왜(Why) 포즈 채널이 아닌가 (2026-10-04 감사 3번째 위치):
+        # 이 try 안의 callee 는 전부 자체적으로 None/예외를 삼키므로
+        # 여기까지 오는 것은 MemoryError 급이다. 그때 포즈 채널을
+        # 소모하면 뒤의 진짜 포즈 실패가 묻힌다.
+        _log("[GoRi Consistency Keeper] ⚠ analyze_reference_sheet "
+             "failed: %s" % _e)
         _release_vram()
     return out
 
 
 def _log_sheet_analysis(info: dict, ref_name: str) -> None:
-    """시트 분석 결과 로그. 동작 변경은 하지 않는다(1단계)."""
+    """시트 분석 결과 로그. 판정 자체는 하지 않는다 — run() 이 이 결과를
+    패널 대체·강도 감쇠에 반영한다(2단계)."""
     try:
         if not info:
             return
@@ -2537,15 +2800,25 @@ def _log_sheet_analysis(info: dict, ref_name: str) -> None:
             if info.get("raw", 0) >= SHEET_MIN_PANELS:
                 _log(f"[GoRi Consistency Keeper] {ref_name} 참조에 콘텐츠 "
                      f"구간 {info['raw']}개가 있으나 정규성 미달 — 시트로 보지 "
-                     f"않습니다 (폭비 {info.get('wreg', 0):.2f} ≤ "
-                     f"{SHEET_MAX_WIDTH_RATIO}, 간격비 {info.get('greg', 0):.2f} "
-                     f"≥ {SHEET_MIN_SPACING_RATIO} 필요)")
+                     f"않습니다 (간격비 {info.get('greg', 0):.4f} ≥ "
+                     f"{SHEET_MIN_SPACING_RATIO:.2f} 필요. 폭비 "
+                     f"{info.get('wreg', 0):.2f} 는 기록용이며 판정에 쓰지 않음)")
             elif info.get("raw", 0) > 0:
-                # 없이(Why) 이 줄이 필요하단가: 패널이 1~2개이면 이전은 아누 말도 없었다. 사용자가 시트를 무에다고 판정 로그가 0개이면
-                # "시트가 아닌 걸 모 아잣체다" 와 "분석이 죽다" 가 구부되지 않는다
-                # (2026-09-30 실체로 정확히 이 혼동이 발일다).
+                # 왜(Why) 이 줄이 필요한가: 패널이 1~2개면
+                # 이전엔 로그가 없었다. 사용자가 시트가 아닌데
+                # 판정 로그가 0개면 "시트가 아닌 것인지"와
+                # "분석이 죽은 것"이 구분되지 않는다
+                # (2026-09-30 실제로 정확히 이 혼동이 일어났다).
                 _log(f"[GoRi Consistency Keeper] {ref_name} 시트 아닌 — "
                      f"패널 {info['raw']}개만 검출 (최소 {SHEET_MIN_PANELS}개 필요)")
+            else:
+                # 왜(Why) 이 줄이 필요한가 (2026-10-05 감사 64차): raw==0
+                # (거의 균일한 이미지, column_profile 기각) 는 위 두 분기를
+                # 모두 통과해 완전 무음이었다. "조용한 무동작 제거" 원칙에 따라
+                # 판정 수치를 남긴다.
+                _log(f"[GoRi Consistency Keeper] {ref_name} 시트 아닌 — "
+                     "콘텐츠 구간 0개 (이미지가 거의 균일하거나 너무 작아 "
+                     "열 프로필을 만들 수 없음)")
             return
         _log(f"[GoRi Consistency Keeper] {ref_name} 참조에서 {info['panels']}개 "
              f"패널 검출 — 캐릭터 시트 형태로 보입니다")
@@ -2560,14 +2833,15 @@ def _log_sheet_analysis(info: dict, ref_name: str) -> None:
             # 통과시킨 척하면 안 된다 — 판정 불가를 "불일치"와 구분해야
             # 원인을 알 수 있다.
             _log(f"[GoRi Consistency Keeper] ⚠ 인물 bbox 미검출 — 프레이밍 "
-                 f"판정 불가 (mediapipe 미설치 또는 검출 실패). 강도 변경 없음")
+                 f"판정 불가 (mediapipe 미설치 또는 검출 실패). 패널을 신원 "
+                 f"소스로 쓰지 않고 게이트 실패로 처리합니다")
         elif info.get("gate"):
             _log(f"[GoRi Consistency Keeper]   프레이밍 유사도 "
                  f"{info['framing']:.2f} — 픽셀이 대응하므로 이 뷰를 "
                  f"신원 소스로 쓸 수 있습니다")
         else:
             _log(f"[GoRi Consistency Keeper] ⚠ 프레이밍 불일치 "
-                 f"({info['framing']:.2f} < {FRAMING_GATE:.2f}) — 이 뷰는 "
+                 f"({info['framing']:.4f} < {FRAMING_GATE:.2f}) — 이 뷰는 "
                  f"결과와 위치가 대응하지 않아 신원 소스로 쓰지 않습니다. "
                  f"시트 각도를 결과 각도에 맞추면 더 정확해집니다")
     except Exception:
@@ -2663,6 +2937,9 @@ class GoRiConsistencyKeeper:
                 # 기본값을 낮추면 업데이트한 사용자 결과가 전부 바뀐다.
                 # 왜(Why) 음수도 허용하나: camera/original 과 같은 규격(-1.0~1.0).
                 # 음수는 보정을 뒤집는다(기준에서 밀어냄). 의도적으로 쓰는 경우만.
+                # 참고 (감사 63차): 기준 강도도 음수(안티-레퍼런스)면 이중 음수로
+                # 기준 쪽으로의 당김이 된다(|s × eff|). 두 음수를 같이 쓰는 것은
+                # 이 조합을 원할 때만.
                 "strength_sampler": ("FLOAT", {"default": 1.0, "min": -1.0,
                                               "max": 1.0, "step": 0.05}),
                 "strength_camera": ("FLOAT", {"default": 0.2, "min": -1.0,
@@ -2713,24 +2990,38 @@ class GoRiConsistencyKeeper:
         # 비교하게 되고 숫자가 무의미하다. 이미지가 오면 그것을 직접 인코딩해
         # 기준을 세운다. 이미지 없으면 기존 경로(빈 latent) 그대로 둔다 —
         # 동작을 바꾸지 않기 위함이지, 그 경로가 옳다는 뜻이 아니다.
+        # 왜(Why) no-op 판정을 인코딩 앞에 두나 (2026-10-04
+        # 감사): 강도 0이면 `original_image` 인코딩은 **버려진다**
+        # — 다중 MP 이미지를 통째로 한 번 인코딩하고(실측 비용)
+        # 결과를 쓰지 않는다. 앞의 두 조건은 참조와 무관하므로
+        # 인코딩보다 먼저 본다. 세 번째 조건(참조 없음)은
+        # 인코딩 결과가 바꾸므로 아래에 둔다.
+        if not s or not (a or b):
+            _release_vram()
+            return _with_samples(sampled_latent, out)
         if original_image is not None:
             _img_ref = _encode_image_ref(vae, original_image)
             if _img_ref is not None:
                 _orig_ref = _img_ref
-                _orig_from_image = True
                 _log("[GoRi Consistency Keeper] 원본 기준을 이미지에서 직접 "
                      "인코딩했습니다 — Qwen Edit 의 latent 출력은 빈 캔버스라 "
                      "그대로 쓰면 비교가 무의미합니다")
             else:
-                _orig_from_image = False
                 _log("[GoRi Consistency Keeper] ⚠ original_image 인코딩 실패 — "
                      "original_latent 경로로 진행합니다 (Qwen Edit 에선 빈 "
                      "캔버스이므로 원본 기준이 사실상 없습니다)")
-        else:
-            _orig_from_image = False
-        if not s or not (a or b) or (_orig_ref is None and _cam_ref is None):
+        if _orig_ref is None and _cam_ref is None:
+            if original_image is None:
+                # 왜(Why) (2026-10-04 감사 52차): 강도가 0 이 아닌데 둘 다
+                # 없으면 이 노드는 조용히 통과한다. 루프의 "기준 없음" 로그는
+                # 이 반환 뒤에 있어 여기서는 발화하지 않는다. 이미지 인코딩
+                # 실패로 여기 오면 위 2956 로그가 이미 사유를 남겼으므로
+                # 다시 찍지 않는다.
+                _log("[GoRi Consistency Keeper] ⚠ 당김 강도가 0 이 아닌데 기준이 "
+                     "없습니다 — original_latent 또는 camera_latent 를 연결하십시오 "
+                     "(둘 다 없으면 이 노드는 입력을 그대로 통과시킵니다)")
             _release_vram()
-            return ({"samples": out},)
+            return _with_samples(sampled_latent, out)
         # 인체 마스크(있으면 인물 영역만). 1회 계산해 양쪽 기준에 공유.
         # 배치>1 은 **전역 당김만** 적용한다(2026-09-28 실측).
         # 왜(Why): _person_mask_for_latent / _part_detail_map 은 요소 0의
@@ -2742,7 +3033,8 @@ class GoRiConsistencyKeeper:
         # 손실은 없다.
         _multi = int(getattr(sampled, "shape", [1])[0] or 1) > 1
         if _multi:
-            _log(f"[GoRi Consistency Keeper] ⚠ 배치 — 전역 당김만 적용합니다 (인체 마스크·부위별 복원은 단일 이미지 전용입니다)")
+            _log(f"[GoRi Consistency Keeper] ⚠ 배치 — 전역 당김만 적용합니다 "
+                 f"(인체 마스크·부위별 복원·캐릭터 시트 분석은 단일 이미지 전용입니다)")
         # 실행당 디코드 캐시: sampled 를 전 해상도로 두 번 디코딩하던 것을
         # 한 번으로 줄인다 (2026-09-28 실측: 128² latent → 1024² 2회).
         _dcache = {}
@@ -2754,8 +3046,10 @@ class GoRiConsistencyKeeper:
         # 연결했는데 마스크가 조용히 None 이었던 상태를 로그 없이 한참 알지
         # 못했다. 한 줄로 충분하다.
         if vae is not None and _mask is None and not _multi:
+            # (2026-10-04 감사 13차) 이 분기는 vae 연결이 보장된 뒤라
+            # "VAE 미연결" 을 원인으로 말할 수 없다.
             _log("[GoRi Consistency Keeper] 인체 마스크 없음 — 전역 당김으로 "
-                 "진행합니다 (포즈 미검출 또는 VAE 미연결)")
+                 "진행합니다 (포즈/사람 미검출 또는 디코드 실패)")
         # 캐릭터 시트 참조 분석 (2단계: 판정을 강도에 반영한다).
         # 왜(Why) 여기가 **부위별 맵보다 먼저**인가: 아래 판정으로 기준 원본이
         # 패널로 바뀔 수 있다. 맵을 먼저 만들면 맵은 시트 전체를 보고 당김만
@@ -2763,12 +3057,25 @@ class GoRiConsistencyKeeper:
         if vae is not None and b and not _multi and _orig_ref is not None:
             _sheet = analyze_reference_sheet(vae, _orig_ref, sampled, cache=_dcache)
             _log_sheet_analysis(_sheet, "original")
-            if _sheet.get("sheet") and _sheet.get("best") is not None:
+            if _sheet.get("sheet"):
                 _pn = _sheet.get("panels_n") or []
-                if _sheet.get("gate") and 0 <= _sheet["best"] < len(_pn):
+                _best = _sheet.get("best")
+                if _best is None:
+                    # 왜(Why) 격하하는가 (2026-10-04 감사 25차): 시트 확정
+                    #(`sheet=True`) 상태에서 best 가 None 이면(패널 시그니처가
+                    # 전부 0.0 — sampled 디코드 실패 등) 어느 분기도 안 타고
+                    # 시트 전체를 풀 강도로 당긴다. R21 의 패널 생산 실패와 같은
+                    # 조용한 무동작이라 (B) 와 같은 안전 방향으로 격하한다.
+                    _old_b = b
+                    b = _safe_strength(b * _SHEET_DAMP, "strength_original")
+                    _log(f"[GoRi Consistency Keeper]   2단계: 시트로 확정됐지만 "
+                         f"결과와 맞는 패널을 고르지 못했습니다. 시트 전체의 "
+                         f"신원 신호가 섞이므로 당김 자동 감쇠 "
+                         f"{_old_b:.2f}->{b:.2f}")
+                elif _sheet.get("gate") and 0 <= _best < len(_pn):
                     # (A) 신원 신호가 섞이지 않게 **그 패널 하나만** 기준으로 쓴다
                     _panel = _panel_reference_latent(
-                        vae, _orig_ref, _pn[_sheet["best"]], cache=_dcache)
+                        vae, _orig_ref, _pn[_best], cache=_dcache)
                     # 왜(Why) dict 로 감싸나: `_get_samples` 은 LATENT dict
                     # 에서만 samples 를 꺼낸다. `vae.encode` 결과는 raw 텐서라
                     # 그대로 넘기면 조용히 None 이 되어 패널 대체가 통하지 않는다.
@@ -2776,8 +3083,21 @@ class GoRiConsistencyKeeper:
                     if _p_ref is not None:
                         _orig_ref = _p_ref
                         _log(f"[GoRi Consistency Keeper]   2단계: "
-                             f"{_sheet['best'] + 1}번 패널을 기준 원본으로 "
+                             f"{_best + 1}번 패널을 기준 원본으로 "
                              f"사용합니다 (시트 전체 대신 단일 뷰)")
+                    else:
+                        # 왜(Why) 조용히 통과시키지 않나 (2026-10-04 감사 21차):
+                        # 패널 latent 생산이 None 이면(디코드 실패·패널 폭 미달)
+                        # 여기서 아무것도 안 하면 **시트 전체를 풀 강도로 당기고
+                        # 로그도 없다** — 2단계 (B) 가 막으려던 신원 평균화가
+                        # 정확히 그 상태다. 대체 실패도 (B) 와 같은 안전 방향으로
+                        # 격하하고 이유를 남긴다.
+                        _old_b = b
+                        b = _safe_strength(b * _SHEET_DAMP, "strength_original")
+                        _log(f"[GoRi Consistency Keeper]   2단계: 패널 latent "
+                             f"생산 실패 — 대체하지 못했습니다. 시트 전체의 "
+                             f"신원 신호가 섞이므로 당김 자동 감쇠 "
+                             f"{_old_b:.2f}->{b:.2f}")
                 else:
                     # (B) 게이트를 못 통과하면 패널 프레이밍이 결과물과 다르다.
                     # 그래도 시트 전체를 강하게 당기면 신원 신호가 평균나므로
@@ -2786,7 +3106,7 @@ class GoRiConsistencyKeeper:
                     b = _safe_strength(b * _SHEET_DAMP, "strength_original")
                     _log(f"[GoRi Consistency Keeper]   2단계: 프레이밍이 안 "
                          f"맞아 패널을 쓰지 않습니다. 시트 전체의 신원 신호가 "
-                         f"섞이므로 강도를 낮춥니다 {_old_b:.2f}->{b:.2f}")
+                         f"섞이므로 당김 자동 감쇠 {_old_b:.2f}->{b:.2f}")
         # 부위별 디테일 손실 감지: 원본 latent는 1회만 디코딩해 재사용한다.
         # 왜(Why): sampled/original을 매번 디코딩하면 VAE 비용이 2배다.
         _pm = None
@@ -2812,7 +3132,17 @@ class GoRiConsistencyKeeper:
                 continue
             matched = _match_spatial(ref, sampled)
             if matched is None:
-                _log(f"[GoRi Consistency Keeper] {name} 배치·채널 불일치 — 건너뜀")
+                # 왜(Why) 두 사유를 구분하나 (2026-10-05 감사 68차): None 은
+                # (1) 배치·채널 불일치(결정적 검사, 예외 없음)와 (2) 보간
+                # 실패·OOM 등 예외 경로 양쪽에서 온다. 전부 "불일치" 로
+                # 인쇄하면 환경 실패가 오진된다 (R28 로그 진실성 계약).
+                if (ref.shape[0] == sampled.shape[0]
+                        and ref.shape[1] == sampled.shape[1]):
+                    _log(f"[GoRi Consistency Keeper] {name} 기준을 결과 "
+                         "크기에 맞추지 못했습니다 — 건너뜀")
+                else:
+                    _log(f"[GoRi Consistency Keeper] {name} 배치·채널 "
+                         "불일치 — 건너뜀")
                 continue
             drift = _drift_mse(sampled, matched)
             # 정규화 값도 함께 재고 **둘 다** 로그한다.
@@ -2830,12 +3160,31 @@ class GoRiConsistencyKeeper:
             # 또 다른 조용한 실패가 된다.
             if drift_n is not None:
                 _dn = strength * _damp_norm(drift_n)
-                if _dn < eff:
+                # 왜(Why) 크기 비교인가 (2026-10-04 감사 14차): 음수 강도
+                # (기준에서 밀어냄)에서 _dn = strength*damp 는 0 쪽으로
+                # **절댓값이 작아진다**. `_dn < eff` 는 음수에서 항상 거짓이라
+                # 감쇠가 영원히 발동하지 않았다 — "틀어지면 손을 놓는다"
+                # 계약이 밀어냄 방향에서만 깨져 있었다(양수 당김은 정상 동작,
+                # 절대 MSE 폴백·조명 감쇠는 무조건 적용이라 셋이 서로 달랐다).
+                # 절댓값 비교는 양수 경로(_dn, eff 전부 양수)와 완전히 동일하다.
+                if abs(_dn) < abs(eff):
                     eff = _dn
-                    _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준과 결과물 "
-                         f"구도가 많이 다름 — 당김 자동 감쇠 {strength:.2f}"
-                         f"→{eff:.2f} (정규화 {drift_n:.4f} > "
-                         f"{_DRIFT_NORM_KNEE:.2f}). 같은 구도 기준 사용 권장")
+                    # 왜(Why) NaN 을 갈라 쓰나 (2026-10-04 감사 28차): 유한한
+                    # drift_n 이 여기 오려면 반드시 무릎(0.50)을 넘어야 하므로
+                    # "x > 무릎" 이 참이다. 그러나 drift_n 이 NaN 이면
+                    # _damp_norm(NaN)=0.0(R71 전파 차단)으로도 이 로그가
+                    # 켜지고, "nan > 0.50" 은 거짓 비교를 인쇄한다. 사실대로
+                    # 두 문구로 갈라 쓴다.
+                    if drift_n != drift_n:
+                        _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준과 결과물 "
+                             f"구도 비교 값이 NaN — 전파 차단으로 당김을 "
+                             f"끕니다 {strength:.2f}→{eff:.2f}. "
+                             f"같은 구도 기준 사용 권장")
+                    else:
+                        _log(f"[GoRi Consistency Keeper] ⚠ {name} 기준과 결과물 "
+                             f"구도가 많이 다름 — 당김 자동 감쇠 {strength:.2f}"
+                             f"→{eff:.2f} (정규화 {drift_n:.4f} > "
+                             f"{_DRIFT_NORM_KNEE:.2f}). 같은 구도 기준 사용 권장")
             elif drift is not None and not (drift <= 0.8):
                 # nan 은 모든 비교가 False 라 `> 0.8` 도 통과해 감쇠를
                 # 건너뛴다 → 이후 0*(matched-sampled) 로 nan 이 전파된다.
@@ -2858,6 +3207,10 @@ class GoRiConsistencyKeeper:
             # 실측(사람 7장, 대응 지점 에지, 원본 대비 평균):
             #   0.00 → -1.2%(기준선)   0.20 → -33.5%   0.40 → -36.1%
             # 조용히 줄이지 않는다 — 잘렸을 때 반드시 말한다.
+            # 왜(Why) 음수는 검사하지 않나 (2026-10-05 감사 63차): 상한의
+            # 실측 근거가 "참조로 당겨서 생기는 디테일 손실" 측정이라
+            # 밀어냄(음수)에는 근거가 없다. -1.0 안티-레퍼런스는 상한 없이
+            # 선언 범위(-1.0~1.0) 그대로 작동한다.
             if eff > _PHYS_CEILING:
                 _old_eff = eff
                 eff = _PHYS_CEILING
@@ -2921,6 +3274,13 @@ class GoRiConsistencyKeeper:
                                 if _hand_verdict == _JUDGE_DAMAGED:
                                     # 손상된 손은 원본에서 당겨오면 오류를 재주입한다.
                                     # 손 부위만 막고 나머지는 포즈 판정을 따른다.
+                                    # 왜(Why) 양손을 함께 막나 (2026-10-05 감사 75차):
+                                    # judge_hands 는 검출된 손 전체의 최악 끝마디
+                                    # 간격 하나로 통합 판정한다(좌/우 개별 판정
+                                    # 아님). 좌/우 handedness 라벨은 미러 이미지에서
+                                    # 뒤집힐 수 있어(_hand_landmarks_from_tasks
+                                    # 주석) 의도적으로 쓰지 않았다 — 양손 차단은
+                                    # 과소 복원 방향이지 잘못된 손의 상향이 아니다.
                                     for _hr in ("hand_left", "hand_right"):
                                         if _hr in _allow:
                                             _allow[_hr] = 0.0
@@ -2929,9 +3289,15 @@ class GoRiConsistencyKeeper:
                         except Exception as _he:
                             # 손 판정 실패는 포즈 판정을 덮지 않는다. 조용히 넘어가되
                             # 사유는 남긴다 (조용한 무력화 방지).
+                            # 왜(Why) _pose_gate_message 를 안 쓰나 (2026-10-04
+                            # 감사 5차): 그 메시지는 "원본 landmark 없음 → 제한 없이
+                            # 진행합니다" 라는데, 여기는 landmark 가 **있는**
+                            # 분기이고 예외 뒤에도 _allow 가 남아 제한이 적용된다.
+                            # 손 게이트 전용 문구로 바로 쓴다.
                             _note_pose_why("hand_gate",
-                                           _pose_gate_message("손 판정 예외 %s: %s" % (
-                                               type(_he).__name__, str(_he)[:50])))
+                                           "[GoRi Consistency Keeper] ⚠ "
+                                           "손 판정 예외 (게이트 유지): %s: %s" % (
+                                               type(_he).__name__, str(_he)[:50]))
                     if _allow is None:
                         # 왜(Why) 판단하지 않고 그대로 말하나 (2026-10-01):
                         # "사람이 없는 이미지" 라고 단정하면 추측이 된다.
@@ -2950,7 +3316,7 @@ class GoRiConsistencyKeeper:
                         _hand_txt = (" 손=%s" % _hand_verdict
                                      if _hand_verdict else "")
                         _log("[GoRi Consistency Keeper] 판정 게이트 "
-                             f"(verdict={_verdict_name}{_hand_txt}) — 미확인 부위 "
+                             f"(verdict={_verdict_name}{_hand_txt}) — 차단 부위 "
                              f"{_blocked if _blocked else '없음'}")
                 _darr, _regions = detail_boost(_pm, _pm, eff, allow=_allow)
                 if _darr is not None:
@@ -2977,8 +3343,14 @@ class GoRiConsistencyKeeper:
         if s != 1.0:
             try:
                 out = sampled + s * (out - sampled)
+                # 왜(Why) 로그를 남기나 (2026-10-05 감사 63차): 위 per-ref
+                # 로그의 "당김 0.20" 은 게인 적용 전 값이다. 특히 s<0 에서는
+                # 당김이 밀어냄으로 뒤집히므로 무음이면 로그가 거짓말이 된다
+                # (R28 의 로그 진실성 계약).
+                _log(f"[GoRi Consistency Keeper] sampler 게인 {s:+.2f} 적용 — "
+                     "위 당김 표기에 이 배율이 곱해진 값이 최종 보정입니다")
             except Exception as _e:
                 _log(f"[GoRi Consistency Keeper] ⚠ sampler 게인 적용 실패 "
                      f"({type(_e).__name__}) — 게인 없이 반환")
         _release_vram()
-        return ({"samples": out},)
+        return _with_samples(sampled_latent, out)

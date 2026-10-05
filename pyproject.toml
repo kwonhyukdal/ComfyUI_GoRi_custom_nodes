@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-gori-custom-nodes"
 description = "GoRi ComfyUI custom nodes — Camera Director (camera-aware prompts and conditioning for Qwen-Image 2.1) and Consistency Keeper (latent-space identity/geometry restoration pass)."
-version = "1.9.12"
+version = "1.9.13"
 license = {text = "MIT"}
 dependencies = []
 # 인체 마스크·포즈는 선택 의존성이라 기본 설치에 넣지 않는다. 없으면 그 기능들만
