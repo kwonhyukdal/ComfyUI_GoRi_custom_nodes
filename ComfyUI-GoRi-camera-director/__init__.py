@@ -9,7 +9,8 @@ from .camera_director import CameraDirectorEncode
 from .camera_director import __version__
 
 # 로드 시 버전을 남긴다. 여러 노드가 섞여 있을 때 어느 버전이 떴는지
-# 로그로 알 수 있다. print 가 아니라 ComfyUI 로거가 있으면 그것을 쓴다.
+# 로그로 알 수 있다. 로드 시점에는 로거가 아직 준비되지 않을 수 있어
+# print 로 쓰고, 콘솔 인코딩 문제로 실패해도 노드 등록은 막지 않는다.
 try:
     print("[GoRi] Camera Director v%s loaded" % (__version__,), flush=True)
 except Exception:

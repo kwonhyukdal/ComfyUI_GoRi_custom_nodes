@@ -29,6 +29,7 @@ empty canvas, so this is the accurate source there (takes priority).
 | `strength_camera` | 0.2 | Direction pull (camera reference, -1.0–1.0) |
 | `strength_original` | 0.2 | Original identity pull (-1.0–1.0) |
 | `trust_gate` | False | Judgment gate. On: per-part detail restoration (the region boost) is applied only to body parts judged trustworthy in the original (pose + hand check) — damaged parts are blocked from the boost, impossible judgment keeps existing behaviour with a reason log. The base pull strength itself is unaffected by the gate. Off: existing behaviour |
+| `repair_enable` | False | Verdict-driven repair pull (opt-in). On: body parts the physics judgment flags as damaged are pulled back through skeleton correction (Off: existing behaviour) |
 
 Negatives are **anti-reference** (push resemblance away). Large drift
 auto-damps the pull ("fuse without deforming" — console notice).
@@ -138,10 +139,11 @@ affect it.
 
 ## Pose/hand detection models (mediapipe)
 
-`mediapipe` is an optional dependency. The node uses the two `.task` model
-files bundled in the node folder (`pose_landmarker_lite.task`,
-`hand_landmarker.task`) by default; you can point to other model files with
-the `GORI_POSE_MODEL` and `GORI_HAND_MODEL` environment variables.
+`mediapipe` is an optional dependency. The node uses the three `.task`
+model files bundled in the node folder (`pose_landmarker_lite.task`,
+`hand_landmarker.task`, `face_landmarker.task`) by default; you can
+point to other model files with the `GORI_POSE_MODEL`,
+`GORI_HAND_MODEL` and `GORI_FACE_MODEL` environment variables.
 
 One development-only diagnostic exists: setting `GORI_PROBE_PHYSICS=1`
 enables extra logs that measure the physical direction of the pull — it

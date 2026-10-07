@@ -29,6 +29,7 @@ KSampler ── LATENT ── sampled_latent ──→ ┘
 | `strength_camera` | 0.2 | 연출 방향 당김 (카메라 기준, -1.0~1.0) |
 | `strength_original` | 0.2 | 원본 신원 당김 (-1.0~1.0) |
 | `trust_gate` | False | 판정 게이트. 켜면 원본의 포즈·손 판정으로 **부위별 복원(디테일 상향)**을 원본에서 당겨와도 되는 부위만 적용한다(손상된 부위는 상향 차단, 판정 불가 시 기존 동작+사유 로그). 기본 당김 강도 자체는 게이트와 무관하게 그대로 적용된다. 꺼면 기존 동작 |
+| `repair_enable` | False | 판정 주도 교정 당김(opt-in). 켜면 물리 판정이 파손으로 본 부위를 골격 교정으로 당겨온다(기본 경로는 이 블록이 없는 것과 같다) |
 
 음수는 **안티-레퍼런스** (닮음 밀어내기). 틀어짐이 크면 노드가 스스로
 당김을 감쇠시킨다 ("융합하되 변형 없이" — 콘솔에 감쇠 알림).
@@ -130,8 +131,9 @@ Camera Director가 프롬프트에 넣는 "손가락 5개" 같은 개수 지시�
 ## 포즈·손 검지 모델 (mediapipe)
 
 `mediapipe`는 선택 의존으로, 노드 폴더에 함께 배포되는 `.task` 모델 파일
-두 개(`pose_landmarker_lite.task`, `hand_landmarker.task`)를 사용합니다.
-기본값으로 그 파일들을 쓰며, `GORI_POSE_MODEL` · `GORI_HAND_MODEL`
+세 개(`pose_landmarker_lite.task`, `hand_landmarker.task`,
+`face_landmarker.task`)를 사용합니다. 기본값으로 그 파일들을 쓰며,
+`GORI_POSE_MODEL` · `GORI_HAND_MODEL` · `GORI_FACE_MODEL`
 환경변수로 다른 모델 파일 경로를 지정할 수 있습니다.
 
 개발용 진단 옵션 하나가 더 있습니다. `GORI_PROBE_PHYSICS=1` 환경변수를

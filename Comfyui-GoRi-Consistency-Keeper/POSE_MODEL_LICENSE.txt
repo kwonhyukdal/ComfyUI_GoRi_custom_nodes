@@ -70,3 +70,33 @@ Consistency Keeper 가 결과 이미지에서 **손 21점 × N개** 좌표를 �
     setx GORI_HAND_MODEL "C:\어딘가\hand_landmarker.task"
 
 환경변수가 동봉본보다 우선한다.
+
+face_landmarker.task
+====================
+
+MediaPipe Face Landmarker 모델 파일.
+
+    출처   https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+    크기   3,758,596 bytes (3.58 MB)
+    sha256 64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff
+    라이선스 Apache License 2.0 (google-ai-edge/mediapipe)
+    형식   .task = ZIP 컨테이너 (TFLite + 메타데이터)
+
+사용 목적
+--------
+
+Consistency Keeper 가 결과 이미지에서 **얼굴 478점** 좌표를 뽑는 데 쓴다.
+얼굴·눈·코·입·귀 부위 판독과 콧구멍 좌우 기하 판독에 쓴다. 콧구멍은 고정
+인덱스가 얼굴마다 흔들려(실측: 125/354 vs 97/94 vs 19/20) 비강 기지 밴드에서
+매 실행 기하로 찾는다.
+
+이 파일이 없으면 얼굴 부위 판독만 조용히 꺼지고(face_count=None, 얼굴·
+콧구멍 부위 absent) 나머지는 그대로 돈다. 환경변수로 경로를 지정할 수 있다:
+
+    setx GORI_FACE_MODEL "C:\어딘가\face_landmarker.task"
+
+환경변수가 동봉본보다 우선한다.
+
+라이선스는 위 pose/hand 와 같은 Apache License 2.0 이며 고지는 Section 4
+요구사항을 그대로 따른다 (미수정 원본이므로 (b)는 해당 없음, 출처·라이선스
+고지를 여기에 보존).

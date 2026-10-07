@@ -124,10 +124,10 @@ def _warn_env_root_once(root):
            f"저장할 수 없습니다 (확인한 경로: {root}). 키는 노드 칸에 직접 "
            f"입력하거나 환경변수로 지정하세요. 원인이면 ComfyUI 루트에 main.py가 "
            f"있는지 확인하세요.")
-    try:
-        print(msg, flush=True)
-    except Exception:
-        pass
+    # 왜(Why) print 가 아니라 _log 인가 (2026-10-07 라운드 2): 이 파일 자체의
+    # 인코딩 가드를 쓰지 않으면 Windows 콘솔(cp949/cp1252)에서 이 경고 한 줄이
+    # UnicodeEncodeError 로 프로세스를 죄다.
+    _log(msg)
 
 
 def _read_env_file_key(env_name: str) -> str:
@@ -166,7 +166,7 @@ class LLMError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def extract_json(text: str) -> dict:
-    """응답 문자열에서 JSON 객첼만 골라 dict로 반환한다."""
+    """응답 문자열에서 JSON 객체만 골라 dict로 반환한다."""
     if not text:
         raise LLMError("빈 응답")
     t = text.strip()
@@ -193,10 +193,18 @@ def extract_json(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Content-Type": "application/json", **headers})
+    try:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/json", **headers})
+    except (ValueError, TypeError) as e:
+        # 왜(Why) 메시지를 원문으로 안 쓰나 (2026-10-07 라운드 2): ValueError
+        # 메시지에는 요청 URL 전체가 들어간다 — Gemini 는 키를 URL 에 담는다.
+        # 원문을 흘리면 API 키가 콘솔 트레이스백에 남는다. 형식 안내만 남긴다.
+        raise LLMError(
+            f"요청 주소 형식 오류 ({type(e).__name__}) — custom_base_url 이나 "
+            "모델 URL 형식을 확인하세요 (규칙으로 폰백)") from e
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw_text = resp.read().decode("utf-8")
@@ -209,6 +217,12 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
         raise LLMError(f"HTTP {e.code}: {body}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise LLMError(f"네트워크 오류: {e}") from e
+    except ValueError as e:
+        # 제어문자(줄바꿈 등)가 남은 URL 은 urlopen 안쪽에서 ValueError 로
+        # 튄다 — 그 메시지에도 URL(키 포함)이 붙어 나오므로 원문을 금지한다.
+        raise LLMError(
+            f"요청 주소 형식 오류 ({type(e).__name__}) — URL 에 제어문자"
+            "(줄바꿈 등)이 없는지 확인하세요 (규칙으로 폰백)") from e
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError as e:
@@ -380,8 +394,16 @@ def is_local_provider(provider: str, base_url: str = "") -> bool:
     """로컬(같은 머신) LLM인지. GPU 경합 판정·타임아웃 판정에 쓴다."""
     if (provider or "") in _LOCAL_PROVIDERS:
         return True
-    return bool((provider or "").startswith("Custom")
-                and not _is_remote_endpoint(base_url))
+    if not (provider or "").startswith("Custom"):
+        return False
+    # 왜(Why) 빈 주소는 로컬이 아닌가 (2026-10-07 라운드 2): 주소가 비면
+    # 같은 머신인지도 판정할 수 없다. 그런데 `not _is_remote_endpoint("")`
+    # 는 True 가 돼 "로컬" 로 오판했다 — 카메라는 그 결과 ComfyUI 모델을
+    # GPU 에서 내린 뒤, chat() 이 빈 주소로 바로 실패해 무의미한 재로드만
+    # 남았다. 주소 없는 Custom 은 판정 불가이며 로컬로 세지 않는다.
+    if not (base_url or "").strip():
+        return False
+    return not _is_remote_endpoint(base_url)
 
 
 def _is_remote_endpoint(url: str) -> bool:
@@ -492,6 +514,11 @@ def chat(provider: str, model: str, api_key: str,
         return _hit_obj
 
     api_key = (api_key or "").strip()
+    # 왜(Why) 제어문자를 먼저 없애나 (2026-10-07 라운드 2): 붙여넣기 중
+    # 끼어든 줄바꿈·탭은 urllib Request 를 깨뜨려 ValueError 를 낳는다.
+    # Gemini 는 키를 URL 에 담으므로 그 메시지가 키 전체를 콘솔로 흘릴 수
+    # 있다 — 요청을 만들기 전에 키에서 제어문자를 제거한다.
+    api_key = re.sub(r"[\x00-\x1f\x7f]", "", api_key)
     if not api_key and provider not in ("Ollama", "LM Studio") and not is_custom:
         env = _API_KEY_ENV.get(provider)
         # 우선순위: 위젯 입력 > 루트 .env 파일 > OS 환경변수
