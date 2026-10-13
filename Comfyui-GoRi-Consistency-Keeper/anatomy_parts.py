@@ -316,6 +316,8 @@ def toe_blobs(u8, ankle, heel, toe_tip):
     except Exception:
         return None
     try:
+        # ankle 은 **검증만** 한다 — ROI 는 뒤꿈치↔발끝 축으로 만든다(아래).
+        # 잘못된 landmark 는 여기서 예외로 걸러 None 으로 떨어진다.
         ax, ay = float(ankle[0]), float(ankle[1])
         hx, hy = float(heel[0]), float(heel[1])
         tx, ty = float(toe_tip[0]), float(toe_tip[1])
@@ -383,10 +385,23 @@ FOOT_GAP_MIN = 0.06
 # 주인 없는 덩어리도 가장 큰 덩어리의 20% 미만이면 같은 발이 그림자·잡음으로
 # 갈라진 것으로 보고 제외한다 — 진짜 여분 발은 발 크기를 가진다.
 FOOT_MIN_RATIO = 0.20
+# 왜(Why) 복도 여유를 w//12 → w//8 로 넓혔나 (2026-10-11): 구 여유(8.3%)는
+# 여분 다리가 정상 두 다리의 x 극단에서 그보다 멀리 있으면 ROI 슬라이스
+# 자체에 안 들어가 검출 후보가 되지 못했다. 참조 자세에서 다리를 벌린
+# 구도나 측면 여분 다리를 놓치는 구조적 사각이었다. HSV 피부 마스크라
+# 배경을 넓게 끌어들일 위험은 낮다 (배경은 피부색이 아니다). 임계는 여전히
+# PROVISIONAL — learn_log 분포가 쌓이면 확정한다.
+FOOT_CORRIDOR_MARGIN_DIV = 8
+# 발끝 y 대의 세로 허용 폭 (정규화). 덩어리가 발끝과 x 로 겹치더라도 이보다
+# 더 세로로 떨어져 있으면 여분 발로 본다. PROVISIONAL — 실측 분포 후 확정.
+FOOT_TIP_Y_BAND = 0.18
 
 
 def foot_comps(u8, pose_pts, skin):
-    """발 영역 피부 덩어리 목록. 반환: [[면적, x0, x1], ...] 또는 None.
+    """발 영역 피부 덩어리 목록. 반환: [[면적, x0, x1, y0, y1], ...] 또는 None.
+
+    (2026-10-11: 구 반환은 [면적, x0, x1] 3개였다. 주인 판정이 x 만 보던 것을
+     y 까지 보도록 넓히며 y0·y1 을 더했다 — 앞 3개만 읽는 소비자는 그대로 동작.)
 
     영역 = 발목 y~발끝 y 중간부터 바닥까지 × 다리 복도(엉덩이·무릎·발목·
     발끝 x 범위 + 여유). 발목이 화면 끝에 닿으면(크롭) 영역이 없어 None —
@@ -399,9 +414,10 @@ def foot_comps(u8, pose_pts, skin):
         return None
     try:
         h, w = u8.shape[:2]
+        _mg = max(1, w // FOOT_CORRIDOR_MARGIN_DIV)
         xs = [float(pose_pts[i][0]) for i in (23, 24, 25, 26, 27, 28, 31, 32)]
-        x0 = max(0, int(min(xs) * w) - w // 12)
-        x1 = min(w, int(max(xs) * w) + w // 12)
+        x0 = max(0, int(min(xs) * w) - _mg)
+        x1 = min(w, int(max(xs) * w) + _mg)
         if x1 <= x0:
             return None
         ay = max(float(pose_pts[27][1]), float(pose_pts[28][1]))
@@ -427,18 +443,27 @@ def foot_comps(u8, pose_pts, skin):
             if area < FOOT_MIN_AREA_FRAC * h * w:
                 continue
             ys, xs2 = np.where(lab == i)
+            # y 범위도 담는다 (2026-10-11): 구 반환은 [면적, x0, x1] 뿐이라
+            # 주인 판정이 x 만 봤다. 발끝과 x 가 세로로 정렬된 여분 발은
+            # y 가 아무리 멀어도 "주인 있음" 이 됐다. y0,y1 을 더해 세로
+            # 정렬까지 구분한다 (기존 소비자는 앞 3개만 읽어도 동작).
             out.append([area, round((xs2.min() + x0) / w, 4),
-                        round((xs2.max() + x0) / w, 4)])
+                        round((xs2.max() + x0) / w, 4),
+                        round((ys.min() + y0) / h, 4),
+                        round((ys.max() + y0) / h, 4)])
         out.sort(key=lambda c: c[0], reverse=True)
         return out
     except (TypeError, ValueError, IndexError):
         return None
 
 
-def unclaimed_feet(comps, tip_x0, tip_x1):
+def unclaimed_feet(comps, tip_x0, tip_x1, tip_y0=None, tip_y1=None):
     """주인 없는 발 덩어리 인덱스 목록 (순수 함수).
 
     덩어리가 두 발끝 x 중 하나라도 품으면(±FOOT_TIP_EXPAND) 주인 있음.
+    tip_y0·tip_y1 을 주면 **y 도 함께** 본다 — 발끝과 x 가 정렬됐어도
+    덩어리가 발끝 y 에서 FOOT_TIP_Y_BAND 보다 멀면 주인 없음으로 본다
+    (세로로 떨어진 여분 발). y 를 안 주면 구 동작(x 만)을 유지한다.
     주인 없는 덩어리도 (a) 가장 큰 덩어리의 20% 미만이면 잡음 갈라짐,
     (b) 양쪽 발끝에서 FOOT_GAP_MIN 이내면 같은 발의 그림자로 보고
     제외한다 — 멀리 떨어진 발 크기 덩어리만 여분 다리 증거다.
@@ -447,18 +472,42 @@ def unclaimed_feet(comps, tip_x0, tip_x1):
         if not comps:
             return []
         maxa = max(c[0] for c in comps) or 1
+        _yband = FOOT_TIP_Y_BAND if (tip_y0 is not None
+                                     and tip_y1 is not None) else None
         unc = []
-        for idx, (_area, x0, x1) in enumerate(comps):
-            claimed = ((x0 - FOOT_TIP_EXPAND) <= tip_x0 <= (x1 + FOOT_TIP_EXPAND)
-                       or (x0 - FOOT_TIP_EXPAND) <= tip_x1 <= (x1 + FOOT_TIP_EXPAND))
+        for idx, comp in enumerate(comps):
+            _area, x0, x1 = comp[0], comp[1], comp[2]
+            y0 = comp[3] if len(comp) > 3 else None
+            y1 = comp[4] if len(comp) > 4 else None
+            x_claimed = ((x0 - FOOT_TIP_EXPAND) <= tip_x0
+                         <= (x1 + FOOT_TIP_EXPAND)
+                         or (x0 - FOOT_TIP_EXPAND) <= tip_x1
+                         <= (x1 + FOOT_TIP_EXPAND))
+            claimed = x_claimed
+            _y_rejected = False
+            if claimed and _yband is not None and y0 is not None:
+                # x 로만 겹치는 후보: y 도 발끝 대에 있어야 주인 있음.
+                # 세로로 멀리 떨어진 덩어리는 여분 발 후보다.
+                _ty = min(tip_y0, tip_y1)
+                _vdist = min(abs(y0 - _ty), abs(y1 - _ty),
+                             abs(y0 - tip_y0), abs(y1 - tip_y1))
+                if _vdist > _yband:
+                    claimed = False
+                    # y 로 여분이라 판정됐으면 아래 x-gap 필터(같은 발의
+                    # x 갈라짐 제거용)를 적용하지 않는다 — 그 필터는 x 로
+                    # 가까운 것을 "같은 발"로 보는데, 여기선 x 가 가까운
+                    # 것이 바로 문제다 (2026-10-11).
+                    _y_rejected = True
             if claimed:
                 continue
             if _area < FOOT_MIN_RATIO * maxa:
                 continue
-            gap = min(abs(x0 - tip_x0), abs(x0 - tip_x1),
-                      abs(x1 - tip_x0), abs(x1 - tip_x1))
-            if gap > FOOT_GAP_MIN:
-                unc.append(idx)
+            if not _y_rejected:
+                gap = min(abs(x0 - tip_x0), abs(x0 - tip_x1),
+                          abs(x1 - tip_x0), abs(x1 - tip_x1))
+                if gap <= FOOT_GAP_MIN:
+                    continue
+            unc.append(idx)
         return unc
     except (TypeError, ValueError, IndexError):
         return []

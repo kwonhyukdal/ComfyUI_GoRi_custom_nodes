@@ -26,7 +26,10 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"QUALITY_GUARD", "QUALITY_GUARD_ANIMAL", "FACE_IDENTITY_GUARD", "SKIN_COLOR_GUARD", "NEGATIVE_ANATOMY_GUARD", "NEGATIVE_COLOR_CONTAMINATION_GUARD", "_NEGATIVE_BASE_COMMON", "OUTFIT_GUARD", "NUDITY_KEYWORDS", "_is_nudity_request", "nudity_anatomy_guard", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard"
+"QUALITY_GUARD", "QUALITY_GUARD_ANIMAL", "FACE_IDENTITY_GUARD", "SKIN_COLOR_GUARD", "NEGATIVE_ANATOMY_GUARD", "NEGATIVE_COLOR_CONTAMINATION_GUARD", "_NEGATIVE_BASE_COMMON", "OUTFIT_GUARD", "NUDITY_KEYWORDS", "NUDITY_PARTIAL_KEYWORDS", "_is_partial_exposure",
+    "_is_nudity_request", "nudity_anatomy_guard", "coverage_guard",
+    "EXPLICIT_COVER_KEYWORDS", "EXPLICIT_REVEAL_KEYWORDS",
+    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "_footwear_guard", "_body_object_boundary_guard"
 ]
 
 
@@ -318,6 +321,11 @@ def assemble(scene: str, cam: dict, image_count: int = 0, topic: str = "", image
     nudity = nudity_anatomy_guard(topic or scene)
     if nudity:
         prompt = prompt.rstrip(". ") + ". " + nudity + "."
+    # 사용자가 직접 지시한 가림. 위험 조합으로 자동 개입하지 않는다
+    # (coverage_guard docstring 참고 — 자동 개입이 자세 왜곡을 만든다).
+    cover = coverage_guard(topic or scene)
+    if cover:
+        prompt = prompt.rstrip(". ") + ". " + cover + "."
     if _needs_scale_guard(topic or scene, cam):
         prompt = prompt.rstrip(". ") + ". " + SCALE_COHERENCE_POSITIVE + "."
     _eth_pos, _ = _ethnicity_guard(topic or scene, image_count, image_labels)
@@ -333,6 +341,82 @@ NUDITY_KEYWORDS = (
     "nude", "naked", "undressed", "bare body",
     "누드", "나체", "알몸", "전라", "옷을 벗",
 )
+
+# 한정된 노출 표현 — "이런 모양" 의 요구다. 왜(Why) 별도인가 (2026-10-11):
+# "누드/전라" 는 의도 자체를 적는 말이라 노출로 볼 만하다. 하지만 팔을 벌린
+# 한 장면이나 다리를 벌린 포즈는 흔한 에디토리얼 구도인데, 그 단어 하나에
+# 노출 가드가 붙으면 **가림 자세와 몸 왜곡**이 생긴다(실측). 그래서
+# "몸 전체가 드러남" 과 "일부만 드러남" 을 나눠 판정한다.
+NUDITY_PARTIAL_KEYWORDS = (
+    "bare chest", "bare breasts", "bare back", "bare shoulder", "bare shoulders",
+    "open shirt", "unbuttoned", "topless", "bottomless", "leg spread", "legs spread",
+    "가슴을 드러", "상체를 드러", "덮이 없", "벗은", "벌린", "벌어선",
+)
+
+
+def _is_partial_exposure(text: str) -> bool:
+    """일부만 드러난 구도인가 (팔 전체 노출과는 구분)."""
+    t = (text or "").lower()
+    return any(keyword in t for keyword in NUDITY_PARTIAL_KEYWORDS)
+
+
+# 사용자가 "가려줘" 를 직접 지시한 경우 — 판정을 지배한다.
+EXPLICIT_COVER_KEYWORDS = (
+    "cover", "covering", "hide", "conceal", "shield", "censor", "keep covered",
+    "hand over", "hands over", "modest", "keep it covered", "not visible",
+    "가려", "가리고", "감춰", "덮어", "보이지 않게", "드러나지",
+)
+
+# 사용자가 "드러내줘" 를 직접 지시한 경우 — 가림 가드를 끈다.
+EXPLICIT_REVEAL_KEYWORDS = (
+    "fully visible", "completely visible", "clearly visible", "fully exposed",
+    "uncovered", "exposed",
+    "전부 보이", "완전히 보이", "선명하게 보이", "드러나",
+)
+
+
+def _has_any(text: str, keywords) -> bool:
+    """키워드 중 하나라도 들어 있으면 True (한글 포함 부분 일치)."""
+    t = (text or "").lower()
+    return any(keyword in t for keyword in keywords)
+
+
+def _wants_explicit_cover(text: str) -> bool:
+    return _has_any(text, EXPLICIT_COVER_KEYWORDS)
+
+
+def _wants_explicit_reveal(text: str) -> bool:
+    # 왜(Why) "드러나지" 를 먼저 지우나 (2026-10-11 실측): "드러나지 않게
+    # 가려줘" 는 **가림** 요청인데, reveal 키워드 "드러나" 가 그 안에 부분
+    # 일치해 노출로 오판됐다 → coverage_guard 가 "" 를 돌려줘 가림 문구가
+    # 통째로 사라졌다(실측: "드러나지 않게 가려줘" → ""). 부정형 "드러나지"
+    # 를 먼저 제거하면 "드러나게/드러난" 같은 진짜 노출 요청은 그대로 남는다.
+    return _has_any((text or "").replace("드러나지", ""),
+                    EXPLICIT_REVEAL_KEYWORDS)
+
+
+def coverage_guard(topic: str) -> str:
+    """사용자가 **직접** 가림을 지시했을 때만 가림 문구를 반환한다. 아니면 "".
+
+    왜(Why) 이게 맞는 방향인가 (2026-10-11 실측): 위험 조합(치마 + 다리 벌림)
+    에서 가림을 자동으로 넣으면 아까 본 것처럼 **손이 등 뒤로 돌아가는
+    부자연스러운 자세**와 몸 왜곡이 생긴다. 모델은 그 자리를 대충 메우려다
+    해부물이 망가진다. 그래서 판정 방향을 뒤집었다 — 위험 조합이라도
+    **사용자가 지시하지 않으면 아무것도 하지 않는다**(모델이 알아서 결정).
+    사용자가 "가려줘" 라고 직접 쓴 경우에만 가림 문구를 붙인다.
+
+    판정: 가림 의도 키워드가 있고, "드러내줘" 지시로 상쇄되지 않았을 때만.
+    벌리는 자세나 옷 여부는 판정에 쓰지 않는다 — 지시자의 의도가 우선이다.
+    """
+    if not _wants_explicit_cover(topic or ""):
+        return ""
+    if _wants_explicit_reveal(topic or ""):
+        return ""
+    return ("modest coverage: the clothing drapes and falls closed over the "
+            "hips and thighs, the skirt or garment remains in place and fully "
+            "covers, the hands rest naturally on the thighs or at the sides, "
+            "no gap opens at the hem, no wardrobe malformation, "
+            "the pose stays natural and relaxed")
 
 
 def _is_nudity_request(text: str) -> bool:
@@ -351,21 +435,38 @@ def _is_nudity_request(text: str) -> bool:
 
 
 def nudity_anatomy_guard(topic: str) -> str:
-    """노출 의도 시 임상적 해부학 완성 문구를 반환한다.
+    """노출 의도 시 임상적 완성 문구 + 자연스러운 자세 지시를 반환한다.
 
     왜(Why): 노골적 성적 묘사 요구는 모델의 안전 튜닝에 막혀 프롬프트로
-    완전히 극복할 수 없으므로, 노골 표현 대신 임상적 완성도 언어로
-    뭉개짐·변형을 줄이는 데 그친다. 노출 의도가 없으면 붙지 않는다.
+    완전히 극복할 수 없으므로, 노골 표현 대신 완성도 언어로 뭉개짐·변형을
+    줄이는 데 그친다. 노출 의도가 없으면 붙지 않는다.
 
-    주의: "anatomical/anatomically" 어휘는 학습 데이터 편향상 의학 도판·
-    해부도 풍으로 그려지는 실측 사례가 있어 positive 가드에는 쓰지 않는다
-    (사용자 실측 — "성기가 진짜 해부된다"). negative의 "deformed anatomy"
-    는 변형을 막는 방향이라 유지한다.
+    자세 지시(2026-10-11 실측 추가): 노출 장면에서 모델이 **가리려고 하는
+    자세**를 스스로 택하는 오동작이 실제로 반복됐다. 실측 생성물에서 양손이
+    등 뒤로 돌아 무릎을 덮고, 다리가 앉은 자세에서 나올 수 없는 각도로
+    벌어졌다. 원인은 positive/negative 가 같은 부위를 서로 반대 방향으로
+    당긴 것이라 그 압력을 자세로 해소한 결과다. 손·팔·다리가 자연스럽게
+    놓이는 자리를 지정해 그 해소 경로를 막는다.
+
+    부분 노출 완화(2026-10-11): 에디토리얼 구도(가슴 상의만 드러남, 다리만
+    벌림)도 위 가드가 붙었는데, 이 경우엔 **가림 의도가 아니라 구도 요구**다.
+    자세 문구까지 붙으면 오히려 부자연스러운 자세가 유도된다. 그래서 부분
+    노출일 때는 자세 지시를 빼고 완성 문구만 남긴다.
+
+    주의: "anatomical/anatomically" 어휘는 학습 데이터 편향상 의학 도판
+    풍으로 그려지는 실측 사례가 있어 positive 가드에는 쓰지 않는다.
+    negative의 변형 방어는 방향이 반대라 유지한다.
     """
     if not _is_nudity_request(topic or ""):
         return ""
+    if _is_partial_exposure(topic or ""):
+        return ("natural realistic human body with correct proportions, "
+                "soft realistic skin")
     return ("natural realistic human body with correct proportions, "
-            "soft realistic skin and clearly defined natural intimate detail")
+            "soft realistic skin and clearly defined natural intimate detail, "
+            "hands and arms resting naturally on the seat or at the sides, "
+            "arms not placed across the body, "
+            "legs in a natural relaxed position, natural hip and knee angle")
 
 
 def macro_detail_guard(topic: str, cam: dict) -> str:
@@ -398,7 +499,12 @@ def _camera_failure_modes(cam: dict, topic: str = "") -> list:
             or _m2 not in ("없음 (none)", "", None)):
         out.append("shaky jitter, motion smear, frame warping")
     if _is_nudity_request(topic or ""):
-        out.append("deformed intimate anatomy, blurred anatomy, featureless crotch area")
+        # 왜(Why) "featureless crotch area" 를 뺐나 (2026-10-11 실측):
+        # 그 문구는 모델에게 **"그 부위를 뭉개라"** 를 직접 지시한다.
+        # 실제 생성물에서 광배근이 비정상적으로 벌어지고 양손이 등 뒤로
+        # 돌아 무릎을 덮는 자세가 나왔다 — 모델이 negative 를 문자 그대로
+        # 따라간 결과다. 흐림 지시는 제거하고 변형만 막는다.
+        out.append("deformed intimate anatomy, distorted body proportions")
     return out
 
 
@@ -424,8 +530,8 @@ ANATOMY_COUNT_POSITIVE = (
     "correct limb and digit count, clearly readable anatomy: exactly five "
     "fingers on each hand (one thumb plus four fingers), five toes on each "
     "foot, two arms ending in two hands, two legs ending in two feet, "
-    "both sides of the body symmetrical, every limb fully formed and "
-    "separated from its neighbour, hands and feet drawn as complete "
+    "both sides of the body symmetrical, every limb fully formed and whole, "
+    "hands and feet drawn as complete "
     "unambiguous shapes"
 )
 
@@ -439,7 +545,29 @@ ANATOMY_COUNT_NEGATIVE = (
     "into the palm, fused toes, split toes, extra toes, missing toes, "
     "feet merged into a single blob, arms fused to the torso, legs fused "
     "together, three arms, three legs, three feet, extra feet, "
+    "extra leg, extra legs, fourth leg, additional leg, duplicate leg, "
+    "third leg silhouette, extra limb silhouette, "
     "asymmetric limbs, one arm, one leg"
+)
+
+
+# 얼굴·상반신 샷(극접 ECU / 근접 CU)용 개수 가드. 왜(Why) 다리를 빼나
+# (2026-10-11 실측): CU/ECU 는 다리·발이 화면에 없다. 그런데 전신 가드를
+# 그대로 넣으면 "두 다리·발가락 5개·다리 균형"을 요구해 모델이 **화면에
+# 없는 사지를 만들어 넣는다** — 사용자가 본 "발이 하나 더 생긴다"의 직접
+# 경로다. 손·손가락·팔은 CU 에서도 보이므로 남기고, 다리·발 문구만 뺀다.
+ANATOMY_COUNT_POSITIVE_UPPER = (
+    "correct digit count, clearly readable hands: exactly five fingers on "
+    "each hand (one thumb plus four fingers), two arms ending in two hands, "
+    "every arm fully formed and whole, hands drawn as complete "
+    "unambiguous shapes"
+)
+
+ANATOMY_COUNT_NEGATIVE_UPPER = (
+    "fused fingers, webbed fingers, mitten hands, fingers split down the "
+    "middle, double thumbs, extra fingers, missing fingers, fingers merging "
+    "into the palm, arms fused to the torso, three arms, extra arms, "
+    "duplicate arms, asymmetric arms, one arm"
 )
 
 
@@ -617,7 +745,13 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
     # positive(ANATOMY_COUNT_POSITIVE) 는 붙는데 negative 짝이 없으면
     # "5개여야 한다" 는 지시가 방향 없는 한쪽_only 가 된다(2026-09-28 발견).
     if flags.get("anatomy_count"):
-        neg.append(ANATOMY_COUNT_NEGATIVE)
+        # 얼굴·상반신 샷(anatomy_count_upper)이면 다리·발 문구를 뺀 짝을 쓴다.
+        # positive 가 upper 변형이면 negative 도 upper 여야 짝이 맞는다
+        # (2026-10-11).
+        if flags.get("anatomy_count_upper"):
+            neg.append(ANATOMY_COUNT_NEGATIVE_UPPER)
+        else:
+            neg.append(ANATOMY_COUNT_NEGATIVE)
     if flags.get("character_sheet"):
         neg.append(CHARACTER_SHEET_NEGATIVE)
         # 시트 뷰가 별개 인물로 세어지는 것까지 막는다 (신원 일관성이 목적이므로).
@@ -636,7 +770,11 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
     if physics_neg:
         neg.append(physics_neg)
     if flags.get("detail_def"):
-        neg.append(DETAIL_DEFINITION_NEGATIVE)
+        # CU/ECU 면 다리·발 문구를 뺀 짝을 쓴다 (anatomy_count_upper 와 동일).
+        if flags.get("detail_def_upper"):
+            neg.append(DETAIL_DEFINITION_NEGATIVE_UPPER)
+        else:
+            neg.append(DETAIL_DEFINITION_NEGATIVE)
     if flags.get("furniture"):
         neg.append(FURNITURE_DNA_NEGATIVE)
         neg.append(OBJECT_DRIFT_NEGATIVE)
@@ -647,6 +785,10 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
         _rm = _remove_item_guard(topic)
         if _rm:
             neg.append(_rm)
+    if flags.get("footwear"):
+        neg.append(FOOTWEAR_NEGATIVE_UPPER if flags.get("footwear_upper") else FOOTWEAR_NEGATIVE)
+    if flags.get("body_object_boundary"):
+        neg.append(BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER if flags.get("body_object_boundary_upper") else BODY_OBJECT_BOUNDARY_NEGATIVE)
     if _needs_scale_guard(topic or "", cam):
         neg.append(SCALE_COHERENCE_NEGATIVE)
     if prevent_duplicates:
@@ -665,13 +807,24 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
                           furniture: bool = False,
                           remove_item: bool = False,
                           anatomy_count: bool = False,
-                          character_sheet: bool = False) -> str:
+                          character_sheet: bool = False,
+                          anatomy_count_upper: bool = False,
+                          detail_def_upper: bool = False,
+                          footwear: bool = False,
+                          footwear_upper: bool = False,
+                          body_object_boundary: bool = False,
+                          body_object_boundary_upper: bool = False) -> str:
     """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
     return _assemble_negative(
         cam, topic, image_count, image_labels,
         {"anatomy_count": anatomy_count, "character_sheet": character_sheet,
          "detail_def": detail_def, "furniture": furniture,
-         "remove_item": remove_item},
+         "remove_item": remove_item,
+         "anatomy_count_upper": anatomy_count_upper,
+         "detail_def_upper": detail_def_upper,
+         "footwear": footwear, "footwear_upper": footwear_upper,
+         "body_object_boundary": body_object_boundary,
+         "body_object_boundary_upper": body_object_boundary_upper},
         "unwanted color cast", physics_neg=physics_neg, pose_ref=pose_ref,
         prevent_duplicates=prevent_duplicates)
 
@@ -689,9 +842,18 @@ HINT_DEFENSE_NEGATIVE = "censored, mosaic, bar censor, pixelated"
 # 첫 번째 연결 이미지가 신원 소스라는 규약은 image_note/신원 앵커와 동일하다.
 # base run()과 Skills run_prompt 양쪽에서 공유한다.)
 MIX_GUARD_POSITIVE = (
+    # 왜(Why) 역할 목록에서 "outfit" 을 뺐나 (2026-10-13 실측): 이 목록은 보조
+    # 참조가 **무엇을 제공할 수 있는지**를 나열한다. "outfit" 이 들어 있으면
+    # 보조 참조가 **사물(의자·벤치)인 실행**에서도 "그 참조에서 옷을 가져올 수
+    # 있다" 는 허가로 읽힌다 — 지시하지 않은 의상 변경의 유도가 된다.
+    # 실측: image_2 = 벤치 인 실행에서 하의가 청바지 -> 스커트로 바뀌었다.
+    # 의상 전용 경로는 그대로 남는다 — 바로 뒤 "Garments from a clothing
+    # reference ..." 문장(테스트 R? 가 "separate clothing layer" 로 고정)과
+    # outfit_guard / _is_outfit_transfer 가 명시 교체를 담당한다.
+    # (같은 파일의 MIX_GUARD_POSITIVE_BARE 는 노출 요청용으로 의상 문장까지 뺀 변형이다.)
     "Reference mixing guard: the main person reference image is the only identity source "
     "(face, body shape, proportions); the other reference image(s) contribute "
-    "only their requested role such as outfit, background, prop, product, "
+    "only their requested role such as background, prop, product, "
     "style, lighting, composition, or mood. Garments from a clothing reference "
     "are a separate clothing layer placed over the main person's body, "
     "following the existing anatomy, preserving the main person's body shape, "
@@ -703,6 +865,26 @@ MIX_GUARD_POSITIVE = (
 MIX_GUARD_NEGATIVE = ("clothing fusion with skin, melted garment edges, "
                       "body parts merging into clothing, mixed facial features, "
                       "identity blending, duplicated person")
+
+
+# 노출 요청용 믹스 가드 (2026-10-11 실측 결함). 왜(Why) 따로 두나:
+# 위 MIX_GUARD_POSITIVE 의 "Garments from a clothing reference are a separate
+# clothing layer **placed over the main person's body**" 는 **옷을 덧입히라는
+# 지시**다. 사용자가 "의상을 모두 제거한 누드" 를 요청한 실행에서 이 문장이
+# 같은 positive 에 함께 들어가면, nudity_anatomy_guard 의 "…clearly defined
+# natural intimate detail" 과 **정면으로 충돌**한다(실측: 노출 요청 + 참조 2장
+# → 두 문구가 동시에 positive 에 들어감). 모델은 그 충돌을 옷으로 해소하므로
+# 요청이 뒤집히고 결과가 뭉개진다.
+# 그래서 신원 고정·중복 방지 부분은 그대로 두고 **의상 문장만** 뺀 뒤, 의상은
+# 주제문이 정한다는 한 줄로 바꾼다.
+MIX_GUARD_POSITIVE_BARE = (
+    "Reference mixing guard: the main person reference image is the only identity source "
+    "(face, body shape, proportions); the other reference image(s) contribute "
+    "only their requested role such as background, prop, product, style, lighting, "
+    "composition, or mood. Clothing is determined solely by the topic — do not add "
+    "garments the topic does not ask for; pose follows the topic. No blending of two "
+    "people into one, no mixed facial features between references."
+)
 
 
 # 포즈 참조 가드. 왜(Why): Qwen reference 경로는 이미지 전체를 latent로 주입하므로
@@ -786,35 +968,128 @@ APPEARANCE_HAIR_REALISM_POSITIVE = (
 # 실행일수록 심해진다.)
 DETAIL_DEFINITION_POSITIVE = (
     "anatomical edge definition: every body part keeps a clear readable "
-    "boundary against what surrounds it — legs separate from each other and "
-    "from the background, arms separate from the torso, shoulders keep a "
-    "defined line, fabric keeps its weave and seams, skin keeps natural "
-    "texture, hands keep distinct fingers, knees and elbows keep a visible "
-    "joint line"
+    "boundary against the background — each leg keeps its own clean "
+    "silhouette without inventing additional limbs, arms separate from the "
+    "torso, shoulders keep a defined line, fabric keeps its weave and seams, "
+    "skin keeps natural texture and fine surface detail, hands keep distinct "
+    "fingers, knees and elbows keep a visible joint line"
 )
 
 
 DETAIL_DEFINITION_NEGATIVE = (
-    "melted body boundaries, legs blending into each other, arm merging into "
+    "melted body boundaries, legs blending into each other, extra leg, "
+    "additional leg, third leg, duplicate leg, arm merging into "
     "torso, smeared fabric, waxy skin, featureless limbs, indistinct fingers, "
     "boots melting into the foot, foot blending into the floor, "
     "soft shapeless body parts, plastic doll skin, blanket-like skin folds"
 )
 
 
+# 얼굴·상반신 샷(극접 ECU / 근접 CU)용 경계 가드. 왜(Why) 따로 두나
+# (2026-10-11 실측): detail_def 는 denoise=1.0 뭉개짐 방어라 CU 에서도
+# 필요하지만, 전신 문구("legs blending", "extra leg", "foot blending")가
+# 다리·발을 화면에 없는 샷에 끌어들인다. 경계·질감 방어만 남기고
+# 다리·발 문구를 뺀다. anatomy_count_upper 와 같은 짝 맞춤이다.
+DETAIL_DEFINITION_POSITIVE_UPPER = (
+    "anatomical edge definition: every body part keeps a clear readable "
+    "boundary against the background — arms separate from the "
+    "torso, shoulders keep a defined line, fabric keeps its weave and seams, "
+    "skin keeps natural texture and fine surface detail, hands keep distinct "
+    "fingers, visible joints keep a clean line"
+)
+
+DETAIL_DEFINITION_NEGATIVE_UPPER = (
+    "melted body boundaries, arm merging into "
+    "torso, smeared fabric, waxy skin, featureless limbs, indistinct fingers, "
+    "soft shapeless body parts, plastic doll skin, blanket-like skin folds"
+)
+
+
 # 인물 신체 발란스 가드. (Why: 전신·신체 중심 장면에서 팔/다리 길이 불균형,
-# 머리-몸 비율 붕괴, 부위별 스케일 불일치가 자주 발생. 인물 주제면 참조 이미지
-# 유무와 무관하게 항상 첨부한다 — 비율 문구는 장면 훼손이 없어 상시 붙여도 안전.)
+# 머리-몸 비율 붕괴, 부위별 스케일 불일치가 자주 발생. 사지가 보이는 샷에만
+# 첨부한다 — CU/ECU 처럼 얼굴만 보이는 샷에 "arms and legs" 를 요구하면
+# 화면에 없는 다리를 만들어낸다(2026-10-11 실측). 샷 게이트는
+# resolve_guard_plan 의 body_balance 판정이 든다.)
 BODY_BALANCE_POSITIVE = (
     "body balance: natural human proportions, head-to-body ratio consistent "
-    "with a real person, arms and legs of even realistic length, natural "
-    "shoulder-hip line, relaxed upright posture, all body parts at one "
-    "consistent scale"
+    "with a real person, full-length arms and legs with natural thigh and "
+    "calf proportions, natural shoulder-hip line, relaxed upright posture, "
+    "all body parts at one consistent scale"
 )
 
 
 BODY_BALANCE_NEGATIVE = ("disproportionate limbs, elongated arms, shortened legs, "
                          "oversized head, twisted torso, body parts of different scale")
+
+
+# 신발 유지 가드. 왜(Why): 참조에 신발이 있어도 생성에서 맨발이 됐다.
+# PARTIAL_OBJECT_NEGATIVE 는 벗긴 뒤 반쪽 찌꺼기만 막고, 신발 존재 자체를
+# positive 로 지키는 문구가 없었다. 인물 + 참조 실행에만 붙는다.
+FOOTWEAR_POSITIVE = ("footwear presence guard: if the main person reference image shows shoes, "
+                     "boots, or any footwear on their feet, keep that footwear — same shoes "
+                     "visible on both feet, laces and soles intact, do not make the person barefoot")
+
+
+FOOTWEAR_NEGATIVE = ("bare feet, barefoot, missing shoes, missing footwear, lost shoes, "
+                     "invisible footwear, deformed footwear, melted shoes, feet without shoes, "
+                     "shoes disappearing, one shoe missing, half a shoe")
+
+
+# 얼굴·상반신 샷(극접 ECU / 근접 CU)용 신발 가드. 왜(Why) 다리 문구를 빼나:
+# CU/ECU 는 발이 화면에 없는데 "both feet" 를 요구하면 모델이 없는 발을
+# 만들어낸다. 맨발 방지만 남긴다 (anatomy_count_upper 와 같은 짝 맞춤).
+FOOTWEAR_POSITIVE_UPPER = ("footwear presence guard: do not make the person barefoot, keep natural feet")
+
+
+FOOTWEAR_NEGATIVE_UPPER = FOOTWEAR_NEGATIVE
+
+
+# 신체-사물 접촉 경계 가드. 왜(Why): FURNITURE_DNA 는 사물 쪽 형태만 지키고
+# 신체 쪽 경계는 안 지켜서, 앉으면 몸이 침대·의자에 꺼져 박히며 눌린 모습이
+# 됐다. 접촉면에서 몸과 사물이 분리되도록 신체 쪽에서 잡는다.
+BODY_OBJECT_BOUNDARY_POSITIVE = ("body-object boundary: where the body meets an object (sitting on a chair, "
+                                 "lying on a bed, leaning against a surface), keep a clear boundary between "
+                                 "the body and the object — body does not sink into or merge with the object, "
+                                 "clothing and body keep separate from the object surface, weight is supported "
+                                 "on top of the object with visible contact pressure, no blending of body into "
+                                 "fabric")
+
+
+BODY_OBJECT_BOUNDARY_NEGATIVE = ("body sinking into furniture, body merging into the surface, body blending "
+                                 "into fabric, body absorbed into the object, flat contact with no pressure, "
+                                 "limbs disappearing into furniture, body parts fusing with the surface")
+
+
+# 얼굴·상반신 샷용 접촉 경계 가드. 하반신 접촉 문구를 빼고 상반신 접촉만 남긴다.
+BODY_OBJECT_BOUNDARY_POSITIVE_UPPER = ("body-object boundary: where the upper body meets an object (sitting on a chair, "
+                                        "leaning against a surface), keep a clear boundary between the body and the "
+                                        "object — body does not sink into or merge with the object, clothing and "
+                                        "body keep separate from the object surface, weight is supported on top of "
+                                        "the object with visible contact pressure, no blending of body into fabric")
+
+
+BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER = ("upper body sinking into furniture, body merging into the surface, body blending "
+                                        "into fabric, flat contact with no pressure, body parts fusing with the surface")
+
+
+def _footwear_guard(shot):
+    """샷별 신발 가드 (positive, negative). CU/ECU 면 upper 변형."""
+    try:
+        if shot in FACE_CRITICAL_SHOTS:
+            return FOOTWEAR_POSITIVE_UPPER, FOOTWEAR_NEGATIVE_UPPER
+        return FOOTWEAR_POSITIVE, FOOTWEAR_NEGATIVE
+    except Exception:
+        return FOOTWEAR_POSITIVE, FOOTWEAR_NEGATIVE
+
+
+def _body_object_boundary_guard(shot):
+    """샷별 신체-사물 경계 가드 (positive, negative). CU/ECU 면 upper 변형."""
+    try:
+        if shot in FACE_CRITICAL_SHOTS:
+            return BODY_OBJECT_BOUNDARY_POSITIVE_UPPER, BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER
+        return BODY_OBJECT_BOUNDARY_POSITIVE, BODY_OBJECT_BOUNDARY_NEGATIVE
+    except Exception:
+        return BODY_OBJECT_BOUNDARY_POSITIVE, BODY_OBJECT_BOUNDARY_NEGATIVE
 
 
 def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str = "",
@@ -824,7 +1099,13 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
                    image_labels=None, pose_ref: bool = False,
                    physics_neg: str = "", detail_def: bool = False,
                    furniture: bool = False, remove_item: bool = False,
-                   anatomy_count: bool = False) -> str:
+                   anatomy_count: bool = False,
+                   anatomy_count_upper: bool = False,
+                   detail_def_upper: bool = False,
+                   footwear: bool = False,
+                   footwear_upper: bool = False,
+                   body_object_boundary: bool = False,
+                   body_object_boundary_upper: bool = False) -> str:
     # 힌트·믹스·외양·발란스 방어는 base 경로 전용이라 조립기가 아니라
     # 여기서 덧붙인다(중복이 아니라 경로별 전용).
     tail = []
@@ -840,6 +1121,11 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
         cam, topic, image_count, image_labels,
         {"anatomy_count": anatomy_count, "character_sheet": character_sheet,
          "detail_def": detail_def, "furniture": furniture,
-         "remove_item": remove_item},
+         "remove_item": remove_item,
+         "anatomy_count_upper": anatomy_count_upper,
+         "detail_def_upper": detail_def_upper,
+         "footwear": footwear, "footwear_upper": footwear_upper,
+         "body_object_boundary": body_object_boundary,
+         "body_object_boundary_upper": body_object_boundary_upper},
         "color tint", extras=tuple(tail) + (llm_extra, extra),
         physics_neg=physics_neg, pose_ref=pose_ref)

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 __all__ = [
-"_match_spatial", "_drift_mse", "_drift_norm", "_get_samples", "_with_samples", "_damp_norm", "_damp_factor", "_lighting_mismatch", "_light_damp_factor", "_as_rgb_hwc", "_even_rgb", "_edge_mag_from_rgb", "_edge_map_from_rgb", "_local_edge", "_noise_floor", "_DRIFT_NORM_KNEE", "_PHYS_CEILING", "_DRIFT_NORM_ZERO", "_DECODE_MAX_PIXELS", "_DECODE_RETRY_PIXELS"
+"_match_spatial", "_drift_mse", "_drift_norm", "_drift_norm_masked", "_drift_tile_max", "_lowpass_latent", "_hf_restore_pass", "_get_samples", "_with_samples", "_damp_norm", "_damp_factor", "_content_change_gate", "_FACE_GATE_PERSON_FLOOR", "_prompt_intent", "_face_gate_open", "_bg_gate_open", "_lighting_mismatch", "_light_damp_factor", "_as_rgb_hwc", "_even_rgb", "_edge_mag_from_rgb", "_edge_map_from_rgb", "_local_edge", "_noise_floor", "_DRIFT_NORM_KNEE", "_PHYS_CEILING", "_DRIFT_NORM_ZERO", "_DECODE_MAX_PIXELS", "_DECODE_RETRY_PIXELS"
 ]
 
 _ONCE_SEEN = set()
@@ -126,9 +126,9 @@ def _drift_norm(sampled, matched, _mse=None) -> float | None:
     "참조의 크기 대비 얼마나 다른가" 가 되고, 모델이 바뀌어도 임계값이 유지된다.
     0 = 완전히 같음, 1 = 참조 크기만큼 다름.
 
-    **아직 임계값은 이 값으로 재측정되지 않았다.** 아래 실행 로그가 그 값을
-    직접 말해준다. 그 실측값을 보고 임계값을 정한다 — 지금 숫자를 넣으면
-    또 추측이 된다.
+    임계값은 이 정규화값으로 **실측해 정했다** — 아래 `_DRIFT_NORM_KNEE = 0.50`
+    / `_DRIFT_NORM_ZERO = 1.00` 이 그 값이고, 근거는 정상 참조 4건의 실측 범위
+    0.222 ~ 0.487 이다(무감쇠 구간이 정상 범위를 덮어야 한다).
     """
     try:
         import torch as _t
@@ -145,6 +145,137 @@ def _drift_norm(sampled, matched, _mse=None) -> float | None:
         return float(_mse) / den
     except Exception:
         return None
+
+
+def _drift_norm_masked(sampled, matched, mask, _mse=None) -> float | None:
+    """사람 마스크 영역만의 정규화 불일치. 비교 불가면 None.
+
+    왜(Why) 마스크 버전이 필요한가 (2026-10-12 실측): 전체 프레임 정규화값은
+    배경이 지배한다. 결과물과 참조의 **배경**이 같고 **사람 자세**만 다르면
+    전체 정규화가 0.44~0.47 로 무감쇠 구간(<=0.50) 안에 들어 당김이 그대로
+    적용됐다. 당김은 `eff * _mask * (matched - sampled)` 로 사람 영역만
+    블렌드하므로 올바른 측정 대상은 사람 영역이다. 실측: 전체 정규화 0.44~
+    0.63 에 강도 0.11~0.20 블렌드 -> 생성물 사람 전체에 잔상(더블 노출).
+    정규화 방식은 `_drift_norm` 과 같다(참조 크기 기준). 마스크가 전부 0 이면
+    den 이 0 이라 None — 그 상태의 블렌드는 어차피 아무것도 바꾸지 않는다.
+    """
+    try:
+        import torch as _t
+        if mask is None:
+            return None
+        m = mask.to(device=sampled.device, dtype=sampled.dtype)
+        s = sampled.float() * m
+        r = matched.float() * m
+        den = float(_t.mean(r ** 2).item())
+        if den <= 1e-12:
+            return None
+        if _mse is None:
+            _mse = float(_t.mean((s - r) ** 2).item())
+        return float(_mse) / den
+    except Exception:
+        return None
+
+
+def _drift_tile_max(sampled, matched, mask, tiles=8) -> float | None:
+    """마스크 영역을 tiles×tiles 로 나눈 타일별 정규화 불일치 중 최댓값.
+    비교 불가 타일(커버리지 1% 미만·계산 실패)은 건너뛴다.
+    유효 타일이 없으면 None.
+
+    왜(Why, 2026-10-13): 배경 당김 게이트가 전체 평균만 본다 — 밝은 배경이
+    평균을 깔아주면 어긋난 가구 다리 같은 국소 불일치가 그대로 찍힌다
+    (bg_gate_calib.py 실측: 평균 0.0587 통과 vs band 국소 0.63).
+    당장은 로그 관측용이다 — 임계 고정은 실측 분포가 모이면 한다. 타일
+    임계는 텍스처 바닥과 겹쳐 성급히 고정하면 정상 당김을 막는다
+    (같은 bg_gate_calib.py: 정상 동일 장면 타일최대 0.70~1.02가
+    합성 고스트 0.45를 넘는다). 동작 변경 없음.
+    """
+    try:
+        import torch as _t
+        if mask is None:
+            return None
+        m = mask.to(device=sampled.device, dtype=sampled.dtype)
+        h = int(sampled.shape[-2])
+        w = int(sampled.shape[-1])
+        if h <= 0 or w <= 0 or tiles < 1:
+            return None
+        best = None
+        for i in range(tiles):
+            for j in range(tiles):
+                tm = m[..., i * h // tiles:(i + 1) * h // tiles,
+                       j * w // tiles:(j + 1) * w // tiles]
+                if float(tm.mean()) < 0.01:
+                    continue
+                v = _drift_norm_masked(
+                    sampled[..., i * h // tiles:(i + 1) * h // tiles,
+                            j * w // tiles:(j + 1) * w // tiles],
+                    matched[..., i * h // tiles:(i + 1) * h // tiles,
+                            j * w // tiles:(j + 1) * w // tiles],
+                    tm)
+                if v is not None and (best is None or v > best):
+                    best = v
+        return best
+    except Exception:
+        return None
+
+
+def _lowpass_latent(lat, down=2):
+    """latent 저역 통과 — area 축소 후 원격자로 확대.
+
+    왜(Why) area 모드인가 (2026-10-12 실측): 고주파를 지우는 게 목적이라
+    선형 보간은 자기 자신의 고주파를 다시 만들 수 있다. area 평균은 블록
+    평균이라 확대 후에도 고주파가 생기지 않는다. down=2 는 latent 2칸 = 이미지
+    32픽셀(Qwen 16배율) 기준 — 눈·입 같은 구조(LL)는 살리고 피부 질감·머리카락
+    같은 HF 만 떼어낸다.
+    """
+    import torch.nn.functional as _f
+    h = int(lat.shape[-2])
+    w = int(lat.shape[-1])
+    small = _f.interpolate(lat.float(),
+                           size=(max(1, h // down), max(1, w // down)),
+                           mode="area")
+    big = _f.interpolate(small, size=(h, w), mode="area")
+    return big.to(dtype=lat.dtype)
+
+
+def _hf_restore_pass(sampled, out, down=2):
+    """당김이 깎은 고주파(질감·에지)를 당김 전 상태에서 되살린다.
+
+    왜(Why) 이 함수가 필요한가 (2026-10-12 실측, 실제 Qwen VAE):
+    당김 블렌드 `out + eff * (matched - out)` 은 latent 공간의 선형 평균이라
+    **저역통과 필터로 작동한다**. 참조가 2픽셀만 어긋나도(정렬된 정상 참조)
+    eff 0.20 에서 라플라시안 분산이 전체 -14%·얼굴 -24% 깎였다(카메라 0.20 +
+    원본 0.15 이중 당김이면 전체 -23%·얼굴 -31%). 이것이 "생성물이 번진다"
+    신고의 직접 원인이다. 강도를 줄이면 신원 복원(이 노드의 존재 이유)이
+    무뎌진다.
+
+    해법: 저역(LL)은 당김 결과를 따르고 고주파(HF)는 당김 **전** 상태에서
+    다시 얹는다. `lowpass(out) + (sampled - lowpass(sampled))`. HF 는 질감이지
+    신원이 아니므로(신원·구도는 LL+중역에 있다) 당김의 신원 효과는 유지되고
+    실측상 얼굴 선명도 0.76 -> 0.94 로 회복됐다. 부분 복원(alpha=0.5)은
+    중역이 반쯤 상쇄돼 오히려 0.73 으로 **악화**되는 비단조 구간이 실측됐으므로
+    완전 복원만 한다.
+
+    계약: out 이 sampled 와 값이 같으면 **out 객체 그대로** 반환(바이트 단위
+    무변화 — 부동소수점 재조합을 아예 하지 않는다). shape 이 다르거나 실패해도
+    out 그대로. 장치·dtype 은 out 을 따른다. 디코드를 하지 않는다(비용 0).
+    """
+    try:
+        import torch as _t
+        if sampled is None or out is None:
+            return out
+        if tuple(sampled.shape) != tuple(out.shape):
+            return out
+        # 왜(Why) equal 단락 (2026-10-12): (lp + s - lp) 는 부동소수점에서
+        # 비트 단위로 s 가 아니다. 당김이 없었던 실행은 기존 결과와 바이트
+        # 단위로 같아야 한다는 계약을 지키기 위해 재조합 자체를 하지 않는다.
+        if _t.equal(out, sampled):
+            return out
+        lp_out = _lowpass_latent(out, down)
+        lp_s = _lowpass_latent(sampled, down)
+        hf = sampled.float() - lp_s.float()
+        return (lp_out.float() + hf).to(dtype=out.dtype)
+    except Exception:
+        return out
 
 
 # --- 정규화 불일치 기준 (2026-10-01 실측) ---
@@ -236,6 +367,215 @@ def _damp_factor(drift) -> float:
         return max(0.0, 1.0 - (drift - 0.8) / 1.2)
     except Exception:
         return 1.0
+
+
+# 의도된 내용 변경 게이트 (2026-10-12 실측). 얼굴 정규화 drift 가 무감쇠
+# 구간 안(참조와 일치)인데 사람 전체 정규화 drift 가 임계 아래 바닥(0.40)을
+# 넘으면, 그 차이는 오차가 아니라 **의도된 내용 변경**(의상 교체 등)이다.
+#
+# 근거 실측 (실제 Qwen VAE, 결과물 vs 원본 사진):
+#   의상 교체 실행   사람 0.329 / 얼굴 0.194   (얼굴이 훨씬 일치)
+#   같은 그림 6px 이동  사람 0.348 / 얼굴 0.235
+#   같은 그림 12px 이동 사람 0.376 / 얼굴 0.301
+#   같은 그림 24px 이동 사람 0.445 / 얼굴 0.465   (얼굴도 같이 어긋남)
+#
+# 바닥 0.40 을 두는 이유: 사람 drift 가 0.40 아래면 당김 자체가 온화해서
+# 게이트를 열 필요가 없다(정상 참조 범위 상단 근처). 어긋난 참조(24px)는
+# 얼굴도 같이 어긋나 "얼굴 < 사람" 조건에서 걸러진다 — 게이트는 어긋남을
+# 치지 않는다.
+_FACE_GATE_PERSON_FLOOR = 0.40
+
+
+def _content_change_gate(face_n, person_n) -> bool:
+    """의도된 내용 변경 게이트. 참이면 몸을 참조로 끌어오지 않고 얼굴만 당긴다.
+
+    세 조건: 얼굴이 무릎 안(참조와 일치), 사람 전체가 바닥 위(차이가
+    유의미), 그리고 얼굴이 사람보다 더 일치(신원은 보존되고 내용만 바뀐
+    지문). 세 번째가 어긋남을 걸러준다 — 24px 밀린 참조는 얼굴(0.465)이
+    사람(0.445)보다 더 어긋나 여기서 거짓이 된다.
+
+    None·NaN 은 거짓 — 판정 근거가 없으면 게이트를 열지 않는다(기존 동작).
+    """
+    try:
+        if face_n is None or person_n is None:
+            return False
+        if face_n != face_n or person_n != person_n:   # nan
+            return False
+        return (face_n <= _DRIFT_NORM_KNEE
+                and person_n > _FACE_GATE_PERSON_FLOOR
+                and face_n < person_n)
+    except Exception:
+        return False
+
+
+# 프롬프트 의도 판정 (2026-10-12, 1단계). 키퍼가 카메라 프롬프트를 직접
+# 받아 "무엇이 의도된 변경인가"를 픽셀 지문만이 아니라 텍스트로 확인한다.
+# 왜(Why) 교체 동사를 요구하나: 프롬프트는 항상 최종 상태를 묘사한다 —
+# "wearing a red dress" 는 의상을 **바꾼 실행**에도, 원본이 이미 빨간
+# 드레스인 실행에도 나온다. 묘사 명사만으로는 의도와 열화를 구분할 수
+# 없다(거짓 양성 폭탄). 바꾸라는 동사(change/replace/교체/변경...)가
+# 있을 때만 그 대상의 변경을 의도로 인정한다 — 보수적이고 안전하다.
+# 프롬프트 판정은 게이트를 **닫는 방향으로만** 강화한다(당김 억제).
+# 픽셀 지문으로 열리던 게이트를 프롬프트가 되칼 수는 없다 — 참조와
+# 같아야 한다는 DNA 계약이 우선이다.
+_PROMPT_CHANGE_VERBS = (
+    "change", "replace", "swap", "switch to", "put on",
+    "교체", "변경", "바꾸", "바꿔", "바뀐", "갈아입",
+)
+_PROMPT_OUTFIT_NOUNS = (
+    "outfit", "clothes", "clothing", "dress", "top", "shirt", "pants",
+    "skirt", "jacket", "costume", "garment",
+    # 신발류 (2026-10-13). 왜(Why): "change her shoes to sandals" 처럼
+    # 교체 동사가 있어도 대상 명사가 목록에 없으면 조인 창에서 걸러져
+    # 의도=False 가 됐다 — 키퍼가 바뀐 신발을 원본으로 되돌린다.
+    # "heels" 를 넣지 않는 이유: 부분 문자열 매칭이라 "wheels" 에도
+    # 걸린다(오판). "high heel" 구문은 충돌이 없다.
+    "shoe", "shoes", "sandal", "sandals", "boots",
+    "sneaker", "sneakers", "slipper", "slippers", "footwear", "high heel",
+    "의상", "옷", "복장", "드레스", "원피스", "상의", "하의", "치마", "자켓",
+    "신발", "구두", "샌들", "단화", "운동화", "하이힐", "부츠",
+)
+_PROMPT_SCENE_NOUNS = (
+    "background", "scene", "setting", "location", "backdrop",
+    "street", "beach", "indoor", "outdoor", "room", "studio", "park",
+    "배경", "장소", "장면", "무대", "실내", "실외",
+)
+
+# 조건·부정 표지 (2026-10-13 실측 — 거짓 양성의 실제 출처).
+# 왜(Why) 필요한가: 카메라 노드의 정체성 앵커 문구(cam_anchors.py)가
+#   "Preserve the same facial identity ... hairstyle, and clothing
+#    unless the instruction explicitly changes them."
+# 다. "clothing"(의상 명사) 과 "changes"(교체 동사) 가 **같은 절**에 있어서
+# 매 실행이 의상 교체로 오판됐다 — 실측: 키퍼 로그에 매 실행
+# "프롬프트가 의상 교체를 지시" 가 찍히고 얼굴 게이트가 열려 **몸(의상) 당김이
+# 통째로 꺼졌다.** 사용자가 지시하지 않은 의상 변경(하의 청바지 -> 스커트)이
+# 그대로 남았다.
+# 조건·부정 문맥의 동사는 **지시가 아니므로** 의도로 세지 않는다.
+_PROMPT_COND_MARKERS = (
+    "unless", "if ", "when ", "do not", "don't", "does not", "never",
+    "without", "not ", "no change", "no alteration",
+)
+
+# 동사 앞 몇 문자까지 조건·부정으로 볼지. 앵커 문구는 "changes" 4단어 앞에
+# "unless" 가 있어 48자면 충분하다. 문장 경계(. ; 개행)는 넘지 않는다 —
+# "no hats. change the outfit" 처럼 **다른 문장**의 부정이 지시를 죽이면 안 된다.
+_PROMPT_COND_WINDOW = 48
+
+# 한국어 부정은 **동사 뒤**에 온다("바꾸지 않는 한", "바꾸지 마"). 앞 창으로는
+# 잡히지 않으므로 동사 직후 아주 좁은 창만 본다. 넓히면 "교체하고 배경은 바꾸지
+# 않는다" 의 **진짜 교체**까지 죽는다 — 6자로 제한한다.
+_PROMPT_COND_AFTER = ("지 않", "지않", "지 마", "지마", "면 안", "면안")
+_PROMPT_COND_AFTER_WINDOW = 6
+
+
+# 동사와 **대상 명사가 함께 있어야** 지시로 본다 (2026-10-13 실측 2차).
+# 왜(Why) 필요한가: "아무 데나 동사 x 아무 데나 명사" 는 카메라 보일러플레이트에서
+# 무조건 참이 된다. 실측(실제 프롬프트 6110자)에서 거짓 양성이 3개 남았다.
+#   "However, changes requested by the user must be applied ..."  (changes)
+#   "any changes requested by the user must be applied ..."       (changes)
+#   "no limbs swapping between people"                            (swap)
+# 셋 다 의상/장면 명사와 멀리 떨어져 있다 — **다른 절의 명사**를 끌어다 쓴 것.
+# 지시라면 대상이 동사 옆에 있다("change the outfit", "replace the background").
+_PROMPT_PAIR_WINDOW = 40
+
+
+def _clause_before(text, i, window=_PROMPT_COND_WINDOW) -> str:
+    """i 앞 window 문자 중 **마지막 문장 경계 뒤** 구간. 조건 표지 탐색용."""
+    seg = text[max(0, i - window):i]
+    cut = max(seg.rfind("."), seg.rfind(";"), seg.rfind("\n"),
+              seg.rfind("!"), seg.rfind("?"))
+    return seg[cut + 1:] if cut >= 0 else seg
+
+
+def _has_change_instruction(text) -> bool:
+    """교체 동사가 **조건·부정 문맥이 아닌** 곳에 하나라도 있는가.
+
+    조건·부정 문맥의 동사는 지시가 아니다 — 그걸 지시로 세면 게이트가 잘못
+    열려 몸 당김이 꺼진다(2026-10-13 실측). 반대로 진짜 지시("change the
+    outfit to ...")는 앞에 표지가 없으므로 그대로 잡힌다.
+    """
+    for v in _PROMPT_CHANGE_VERBS:
+        start = 0
+        while True:
+            i = text.find(v, start)
+            if i < 0:
+                break
+            before = _clause_before(text, i)
+            after = text[i + len(v):i + len(v) + _PROMPT_COND_AFTER_WINDOW]
+            if (not any(m in before for m in _PROMPT_COND_MARKERS)
+                    and not any(m in after for m in _PROMPT_COND_AFTER)):
+                return True
+            start = i + 1
+    return False
+
+
+def _prompt_intent(prompt) -> dict:
+    """카메라 프롬프트에서 의도된 변경을 읽는다.
+
+    반환: {"outfit_change": bool, "scene_change": bool}. None·빈 문자열은
+    전부 거짓 — 판단 근거가 없으면 픽셀 게이트만 믿는다(기존 동작).
+
+    판정 3단 (2026-10-13 실측으로 두 번 조여졌다):
+      1  교체 동사가 있어야 한다 (묘사만으로는 의도와 열화를 못 가른다)
+      2  그 동사가 **조건·부정 문맥이 아니어야** 한다
+         ("unless the instruction explicitly changes them")
+      3  그 동사 옆에 **대상 명사가 함께 있어야** 한다
+         ("changes requested by the user ..." 는 지시가 아니다)
+    """
+    try:
+        if not prompt or not isinstance(prompt, str):
+            return {"outfit_change": False, "scene_change": False}
+        text = prompt.lower()
+        if not _has_change_instruction(text):
+            return {"outfit_change": False, "scene_change": False}
+        outfit = scene = False
+        for v in _PROMPT_CHANGE_VERBS:
+            start = 0
+            while True:
+                i = text.find(v, start)
+                if i < 0:
+                    break
+                start = i + 1
+                if any(m in _clause_before(text, i)
+                       for m in _PROMPT_COND_MARKERS):
+                    continue
+                tail = text[i + len(v):i + len(v) + _PROMPT_COND_AFTER_WINDOW]
+                if any(m in tail for m in _PROMPT_COND_AFTER):
+                    continue
+                win = text[max(0, i - _PROMPT_PAIR_WINDOW):
+                           i + len(v) + _PROMPT_PAIR_WINDOW]
+                if not outfit and any(n in win for n in _PROMPT_OUTFIT_NOUNS):
+                    outfit = True
+                if not scene and any(n in win for n in _PROMPT_SCENE_NOUNS):
+                    scene = True
+                if outfit and scene:
+                    return {"outfit_change": True, "scene_change": True}
+        return {"outfit_change": outfit, "scene_change": scene}
+    except Exception:
+        return {"outfit_change": False, "scene_change": False}
+
+
+def _face_gate_open(face_n, person_n, intent_outfit=False) -> bool:
+    """얼굴 게이트 최종 판정. 픽셀 지문 또는 프롬프트 의도 중 하나라도
+    참이면 열린다 — 프롬프트가 의상 교체를 지시했으면 옷 쪽 참조로 당기는
+    것은 무조건 틀렸으므로 픽셀 경계 구간과 무관하게 열린다."""
+    try:
+        if intent_outfit:
+            return True
+        return _content_change_gate(face_n, person_n)
+    except Exception:
+        return False
+
+
+def _bg_gate_open(bg_n, intent_scene=False) -> bool:
+    """배경 게이트 최종 판정. 프롬프트가 장면 변경을 지시하면 무조건 닫는다
+    (배경이 달라진 건 의도다). 없으면 기존 하드 게이트(무릎 안만 열림)."""
+    try:
+        if intent_scene:
+            return False
+        return bg_n is not None and bg_n <= _DRIFT_NORM_KNEE
+    except Exception:
+        return False
 
 
 def _lighting_mismatch(a, b) -> float | None:

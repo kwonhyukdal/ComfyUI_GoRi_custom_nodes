@@ -45,6 +45,16 @@ const SLOT_HEIGHT = 20; // 입력 소켓 1개의 세로 높이 (프론트엔드 
  * 0 으로 두면 방금 한 호출과 합쳐지지 않으므로 의미가 없다. */
 const VISIBILITY_DEBOUNCE_MS = 50;
 
+/** Coalesce rapid calls into a single execution after `wait` ms.
+ * Used for lifecycle hooks that may fire in quick succession. */
+function debounce(func, wait) {
+    let timeout;
+    return function(...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), wait);
+    };
+}
+
 function imageNumber(name) {
   const m = /^image_(\d+)$/.exec(String(name ?? ""));
   return m ? Number(m[1]) : 0;
@@ -106,12 +116,8 @@ function lastImageSocketIndex(node) {
 
 /** 링크 드래그 중인지 확인 (드래그 중 소켓이 사라지는 사고를 막는다) */
 function isDraggingLink() {
-  try {
-    const renderLinks = app.canvas?.linkConnector?.renderLinks;
+    const renderLinks = app?.canvas?.linkConnector?.renderLinks;
     return Array.isArray(renderLinks) && renderLinks.length > 0;
-  } catch (_) {
-    return false;
-  }
 }
 
 function updateVisibility(node) {
@@ -135,14 +141,22 @@ function updateVisibility(node) {
     if (node._goriScanKey === scan.count + ":" + lastLinked && !isDraggingLink()) {
       return;
     }
-    node._goriScanKey = scan.count + ":" + lastLinked;
+    // 왜(Why) 여기서 키를 먼저 기록하지 않나 (2026-10-11 실측): 드래그 중에는
+    // 축소를 보류한다(아래 줄이기 블록). 그 순간 키를 미리 기록하면 드래그가
+    // 끝난 뒤의 갱신이 "변경 없음"으로 조기 반환해 **보류된 축소가 영영
+    // 수행되지 않는다.** 실측 프로브로 카메라 JS 에서 재현했다(드래그 종료
+    // 후에도 소켓 5개가 그대로, 기대 4개). 키는 정착(count === desired)했을
+    // 때만 기록한다 — 키퍼 JS 와 같은 규칙.
 
     const desired = lastLinked === 0
       ? 1
       : Math.min(template.length, lastLinked + LOOKAHEAD);
 
     let count = scan.count;
-    if (count === desired) return;
+    if (count === desired) {
+      node._goriScanKey = scan.count + ":" + lastLinked;
+      return;
+    }
 
     // 소켓 수 변화만큼 노드 높이도 같이 조정한다(연결 시 +, 해제 시 -).
     // 소켓이 사라져도 노드 높이가 그대로면 남는 공간을 topic 위젯(h-full)이
@@ -176,6 +190,13 @@ function updateVisibility(node) {
     const removed = countBefore - count;
     if (removed > 0 && Array.isArray(node.size)) {
       node.setSize([node.size[0], node.size[1] - removed * SLOT_HEIGHT]);
+    }
+    // 왜(Why) 정착했을 때만 키를 기록하나 (2026-10-11 실측): 줄이기가 드래그
+    // 중 보류되면 count > desired 인 채로 끝난다. 이때 키를 기록하면 다음
+    // 트리거가 조기 반환해 보류된 축소가 영영 안 된다. 정착한 경우에만
+    // 기록해서 미완료 상태에서는 다음 트리거가 다시 돌게 한다(키퍼 JS 와 같음).
+    if (count === desired) {
+      node._goriScanKey = scan.count + ":" + lastLinked;
     }
   } catch (err) {
     restoreAll(node);
@@ -246,8 +267,8 @@ function scheduleVisibilityUpdate(node) {
 
 /** topic textarea의 DOM 요소 (없으면 null) */
 function topicElement(node) {
-  const w = (node.widgets || []).find((x) => x.name === "topic");
-  return w?.element ?? null;
+    const w = (node?.widgets || []).find((x) => x?.name === "topic");
+    return w?.element ?? null;
 }
 
 /** 새 노드의 높이를 최소치로 맞춘다 (폭은 유지) */
@@ -282,6 +303,78 @@ window.addEventListener("wheel", (e) => {
     /* 실패 시 기본 동작 유지 */
   }
 }, { capture: true, passive: false });
+
+/** topic·llm_hint textarea 고정 높이 — **1줄 최소치**.
+ * 왜(Why) 고정인가: 두 위젯은 h-full 이라 노드 높이가 변할 때마다 함께
+ * 늘어난다. 이미지 단자 추가/제거·새로고침·레이아웃 재계산으로 노드 높이가
+ * 바뀌면 textarea 가 따라 커지거나 작아져서 배치가 흐트러진다. 높이를 고정하면
+ * 노드 크기 변화와 무관하게 위젯 크기가 유지된다.
+ * 왜(Why) 1줄인가 (2026-10-12 사용자 지시): 처음부터 크게 잡으면 노드가
+ * 불필요하게 커진다. 최소(1줄)로 시작하고 넘치는 텍스트는 칸 안에서 휠
+ * 스크롤한다(위 TOPIC_ELS 핸들러).
+ * 왜(Why) 상수가 아니라 **측정**인가: 글꼴·줄간격·패딩이 프론트엔드 판마다
+ * 다르다. 상수로 박으면 어떤 판에서 잘리거나 남는다. */
+const FIXED_TEXTAREA_LINES = 1;
+const FIXED_TEXTAREA_FALLBACK_PX = 26;
+
+/** textarea 의 1줄 높이(px). 계산 불가면 근사치. */
+function textareaOneLineHeight(el) {
+  try {
+    const cs = window.getComputedStyle(el);
+    let lh = parseFloat(cs.lineHeight);
+    if (!isFinite(lh) || lh <= 0) {
+      lh = (parseFloat(cs.fontSize) || 13) * 1.45;
+    }
+    const pad = (parseFloat(cs.paddingTop) || 0)
+      + (parseFloat(cs.paddingBottom) || 0);
+    const bord = (parseFloat(cs.borderTopWidth) || 0)
+      + (parseFloat(cs.borderBottomWidth) || 0);
+    const extra = (cs.boxSizing === "border-box") ? (pad + bord) : 0;
+    const px = Math.ceil(lh * FIXED_TEXTAREA_LINES + extra);
+    return px > 0 ? px : FIXED_TEXTAREA_FALLBACK_PX;
+  } catch (_) {
+    return FIXED_TEXTAREA_FALLBACK_PX;
+  }
+}
+
+/** topic·llm_hint textarea 높이를 1줄 최소치로 고정한다.
+ * 값이 이미 맞으면 **대입하지 않는다** — 매 드로우에서 불리는 함수라 무조건
+ * 대입하면 스타일 재계산이 프레임마다 돈다. 측정값은 **요소에** 캐시한다
+ * (새 요소가 붙으면 자동으로 다시 잰다 — DOM 재마운트 대응). */
+function applyFixedTextareaHeight(node) {
+  for (const name of ("topic", "llm_hint")) {
+    const w = (node.widgets || []).find((x) => x.name === name);
+    const el = w?.element;
+    if (!el || !el.style) continue;
+    if (el.rows !== FIXED_TEXTAREA_LINES) el.rows = FIXED_TEXTAREA_LINES;
+    let px = el._goriOneLinePx;
+    if (!px) px = el._goriOneLinePx = textareaOneLineHeight(el);
+    const want = px + "px";
+    if (el.style.height !== want) el.style.height = want;
+    if (el.style.minHeight !== want) el.style.minHeight = want;
+    if (el.style.maxHeight !== want) el.style.maxHeight = want;
+  }
+}
+
+/** 고정 높이를 **매 드로우에서** 다시 보장한다.
+ * 왜(Why) 드로우 훅인가 (2026-10-12 사용자 지시): 레이아웃/위젯 코드가 매
+ * 프레임 textarea 의 style.height 를 다시 쓰기 때문에 생성 시 한 번만 적용하면
+ * 새로고침·소켓 연결/해제 후 값이 달라진다. 드로우 직후 보정하면 사용자가 보는
+ * 값이 항상 같다. 값이 같으면 대입하지 않으므로 비용은 비교뿐이다. */
+function ensureFixedTextareaDrawHook(node) {
+  if (node._goriFixedTextareaHooked) return;
+  node._goriFixedTextareaHooked = true;
+  const prev = node.onDrawForeground;
+  node.onDrawForeground = function (ctx) {
+    prev?.apply(this, arguments);
+    try {
+      attachTopicScroll(this);
+      applyFixedTextareaHeight(this);
+    } catch (_) {
+      /* 보정 실패는 조용히 무시 — 다음 프레임에 다시 시도한다 */
+    }
+  };
+}
 
 /** 각 노드의 topic textarea를 전역 감시 목록에 등록 (1회) */
 function attachTopicScroll(node) {
@@ -756,6 +849,9 @@ app.api?.addEventListener?.("execution_start", clearAllLlmLights);
 app.registerExtension({
   name: EXT_ID,
   setup() {
+    // Clean up stale timers from previous extension loads to prevent leaks.
+    if (llmBlinkTimer) { clearInterval(llmBlinkTimer); llmBlinkTimer = null; }
+    if (llmFadeTimer) { clearTimeout(llmFadeTimer); llmFadeTimer = null; }
     // 카메라 노드가 하나도 없는 빈 그래프를 저장하는 경우까지 대비한다.
     // (그 경우엔 이 노드가 없으니 지울 키도 없다 — 그래도 훅은 심어 둔다)
     try {
@@ -819,6 +915,12 @@ app.registerExtension({
       } catch (_) {
         /* 휠 스크롤 훅 실패는 조용히 무시 */
       }
+      try {
+        applyFixedTextareaHeight(node);
+        ensureFixedTextareaDrawHook(node);
+      } catch (_) {
+        /* 고정 높이 실패는 조용히 무시 */
+      }
       if (!node._goriLoaded && !node._goriShrinkScheduled) {
         node._goriShrinkScheduled = true;
         const pass = () => {
@@ -826,6 +928,8 @@ app.registerExtension({
             if (node._goriLoaded) return; // 로드가 끼어들면 즉시 중단
             shrinkNewNode(node);
             attachTopicScroll(node);
+            applyFixedTextareaHeight(node);
+            ensureFixedTextareaDrawHook(node);
           } catch (_) {
             /* 축소 실패는 조용히 무시 — 기본 크기로 사용 가능 */
           }
@@ -835,6 +939,18 @@ app.registerExtension({
         setTimeout(pass, 300);
       }
     };
+
+    /* Debounce rapid lifecycle hooks (onNodeCreated + onConfigure may fire
+     * back-to-back during node creation). 50ms matches the visibility debounce. */
+    const lifecycleDebouncers = new WeakMap();
+    function scheduleLifecycle(node) {
+        let d = lifecycleDebouncers.get(node);
+        if (!d) {
+            d = debounce((n) => afterLifecycle(n), 50);
+            lifecycleDebouncers.set(node, d);
+        }
+        d(node);
+    }
 
     /* 원본 보존형 후킹(Why): 다른 확장이 같은 메서드를 감쌀 수 있으므로
      * 원본을 인스턴스/프로토타입에 붙여두지 않고 클로저로만 들고 있다.
@@ -859,7 +975,7 @@ app.registerExtension({
           // 시점엔 이 플래그가 이미 설정되어 있다.
           this._goriLoaded = true;
         }
-        setTimeout(() => afterLifecycle(this), 0);
+        scheduleLifecycle(this);
         return result;
       };
     };
@@ -874,26 +990,29 @@ app.registerExtension({
     // 실행도 깨짐), 공유할 때 값을 비우는 방식으로 키 유출을 막는다.
     // 이미 비어 있으면 메뉴를 비활성화한다.
     const origMenu = nodeType.prototype.getExtraMenuOptions;
-    nodeType.prototype.getExtraMenuOptions = function (canvas, options) {
-      try {
-        origMenu?.apply(this, arguments);
-      } catch (_) {
-        /* 기존 메뉴 실패는 무시 */
-      }
-      try {
-        const node = this;
-        const w = findApiKeyWidget(node);
-        if (w && Array.isArray(options)) {
-          options.push({
-            content: "api_key 지우기 (공유용)",
-            disabled: !String(w.value ?? ""),
-            callback: () => clearApiKeyWidget(node),
-          });
+    if (!nodeType.prototype._goriPatched_getExtraMenuOptions) {
+      nodeType.prototype._goriPatched_getExtraMenuOptions = true;
+      nodeType.prototype.getExtraMenuOptions = function (canvas, options) {
+        try {
+          origMenu?.apply(this, arguments);
+        } catch (_) {
+          /* 기존 메뉴 실패는 무시 */
         }
-      } catch (_) {
-        /* 메뉴 추가 실패는 무시 */
-      }
-    };
+        try {
+          const node = this;
+          const w = findApiKeyWidget(node);
+          if (w && Array.isArray(options)) {
+            options.push({
+              content: "api_key 지우기 (공유용)",
+              disabled: !String(w.value ?? ""),
+              callback: () => clearApiKeyWidget(node),
+            });
+          }
+        } catch (_) {
+          /* 메뉴 추가 실패는 무시 */
+        }
+      };
+    }
 
     const originalConnections = nodeType.prototype.onConnectionsChange;
     if (!nodeType.prototype._goriPatched_onConnectionsChange) {
@@ -913,6 +1032,8 @@ app.registerExtension({
 export {
   imageNumber, countImageSockets, lastLinkedImageNumber, lastImageSocketIndex,
   isDraggingLink, updateVisibility, restoreAll, topicElement, shrinkNewNode,
+  applyFixedTextareaHeight, textareaOneLineHeight,
+  ensureFixedTextareaDrawHook, FIXED_TEXTAREA_LINES,
   findApiKeyWidget, maskApiKeyWidget, clearApiKeyWidget, apiKeyWidgetIndex,
   hookSerializeBlankApiKey, hookApiKeyPayloadGuard,
   blankApiKeyInWorkflowData, hookGraphSerializeBlankApiKey,

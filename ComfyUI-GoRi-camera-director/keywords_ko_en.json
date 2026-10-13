@@ -1,8 +1,8 @@
 {
-  "_comment": "auto 티어용 최소 한/영 병기 사전. 위에서부터 대응하는 첫 항목을 채택한다. 값은 목록 A의 한글 라벨과 일치해야 한다.",
+  "_comment": "auto 티어용 최소 한/영 병기 사전. 위에서부터 대응하는 첫 항목을 채택한다. 값은 목록 A의 한글 라벨과 일치해야 한다. shot·lens 에는 프레이밍/광학 어휘만 넣는다 - 주제 서술어(얼굴·표정·인물·face 등)는 긴 프롬프트에서 오탐한다(2026-10-11 실측).",
   "shot": [
     {"value": "극접 (ECU)", "keywords": ["클로즈업 극접", "extreme close"]},
-    {"value": "근접 (CU)", "keywords": ["얼굴", "표정", "인물", "클로즈업", "웃음", "눈물", "아기", "portrait", "face", "closeup", "close-up", "headshot"]},
+    {"value": "근접 (CU)", "keywords": ["클로즈업", "closeup", "close-up", "headshot", "portrait"]},
     {"value": "중근접 (MCU)", "keywords": ["반신", "shoulders", "medium close"]},
     {"value": "전신 (FS)", "keywords": ["전신", "full body", "standing figure"]},
     {"value": "극원경 (EWS)", "keywords": ["항공", "드론", "스카이라인", "aerial", "drone", "bird's eye"]},
@@ -10,7 +10,7 @@
   ],
   "lens": [
     {"value": "100mm 매크로 (macro)", "keywords": ["제품", "패키지", "화장품", "주얼리", "시계", "디테일 클로즈", "product shot", "packaging", "jewelry", "macro"]},
-    {"value": "85mm f/1.4 (bokeh)", "keywords": ["인물", "모델", "초상", "반려동물", "강아지", "고양이", "portrait", "model", "head shot", "puppy", "kitten"]},
+    {"value": "85mm f/1.4 (bokeh)", "keywords": ["모델", "초상", "반려동물", "강아지", "고양이", "portrait", "model", "head shot", "puppy", "kitten"]},
     {"value": "24mm 광각 (wide)", "keywords": ["건축", "실내", "인테리어", "풍경", "architecture", "interior", "landscape"]},
     {"value": "14mm 초광각 (ultra-wide)", "keywords": ["초광각", "강렬한 원근", "ultra wide", "fisheye"]}
   ],

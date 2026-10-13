@@ -191,8 +191,8 @@ AMPLITUDE = {"약간 (subtle)": "subtle", "보통 (normal)": "", "강하게 (dra
 # 규칙(auto) tier 기본값 — 키워드 미매칭 시 사용
 DEFAULTS = {
     "shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)",
-    "composition": "삼분할 (rule of thirds)", "lighting": "흐린 부드러움 (soft overcast)",
-    "grade": "시네마틱 필릭 (cinematic)", "motion": "없음 (none)",
+    "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)",
+    "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)",
     "motion2": "없음 (none)",
     "speed": "보통 (normal)", "amplitude": "약간 (subtle)",
 }

@@ -113,7 +113,8 @@ def subject_spacing(image) -> dict:
         h, w = arr.shape[0], arr.shape[1]
         if arr.max() > 1.5:
             arr = arr / 255.0
-        # 저해상도 격자로 축소 (평균 풀링). 가로를 세로보다 2배 해상도로 둔다
+        # 저해상도 격자로 축소 (linspace 인덱스 표본 — 아래 설명 참조).
+        # 가로를 세로보다 2배 해상도로 둔다
         # — 간격이 작으므로 가로 해상도가 곧 측정 정밀도다.
         # 주의: gh/gw 는 **셀 개수**, rows/cols 는 **셀 픽셀 크기**다.
         # (실측에서 둘을 뒤바꾸어 8x16 격자로 간격을 못 잰 결함 발생)
@@ -145,8 +146,9 @@ def subject_spacing(image) -> dict:
         cmax = float(col.max())
         if cmax <= 0:
             return out
-        # 두 겹 기준: core(50%)는 덩어리 중심, edge(15%)는 덩어리 경계.
-        # 간격은 core가 아니라 **edge 기준으로 끊긴 두 덩어리 사이의 폭**으로 잰다.
+        # 기준은 **edge 하나**다: edge_thr = max(0.4, cmax*0.15) — 덩어리 경계.
+        # (core(50%) 는 두지 않는다.) 간격은 core 가 아니라 **edge 기준으로
+        # 끊긴 두 덩어리 사이의 폭**으로 잰다.
         # (core로 재면 경계 셀이 통과해 간격이 0으로 계산된다 — 실측 오류)
         edge_thr = max(0.4, cmax * 0.15)
         runs, cur = [], None

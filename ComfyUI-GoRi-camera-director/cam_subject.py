@@ -16,13 +16,32 @@ __all__ = [
 ]
 
 
+# 의상 어휘의 **단일 출처** (2026-10-11 검토). OUTFIT_RELATION_PATTERNS 와
+# CLOTHING_ROLE_PATTERNS(아래)가 같은 목록을 써야 한다 — 두 곳에 따로 적어
+# 두면 한쪽만 늘어나 드리프트한다. 실측: 패턴 쪽에 "의장·생활복" 이 없어
+# "이미지 2의 생활복으로 갈아입혀" 가 outfit_transfer=False 로 떨어졌고,
+# 그 결과 _is_human_subject 가 False 가 되어 **인물 가드가 전부 사라졌다**.
+# 그래서 정의를 여기(첫 사용처 앞)로 올리고 두 곳이 이 상수를 참조한다.
+_KO_CLOTHING_WORDS = (
+    "의상|옷|옷차림|의장|생활복|패션|드레스|셔츠|블라우스|바지|원피스"
+    "|코트|아우터|재킷|자켓|슈트|정장|한복|웨딩드레스|구두|신발"
+)
+
+
+_EN_CLOTHING_WORDS = "outfit|clothing|wardrobe|dress|shirt|coat|garment|apparel"
+
+
+CLOTHING_WORDS = _KO_CLOTHING_WORDS + "|" + _EN_CLOTHING_WORDS
+
+
 OUTFIT_RELATION_PATTERNS = (
     # English: clothing/outfit explicitly comes from a reference image.
     r"\b(?:outfit|clothing|wardrobe|dress|shirt|coat|apparel|garment)\b.{0,24}\b(?:from|reference|using|with)\s+(?:reference\s+)?(?:image|img)\s*_?\d+",
     r"\b(?:image|img)\s*_?\d+\b.{0,24}\b(?:is|as|contains|shows)\s+(?:the\s+)?(?:outfit|clothing|wardrobe|dress|shirt|coat|apparel|garment)\b",
     # Korean: 이미지 N의 의상/옷을 입히거나/바꾸는 명시적 의도.
-    r"(?:image|img|이미지)\s*_?\d+\s*(?:의|에|에서)?\s*(?:의상|옷|패션|드레스|셔츠|블라우스|바지|원피스|코트|아우터|재킷|자켓|슈트|정장|한복|웨딩드레스|구두|신발)",
-    r"(?:의상|옷|패션|드레스|셔츠|블라우스|바지|원피스|코트|아우터|재킷|자켓|슈트|정장|한복|웨딩드레스|구두|신발).{0,24}(?:image|img|이미지)\s*_?\d+",
+    # 의상 어휘는 _KO_CLOTHING_WORDS 하나만 본다(드리프트 방지).
+    r"(?:image|img|이미지)\s*_?\d+\s*(?:의|에|에서)?\s*(?:" + _KO_CLOTHING_WORDS + r")",
+    r"(?:" + _KO_CLOTHING_WORDS + r").{0,24}(?:image|img|이미지)\s*_?\d+",
     r"(?:입히|입게|바꾸|사용|적용|참고).{0,28}(?:의상|옷|드레스|패션|(?:image|img|이미지)\s*_?\d+)",
 )
 
@@ -104,7 +123,14 @@ def _is_human_subject(text: str) -> bool:
         # 실측 오탐(2026-09-28)을 이 형제 함수가 그대로 달고 있었다.
         for animal in ANIMAL_SUBJECT_KEYWORDS:
             if _ascii_only(animal):
-                if animal in t:
+                # 왜(Why) 영문도 경계 판정인가 (2026-10-11 실측): raw `in` 이면
+                # "dog" 이 "dogmatic", "owl" 이 "bowl", "lion" 이 "rebellious",
+                # "rat" 이 "pirate" 안에서 잡혀 **사람 장면이 동물로 뒤집히고**
+                # _is_human_subject 가 False 가 되어 인물 가드가 통째로 사라진다.
+                # 실측: "wear the outfit from image 2, a dogmatic pose" →
+                # human=False 이고 animal 도 False 라 어느 가드도 안 붙었다.
+                # 형제 함수 _is_animal_subject 와 같은 _ascii_word_present 로 맞춘다.
+                if _ascii_word_present(t, animal):
                     return False
             elif _ko_word_present(t, animal):
                 return False
@@ -317,6 +343,20 @@ def _is_multi_person_request(text: str) -> bool:
     return any(keyword in t for keyword in MULTI_PERSON_KEYWORDS)
 
 
+# 창 안에 **다른 슬롯 참조**가 끼면 그 인물 단어는 그 슬롯의 것이다 (2026-10-13 실측).
+# 왜(Why) 필요한가: "The woman in image 1 is sitting on a chair in image 2." 가
+# 창(40자)이 "image 1" 을 넘어가면서 **"image 2 에 여자가 있다"** 로 오판됐다.
+# 참조는 image_1=인물 / image_2=의자였고, 그 결과 프롬프트에
+# "person two from reference image 2" 와 "sitting on a chair in image 2" 가
+# **동시에** 들어가 정면 모순이 됐다(실측 거리 37자 < 40자 창).
+# 규칙: 인물 단어와 슬롯 참조 사이에 다른 슬롯 참조가 있으면 그 쌍은 버린다.
+# 재현: "The woman in image 1 sits on a chair in image 2." -> 이제 [] (오판 해소).
+#       "woman in image 1 and woman in image 2" -> 여전히 [2] (정상 유지).
+_NO_SLOT_REF = (r"(?:(?!\b(?:image|img|이미지)\s*_?\s*\d"
+                r"|\d+\s*(?:번|번째)\s*(?:image|img|이미지))"
+                r"[^,，.。;；!！?？\n])")
+
+
 SECOND_PERSON_PATTERNS = (
     # image/이미지 표기 혼용 대응: "Image 3의 남성" 같은 한영 혼합도 잡는다.
     # 주의: 한글 조사(의/에)는 \w 취급이라 2\b 경계가 안 맞으므로 (?![0-9])를 쓴다.
@@ -324,16 +364,17 @@ SECOND_PERSON_PATTERNS = (
     # 비탐욕 창 + 절 차단: 창이 쉼표/식별자를 넘어 다음 슬롯의 단어를 잘못 잡거나
     # (이미지 2번 핸드백, 이미지 3번 남성 → 3번 누락/2번 오검출)
     # finditer의 비중복 소비 때문에 건너뛰는 후보가 생기는 것을 동시에 막는다.
-    r"\b(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])[^,，.。;；!！?？\n]{0,40}?\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b",
-    r"\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b[^,，.。;；!！?？\n]{0,40}?\b(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
-    r"(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])[^,，.。;；!！?？\n]{0,20}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)",
-    r"(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)[^,，.。;；!！?？\n]{0,20}?(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
+    # 창은 `_NO_SLOT_REF` — 다른 슬롯 참조를 넘지 않는다(2026-10-13).
+    r"\b(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])" + _NO_SLOT_REF + r"{0,40}?\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b",
+    r"\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b" + _NO_SLOT_REF + r"{0,40}?\b(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
+    r"(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])" + _NO_SLOT_REF + r"{0,20}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)",
+    r"(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)" + _NO_SLOT_REF + r"{0,20}?(?:image|img|이미지)\s*_?\s*([2-9]|10)(?![0-9])",
     r"두\s*번째\s*(?:사람|남자|남성|여자|여성|인물)",
     r"second\s+(?:person|man|woman|male|female)",
     # 번호 선행형: "2번 이미지의 남성이" — 위 4개 패턴은 모두 이미지 표기가
     # 앞에 오는 구문만 커버한다. 자연스러운 "N번 이미지" 표현을 놓치면
     # 두 번째 인물이 보조 역할(배경/소품)로 오분류된다.
-    r"([2-9]|10)\s*(?:번|번째)\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*[^,，.。;；!！?？\n]{0,20}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)",
+    r"([2-9]|10)\s*(?:번|번째)\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*" + _NO_SLOT_REF + r"{0,20}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람)",
     r"([2-9]|10)\s*(?:번|번째)\s*(?:image|img|이미지)\s*(?:의|에|에서|은|는)?\s*(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person)\b",
     # 번호 **나열**형: "1번과 2번 인물이", "2번·3번", "image 1 and image 2".
     # 위 패턴들은 "2번 이미지의 남성이"처럼 **한 슬롯만 지칭**하는 구문만
@@ -347,7 +388,7 @@ SECOND_PERSON_PATTERNS = (
     # 인용한다. 주석은 "2개를 모두 수집" 이라 써 두고 코드는 한 개만
     # 수집하는 주석-코드 불일치였다.
     r"([1-9]|10)\s*(?:번|번째)\s*(?:와|과|및|그리고|·|,|、|\+)\s*([2-9]|10)\s*(?:번|번째)?[^,，.。;；!！?？\n]{0,16}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람|커플|쌍)",
-    r"\b(?:image|img)\s*_?\s*([1-9]|10)\s*(?:and|&|,)\s*(?:image|img)?\s*_?\s*([2-9]|10)\b[^,，.。;；!！?？\n]{0,24}?\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person|people|couple)\b",
+    r"\b(?:image|img)\s*_?\s*([1-9]|10)\s*(?:and|&|,)\s*(?:image|img)?\s*_?\s*([2-9]|10)\b" + _NO_SLOT_REF + r"{0,24}?\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person|people|couple)\b",
 )
 
 
@@ -368,6 +409,13 @@ _KO_OBJECT_WORDS = (
     "가방|핸드백|백팩|에코백|숄더백|클러치백|손목시계|시계|목걸이|반지|귀걸이"
     "|안경|선글라스|모자|벨트|스카프|목도리|장갑|우산|책|컵"
     "|방패|꽃다발|소품|오브젝트|제품|물건|구급상자|마네킹"
+    # 가구 (2026-10-13 실측). 왜(Why) 없으면 안 되나: "이미지 2의 의자" 처럼
+    # 정확히 지정해도 사물로 분류되지 않아 **그 슬롯이 두 번째 인물로 남는다**.
+    # 실측: "The woman in image 1 is sitting on a chair in image 2." 에서
+    # image_2(의자)가 persons 에 들어가 프롬프트에 "person two from reference
+    # image 2" 가 나갔다 — 같은 프롬프트의 "sitting on a chair in image 2" 와
+    # 정면 모순. 같은 파일 715/722 줄은 bench/chair 를 이미 알고 있었다(목록 불일치).
+    "|의자|벤치|침대|소파|테이블|책상|스툴|탁자|선반|가구"
 )
 
 
@@ -375,6 +423,8 @@ _EN_OBJECT_WORDS = (
     "bag|handbag|backpack|purse|watch|wristwatch|necklace|ring|earrings"
     "|glasses|sunglasses|hat|cap|belt|scarf|gloves|umbrella|book"
     "|prop|object|product"
+    # 가구 (2026-10-13). 위 한글 목록과 같은 이유 — 짝을 맞춰 둔다.
+    "|chair|bench|bed|sofa|couch|table|desk|stool|shelf|furniture"
 )
 
 
@@ -390,33 +440,30 @@ _TEMPERED_GAP = (r"(?:(?!남성|남자|여성|여자|인물|사람"
 
 # 의상 역할 어휘 + 슬롯 검출. 왜(Why): outfit 게이트가 "의상 의도 = 모든 duo 소멸"
 # (구버전)이 아니라 "의상 슬롯만 제외"로 작동하려면 슬롯 번호를 잡아야 한다
-# (정밀 검토 발견 #3).
-_KO_CLOTHING_WORDS = (
-    "의상|옷|옷차림|의장|생활복|패션|드레스|셔츠|블라우스|바지|원피스"
-    "|코트|아우터|재킷|자켓|슈트|정장|한복|웨딩드레스|구두|신발"
-)
-
-
-_EN_CLOTHING_WORDS = "outfit|clothing|wardrobe|dress|shirt|coat|garment|apparel"
-
-
-CLOTHING_WORDS = _KO_CLOTHING_WORDS + "|" + _EN_CLOTHING_WORDS
+# (정밀 검토 발견 #3). 어휘(_KO_CLOTHING_WORDS·_EN_CLOTHING_WORDS·CLOTHING_WORDS)는
+# 모듈 위쪽 OUTFIT_RELATION_PATTERNS 앞에서 한 번만 정의한다(2026-10-11 드리프트 수정).
 
 
 def _role_patterns(words: str, en_words: str):
-    """역할(사물/의상) 슬롯 검출 4패턴 골격. 단어만 주입한다.
+    """역할(사물/의상) 슬롯 검출 5패턴 골격. 단어만 주입한다.
 
     왜(Why): 사물·의상 패턴은 절 차단 규칙이 동일하다. 형태:
     1) "이미지 2의 핸드백" (조사 혼용 대응)
     2) "핸드백 이미지 3" — 문장부호 차단(쉼표 너머 오인 방지) + 사람 단어
        차단(창 안 사람 단어가 있으면 그 슬롯은 사람 절 소속)
     3) 영문 "bag as image 2"형, 4) 영문 "image 3 shows a book"형.
+    5) "2번 이미지 의자" — 숫자가 먼저 오는 형태(2026-10-13 실측).
+       왜(Why) 추가: 사용자가 "2번 이미지 의자에 앉아있다"처럼 쓰면
+       기존 4패턴은 "이미지"가 앞에 와야 매칭돼서 놓친다. 그 결과 의자
+       슬롯이 사물로 분류되지 않고 두 번째 인물로 남아 프롬프트에
+       "person two from reference image 2" 가 나가 의도와 정면 모순.
     """
     return (
         r"(?:image|img|이미지)\s*_?\s*(\d+)(?![0-9])\s*(?:번)?\s*(?:의|에|에서)?\s*(?:" + words + r")",
         r"(?:" + words + r")" + _TEMPERED_GAP + r"(?:image|img|이미지)\s*_?\s*(\d+)(?![0-9])",
         r"\b(?:" + en_words + r")\b" + _TEMPERED_GAP + r"\b(?:from|in|on|as|using|reference)\s+(?:reference\s+)?(?:image|img)\s*_?\s*(\d+)(?![0-9])",
         r"\b(?:image|img)\s*_?\s*(\d+)(?![0-9])\b" + _TEMPERED_GAP + r"\b(?:is|as|shows|contains)\s+(?:a|an|the)?\s*(?:" + en_words + r")\b",
+        r"(\d{1,2})\s*(?:번|번째)?\s*(?:image|img|이미지)\s*(?:의|에|에서)?\s*(?:" + words + r")",
     )
 
 
@@ -518,7 +565,34 @@ _KO_POSE_WORDS = ("포즈|자세|스탠스|몸매|동작|"
 _EN_POSE_WORDS = "pose|posture|stance|body position"
 
 
-POSE_ROLE_PATTERNS = _role_patterns(_KO_POSE_WORDS, _EN_POSE_WORDS) + (
+# 포즈 **역할명사**만 모은 집합. 상태·동작 어휘(앉/sitting/서/standing …)는 뺀다.
+# 왜(Why) 따로 두나 (2026-10-11 실측 결함): "포즈 … 이미지 N" 처럼 **라벨이 뒤에
+# 오는** 패턴에 상태·동작 어휘까지 허용하면, 영문 어순에서 사용자의 **행동 서술**
+# ("… is sitting on the chair in image 2.") 이 "그 이미지에서 자세를 가져오라" 는
+# **역할 지정으로 오판**된다. 그러면 의자 같은 사물 슬롯에 "reproduce the body
+# pose … never their clothing" 이 나가 **옷 없는 인체를 그리라는 지시**가 되고,
+# 결과가 인물 2명 융합으로 무너졌다(실측). 역할 지정은 역할명사로만 온다.
+_POSE_ROLE_NOUNS = ("포즈|자세|스탠스|몸매|동작"
+                    "|pose|posture|stance|body ?position")
+
+
+# _role_patterns 는 4패턴을 한 벌로 만든다(1=라벨앞, 2=라벨뒤, 3·4=영문).
+# 포즈는 2번만 어휘를 좁혀야 해서 골격을 나눠 받는다.
+_POSE_BASE_PATTERNS = _role_patterns(_KO_POSE_WORDS, _EN_POSE_WORDS)
+
+
+POSE_ROLE_PATTERNS = (
+    # 1) "이미지 2의 포즈" / "이미지 2의 앉은 자세" — 라벨이 **앞선다**. 라벨과
+    #    역할어 사이에 자유 구간이 없어 오탐 위험이 낮으므로 상태 묘사까지 허용한다.
+    _POSE_BASE_PATTERNS[0],
+    # 2) "포즈 … 이미지 2" — 라벨이 **뒤에** 온다. 사이에 최대 24자 자유 구간이
+    #    있어 행동 서술을 역할 지정으로 삼켰다(위 주석). 여기만 역할명사로 좁힌다.
+    r"(?:" + _POSE_ROLE_NOUNS + r")" + _TEMPERED_GAP
+    + r"(?:image|img|이미지)\s*_?\s*(\d+)(?![0-9])",
+    # 3·4) 영문 전용 — 이미 역할명사(_EN_POSE_WORDS)만 쓴다.
+    _POSE_BASE_PATTERNS[2],
+    _POSE_BASE_PATTERNS[3],
+) + (
     # "2번 이미지의 포즈" — 번호가 앞서는 한국어 구문. 기존 4패턴은
     # "이미지 2의 포즈"(뒤에 온다)만 커버해서 자연스러운 표현을 놓쳤다.
     # 슬롯 번호는 반드시 캡처 그룹이어야 한다(_collect_role_slots 계약).
@@ -602,7 +676,8 @@ def _has_outfit_apply_verb(text: str) -> bool:
 _EN_GARMENT_WORDS = (
     r"outfit|clothing|clothes|dress|gown|sweater|skirt|shirt|blouse|"
     r"pants|trousers|jeans|jacket|coat|suit|uniform|wardrobe|garment|"
-    r"apparel|top|bottoms|knit|denim"
+    r"apparel|top|bottoms|knit|denim|shoe|shoes|sandal|sandals|boot|boots|"
+    r"heel|heels|sneaker|sneakers|slipper|slippers|loafer|flats|footwear"
 )
 
 
@@ -628,9 +703,9 @@ def _is_text_outfit_change(text: str) -> bool:
         return False
     low = t.lower()
     # 명시 유지는 교체가 아니다 — 먼저 제외한다.
-    if re.search(r"\b(?:same|keep|preserve|maintain)\b[^.]{0,24}?\b(?:outfit|clothing|clothes|dress)\b", low):
+    if re.search(r"\b(?:same|keep|preserve|maintain)\b[^.]{0,24}?\b(?:outfit|clothing|clothes|dress|shoes|footwear)\b", low):
         return False
-    if re.search(r"(?:같은|원래|기존)\s*(?:옷|의상|드레스|차림)", t):
+    if re.search(r"(?:같은|원래|기존)\s*(?:옷|의상|드레스|차림|신발|구두|단화|샌들)", t):
         return False
     # 영어: 교체 동사 + 의류 ("replace A with B dress", "change into ...")
     # 왜(Why) 굴절형을 넣나: `\bwearing\b` 은 `\bwear\b` 에 안 걸린다.
@@ -648,10 +723,22 @@ def _is_text_outfit_change(text: str) -> bool:
     # 한국어: 교체 동사 + 의류 (슬롯 불필요)
     if re.search(_OUTFIT_VERB, low) and re.search(
             r"(?:의상|옷|옷차림|드레스|셔츠|블라우스|바지|원피스|코트|재킷|자켓|슈트|정장|한복|"
-            r"outfit|clothing|dress|clothes)", low):
+            r"신발|구두|샌들|단화|운동화|하이힐|부츠"
+            r"|outfit|clothing|dress|clothes|shoes|sandals)", low):
+        return True
+    # 한국어: 착용 묘사("입고", "신고") + 의류·신발. 영어의 wearing+garment 와
+    # 같은 근거(2026-10-02 결정): 현재형 착용 서술이 가장 흔한 교체 표현이다.
+    # 왜(Why) 별도 분기가 필요한가: _OUTFIT_VERB 는 교체 계열(갈아입히다·교체)
+    # 만 담고 있어 "단화를 신고" 처럼 **착용 동사로만** 말한 신발 교체를 놓친다.
+    # 놓치면 identity anchor 가 "Do not change any shoe" 를 그대로 내보내
+    # 사용자 지시와 정면 충돌한다(2026-10-13 실측: 흰샌 단화 지시가 일부만 반영).
+    if re.search(r"(?:입고|입은|신고|신은)", t) and re.search(
+            r"(?:의상|옷|옷차림|드레스|셔츠|블라우스|바지|원피스|코트|재킷|자켓|슈트|정장|한복|"
+            r"신발|구두|샌들|단화|운동화|하이힐|부츠"
+            r"|outfit|clothing|dress|clothes|shoes|sandals)", t):
         return True
     # 한국어: "다른 옷", "새 드레스" (명시 교체)
-    if re.search(r"(?:다른|새|새로운|완전히 다른)\s*(?:옷|의상|드레스|차림|outfit|dress)", t):
+    if re.search(r"(?:다른|새|새로운|완전히 다른)\s*(?:옷|의상|드레스|차림|신발|구두|단화|샌들|outfit|dress)", t):
         return True
     return False
 

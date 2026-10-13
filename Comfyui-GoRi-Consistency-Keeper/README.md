@@ -11,15 +11,33 @@
 ## 배선
 
 ```text
-LoadImage → VAE Encode ── original_latent ──→ ┐
-(GoRi) Camera Director Skills ── reference_latent_out ── camera_latent ──→ (GoRi) Consistency Keeper ── latent_out ──→ VAE Decode → SaveImage
+LoadImage → VAE Encode ── camera_latent ──→ ┐
+Camera Director ── reference_latent_out ── camera_latent ──→ (GoRi) Consistency Keeper ── latent_out ──→ VAE Decode → SaveImage
 KSampler ── LATENT ── sampled_latent ──→ ┘
 같은 VAE ── vae ──→ ┘ (인체 마스크용, 선택. 미연결이면 전역 당김)
+Camera Director ── prompt_out ── camera_prompt ──→ ┘ (의상 교체·장면 변경 지시 전달, 선택)
 ```
 
-`original_image` (IMAGE, 선택)를 연결하면 원본 기준을 Latent 대신
+`original_image` (`image_1`, 선택)를 연결하면 원본 기준을 Latent 대신
 이미지로 직접 인코딩해 세운다. Qwen Edit 의 latent 출력은 전부 0 인
 빈 캔버스라 Latent 기준이 무의미할 때 이쪽이 정확하다(우선 적용).
+
+## 참조 이미지 슬롯 (`image_1`~`image_10`, 선택)
+
+카메라 노드에 연결한 **같은 이미지를 같은 번호에** 연결한다. 단자는
+`image_1`을 연결하면 `image_2`가 나타나고, 연결할 때마다 하나씩 늘어난다.
+
+| 슬롯 | 역할 |
+|---|---|
+| `image_1` | 주인공 (신원 기준) |
+| `image_2`~`image_8` | 보조 참조 — 전역 DNA 당김에 함께 쓰인다 |
+| `image_9` | 외형 참조 (상체 박스) |
+| `image_10` | 외형 참조 (하체 박스) |
+
+`camera_prompt`에는 Camera Director의 `prompt_out`을 연결한다. "의상을
+갈아입혀", "배경을 바꿔" 같은 지시가 있으면 키퍼가 읽고 반영한다
+(의상 교체면 얼굴 위주로, 장면 변경이면 배경 당김을 생략). 비워두면
+전체 몸 당김(기본 동작)이다.
 
 ## 위젯
 
@@ -90,6 +108,19 @@ Camera Director가 프롬프트에 넣는 "손가락 5개" 같은 개수 지시�
 한계: 원본에 디테일이 아예 없으면 건드리지 않습니다(원본을 신뢰할 수 없으면
 복원도 틀립니다). MediaPipe가 있어야 landmark를 잡으므로, 미설치 시 안내
 한 번 후 기존 동작으로 돌아갑니다.
+
+## 손 모양 자동 보정 (setting 불필요)
+
+뭉치거나 겹친 손가락을 **살짝 펴는 방향으로** 최대 10번 당겨본다. 95점이
+목표이며, 못 미쳐도 그중 가장 나은 상태를 적용한다. 콘솔 예:
+
+```
+[GoRi Consistency Keeper] ⚠ 손 물리 위반 (점수=33.3/100 < 95): ['끝점 뭉침(붙음)', '겹침:1-2']
+[GoRi Consistency Keeper] 손 미세 당김 적용 (7회, 최종 점수=100.0/100)
+```
+
+한계: 손가락 **개수**는 만들지 못한다 (뭉친 것을 펴는 정도). 10번 당겨도
+95점 미만이면 최선 상태를 적용하고 "미도달" 경고를 남긴다.
 
 ## 캐릭터 시트 참조 자동 판별 (setting 불필요)
 
@@ -162,6 +193,11 @@ latent 블렌드는 같은 구도에서만 성립한다:
 1. 기준 이미지를 결과물과 같은 구도·포즈로 맞춘다 (가장 확실)
 2. 강도를 0.1~0.15까지 낮춘다
 3. 콘솔에 "구도가 많이 다름" 경고가 뜨면 위 둘 중 하나 실행
+
+배경(사람 밖 영역)도 원본 쪽으로 함께 당겨진다. 참조와 배경 구도가 어긋나면
+(예: 의자 위치가 다름) 어긋난 사물이 반투명하게 찍힐 수 있다 — 위 1번(구도
+맞추기)이 답이다. `camera_prompt`로 장면 변경을 지시하면 배경 당김은 자동으로
+생략된다.
 
 ## 문제 해결
 

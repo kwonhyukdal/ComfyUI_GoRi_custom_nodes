@@ -174,9 +174,10 @@ def _encode_image_ref(vae, image):
     the canvas, so encoding as-is lets the VAE pick the grid. That removes the
     need to know the factor and removes the wrong-size path entirely.
 
-    왜(Why) ComfyUI 의 VAEEncode 와 같은 순서인가: `movedim(-1, 1)` 로
-    (B,H,W,C) 를 (B,C,H,W) 로 옮기고 앞 3채널만 쓴다. ComfyUI 고유 규약이라
-    순서를 바꾸면 VAE 가 조용히 이상한 값을 낸다.
+    왜(Why) 여기서 전치하지 않나 (2026-10-01 실측): ComfyUI 의 `VAE.encode` 는
+    **(B,H,W,C) 를 받아 내부에서** `movedim(-1, 1)` 로 전치한다. 여기서 미리
+    전치하면 **전치가 두 번** 되어 크롭까지 망가진다(아래 본문 주석 참조).
+    그래서 앞 3채널만 취해 그대로 넘긴다.
 
     크기가 비교 기준과 다르면 `_match_spatial` 이 보간으로 맞춰 준다. 그러면
     기준 자체가 리샘플된 값이 되어 "얼마나 다른가" 에 리샘플 차이가 섞이지만,
@@ -211,13 +212,13 @@ def _encode_image_ref(vae, image):
         return lat
     except Exception as _ie:
         # 왜(Why) 로그를 여기 남기지 않나 (2026-10-04 감사 52차): 유일한
-        # 호출부(run 의 original_image 분기)가 실패 시 "인코딩 실패 —
+        # 호출부(run 의 image_1 분기)가 실패 시 "인코딩 실패 —
         # original_latent 경로로 진행합니다" 를 항상 남긴다. 여기서 또
         # 남기면 한 실패에 경고 2개가 찍힌다.
         # 갱신 (2026-10-07 감사): 호출부의 경고는 **원인을 모른다** — 원인
         # 한 줄은 중복이 아니라 보완이다. 프로세스당 한 번만 말한다.
         _note_once("encode_image_ref",
-                   "[GoRi Consistency Keeper] ⚠ original_image 인코딩 예외 "
+                   "[GoRi Consistency Keeper] ⚠ image_1 인코딩 예외 "
                    "(%s: %s)" % (type(_ie).__name__, str(_ie)[:80]))
         _release_vram()
         return None

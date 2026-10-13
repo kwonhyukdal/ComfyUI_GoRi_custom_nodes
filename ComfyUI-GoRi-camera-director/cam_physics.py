@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 
 try:
@@ -132,6 +133,27 @@ STATIC_SCENE_KEYWORDS = (
 _EN_INFLECT = r"(?:s|es|ed|d|ing|en|er|ers|est|ness|ly)?"
 
 
+@functools.lru_cache(maxsize=None)
+def _kw_regex(kw: str):
+    """영문 키워드 1개의 판정 정규식을 **한 번만** 만든다.
+
+    왜(Why) 캐시인가 (2026-10-11 검토): 키워드 목록은 모듈 상수라 고정인데,
+    예전 `_kw_hit` 은 호출마다 `"|".join(alts)` 로 패턴 문자열을 새로 만들었다.
+    물리 가드는 실행당 최대 8규칙 × 키워드 수십 개를 훑으므로 그 재구성이
+    전부 낭비다. 키워드 문자열이 곧 캐시 키라 결과가 항상 같다.
+
+    왜(Why) `len(kw) > 1`·`if kw` 가드인가: kw="e" 면 `kw[:-1]` 이 빈 문자열이라
+    정규식에 **빈 대안**이 생겨 아무 단어 경계나 매치된다(오탐). 빈 kw 는
+    `kw[-1]` 에서 IndexError 다. 둘 다 막는다.
+    """
+    alts = [re.escape(kw)]
+    if kw.endswith("e") and len(kw) > 1:
+        alts.append(re.escape(kw[:-1]))
+    if kw[-1].isalpha():
+        alts.append(re.escape(kw + kw[-1]))
+    return re.compile(r"\b(?:" + "|".join(alts) + r")" + _EN_INFLECT + r"\b")
+
+
 def _kw_hit(text: str, keywords) -> bool:
     """키워드가 실제 자리에 쓰였는지 판정한다.
 
@@ -142,17 +164,13 @@ def _kw_hit(text: str, keywords) -> bool:
       - 단어 경계가 막는 것: tripod/waterfall/Europe/threshold/graceful
     """
     for kw in keywords:
+        if not kw:
+            continue
         if not _ascii_only(kw):
             if kw in text:
                 return True
             continue
-        alts = [re.escape(kw)]
-        if kw.endswith("e"):
-            alts.append(re.escape(kw[:-1]))
-        if kw[-1].isalpha():
-            alts.append(re.escape(kw + kw[-1]))
-        if re.search(r"\b(?:" + "|".join(alts) + r")" + _EN_INFLECT + r"\b",
-                     text):
+        if _kw_regex(kw).search(text):
             return True
     return False
 

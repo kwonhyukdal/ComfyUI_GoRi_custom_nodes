@@ -24,7 +24,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.16"
+__version__ = "1.9.21"
 
 
 import json
@@ -60,6 +60,9 @@ try:
     from .cam_spacing import *  # noqa: F403
     from .cam_sheet import *  # noqa: F403
     from .cam_llm import *  # noqa: F403
+    from .cam_translate import *  # noqa: F403
+    from .cam_translate import _has_cjk
+    from .cam_synopsis import *  # noqa: F403
 except ImportError:  # 스탠드얼론/테스트 실행용
     from cam_util import *  # noqa: F403
     from cam_tables import *  # noqa: F403
@@ -70,6 +73,9 @@ except ImportError:  # 스탠드얼론/테스트 실행용
     from cam_spacing import *  # noqa: F403
     from cam_sheet import *  # noqa: F403
     from cam_llm import *  # noqa: F403
+    from cam_translate import *  # noqa: F403
+    from cam_translate import _has_cjk
+    from cam_synopsis import *  # noqa: F403
 
 
 def _latent_mp(latent_image) -> float | None:
@@ -126,15 +132,42 @@ def preflight_warnings(_topic: str, camera: dict, latent_mp=None,
         if denoise and not 0.0 < denoise <= 1.0:
             msgs.append(f"denoise={denoise} 범위 이탈 (0 초과 1 이하)")
         elif denoise and denoise > 0.9:
-            # 왜(Why): "주의"만으로는 사용자가 무엇을 바꿔야 하는지 모른다.
-            # 실측에서 denoise=1.0 + 참조 이미지 조합은 다리·팔·어깨 같은
-            # 세부가 필요한 부위부터 뿌옇게 뭉개졌다. denoise는 "얼마나 다시
-            # 그릴 것인가"이므로 낮을수록 원본 픽셀을 보존한다.
-            msgs.append(
-                f"denoise={denoise} 과다 — 원본 픽셀을 거의 안 써서 다시 그립니다. "
-                "참조 이미지의 형태·색·디테일이 살아남으려면 0.6~0.8을 권장 "
-                "(1.0은 완전히 새로 생성 → 다리·팔·어깨·손 같은 세부가 "
-                "먼저 뭉개지고 가구 형태도 원본에서 벗어납니다)")
+            # 왜(Why) steps 로 분기하나 (2026-10-11 실측): 8스텝 증류 LoRA
+            # (Qwen Image 2.1 등)는 부분 denoise 를 못 견뎌 denoise=1.0 이
+            # 의도된 정상값이다. 0.6~0.8 로 낮추면 원본이 아니라 **텍스처
+            # 노이즈만** 가득한 이미지가 나온다(WORK_STATUS 2-3 실측). 반면
+            # 일반(비증류) 스케줄에서는 denoise=1.0 이 참조 픽셀을 버려
+            # 다리·팔·어깨가 뭉개진다. 둘은 처방이 정반대라 같은 문구를
+            # 쓰면 한쪽 사용자를 반드시 망친다. 스텝이 낮으면 증류로 보고
+            # "1.0 이 정상"으로 안내한다.
+            _distill = bool(steps) and steps <= 12
+            if _distill:
+                msgs.append(
+                    f"denoise={denoise} — steps={steps} 저스텝 증류 스케줄은 "
+                    "denoise=1.0 이 정상값입니다 (참조 이미지는 조건부 "
+                    "경로로 들어갑니다). denoise 를 낮추면 부분 denoise 를 "
+                    "못 견뎌 텍스처 노이즈만 남습니다 — 이 워크플로는 그대로 두십시오")
+            else:
+                # 왜(Why): "주의"만으로는 사용자가 무엇을 바꿔야 하는지 모른다.
+                # 실측에서 denoise=1.0 + 참조 이미지 조합은 다리·팔·어깨 같은
+                # 세부가 필요한 부위부터 뿌옇게 뭉개졌다. denoise는 "얼마나 다시
+                # 그릴 것인가"이므로 낮을수록 원본 픽셀을 보존한다.
+                # 갱신 (2026-10-13 실측): 처방(0.6~0.8)이 **모든 모델에 통하지
+                # 않는다.** 사용자가 이 안내대로 0.8 을 넣었더니 이미지가 완전히
+                # 붕괴했다(인물 다중 겹침·다리 부유) — WORK_STATUS 2-3 의 증류
+                # 실패 모드와 같다. 이 노드는 모델이 증류인지 알 수 없다
+                # (UNETLoader·LoRA 는 이 노드의 입력이 아니다). 그래서 처방을
+                # 단정하지 않고 **붕괴 시 되돌릴 곳**까지 함께 말한다.
+                msgs.append(
+                    f"denoise={denoise} 과다 — 원본 픽셀을 거의 안 써서 다시 그립니다. "
+                    "참조 이미지의 형태·색·디테일이 살아남으려면 0.6~0.8을 권장 "
+                    "(1.0은 완전히 새로 생성 -> 다리·팔·어깨·손 같은 세부가 "
+                    "먼저 뭉개지고 가구 형태도 원본에서 벗어납니다). "
+                    "단 증류 모델(저스텝 LoRA)이면 0.6~0.8 에서 이미지가 "
+                    "붕괴합니다(실측 2026-10-13: 인물 다중 겹침·다리 부유). "
+                    "이 노드는 모델이 증류인지 알 수 없으니 한 장씩 비교해 "
+                    "정하십시오 — 붕괴하면 1.0 으로 되돌리고 steps 를 12 이하로 "
+                    "낮추는 쪽이 맞습니다")
     except Exception:
         pass
     return msgs
@@ -149,10 +182,11 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
                        tier="", llm_hint=""):
     """한 실행의 가드 판정을 **한 곳에서** 모아서 돌려준다.
 
-    왜(Why) `_camera`·`_reference_images` 는 받기만 하나: 예전 리팩터 전에는
-    여기서 썼다. 지금 본문은 subject_text·개수·라벨·tier·hint 만 본다.
-    호출부가 전부 positional 이라 안전하다. 시그니처를 줄이면 호출부 2곳과
-    테스트 5곳을 함께 고쳐야 해서 남긴다.
+    왜(Why) `_reference_images` 는 받기만 하나: 예전 리팩터 전에는 여기서
+    썼다. 지금 본문은 subject_text·개수·라벨·tier·hint 와 `_camera`(샷 인지
+    게이트가 읽는 `shot`) 만 본다. `_reference_images` 는 어디서도 쓰지
+    않는다. 호출부가 전부 positional 이라 안전하다. 시그니처를 줄이면
+    호출부 2곳과 테스트 5곳을 함께 고쳐야 해서 남긴다.
 
     왜(Why) 이 함수를 만드는가(2026-09-29):
     `run()` 과 `run_prompt()` 가 같은 가드 판정을 각자 반복하면서 결과를
@@ -170,15 +204,32 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     text = subject_text or ""
     is_human = _is_human_subject(text)
     labels = list(image_labels or [])
-
+    # 왜(Why) 샷 인지 게이트가 필요한가 (2026-10-11 실측): 근접(CU)·극접(ECU)
+    # 샷은 다리·발이 화면에 없다. 그런데 anatomy_count("두 다리, 발가락 5개")·
+    # body_balance("팔·다리 균형")·detail_def("다리 경계")를 그대로 넣으면
+    # 모델이 **화면에 없는 사지를 그려 넣으려 한다** — 사용자가 겪은 "발이
+    # 하나 더 생긴다"의 실제 경로다. 해부 문구는 전신·중경처럼 실제로 그
+    # 부위가 보이는 샷에만 걸어야 한다. 샷이 AUTO거나 비어 있으면(판정 불가)
+    # 보수적으로 켠다 — 꺼서 방어가 사라지는 것보다 낫다.
+    _shot = (_camera if isinstance(_camera, dict) else {}).get("shot", "")
+    _limb_visible = _shot not in FACE_CRITICAL_SHOTS
     # 다중 참조(2장 이상)면 믹스 변형 가드를 양쪽에 자동 첨부.
     mix_guard = image_count >= 2
-    # 인물 신체 발란스: 인물 주제면 참조 유무와 무관하게 상시.
-    body_balance = is_human
-    # 부위별 디테일 경계: 인물 + 참조 이미지 실행일 때만.
+    # 인물 신체 발란스: 인물 주제 + 사지가 보이는 샷. 왜(Why) 샷을 보나
+    # (2026-10-11 실측): 전에는 인물 주제면 상시였는데, 문구에 "arms and
+    # legs of even realistic length" 가 있어 CU/ECU 에서 화면에 없는 다리를
+    # 요구했다. 전신 비율 가드는 사지가 보이는 샷에만 건다.
+    body_balance = is_human and _limb_visible
+    # 부위별 디테일 경계: 인물 + 참조 이미지 실행일 때만. CU/ECU 에서도 켜되
+    # upper 변형(다리·발 문구 제외)을 쓴다 — denoise=1.0 뭉개짐 방어라 끄면
+    # 얼굴·손 질감이 무너진다.
     detail_def = is_human and image_count >= 1
     # 부위 개수(손가락 5·발가락 5·양팔·양다리) 명시. 인물 주제면 항상.
     anatomy_count = is_human
+    # 신발 유지 + 신체-사물 경계: 인물 + 참조 실행이면 항상. CU/ECU 면
+    # upper 변형(화면에 없는 발·다리 문구 제외)을 쓴다.
+    footwear = is_human and image_count >= 1
+    body_object_boundary = is_human and image_count >= 1
     # llm_hint 방어어는 LLM 판정이 실제로 이뤄진 실행에만.
     hint_defense = tier == "llm" and bool((llm_hint or "").strip())
 
@@ -215,11 +266,24 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     remove_item = _remove_item_guard(text)
 
     pos = {
-        "mix_guard": MIX_GUARD_POSITIVE if mix_guard else "",
+        # 노출 요청이면 의상 문장이 빠진 변형을 쓴다 (2026-10-11 실측 결함).
+        # 원문의 "Garments … placed over the main person's body" 는 옷을
+        # 덧입히라는 지시라, 같은 positive 에 함께 붙는 nudity_anatomy_guard
+        # ("…clearly defined natural intimate detail") 와 **정면 충돌**한다.
+        # 실측: 노출 요청 + 참조 2장 → 두 문구가 동시에 positive 에 들어갔다.
+        "mix_guard": ((MIX_GUARD_POSITIVE_BARE if _is_nudity_request(text)
+                       else MIX_GUARD_POSITIVE) if mix_guard else ""),
         "appearance_hair": "",
         "body_balance": BODY_BALANCE_POSITIVE if body_balance else "",
-        "detail_def": DETAIL_DEFINITION_POSITIVE if detail_def else "",
-        "anatomy_count": ANATOMY_COUNT_POSITIVE if anatomy_count else "",
+        "detail_def": ((DETAIL_DEFINITION_POSITIVE if _limb_visible
+                        else DETAIL_DEFINITION_POSITIVE_UPPER)
+                       if detail_def else ""),
+        "anatomy_count": ((ANATOMY_COUNT_POSITIVE if _limb_visible
+                           else ANATOMY_COUNT_POSITIVE_UPPER)
+                          if anatomy_count else ""),
+        "footwear": (_footwear_guard(_shot)[0] if footwear else ""),
+        "body_object_boundary": (_body_object_boundary_guard(_shot)[0]
+                                 if body_object_boundary else ""),
         "furniture": furniture_pos,
         "character_sheet": sheet_text,
         "pose": pose_pos,
@@ -233,7 +297,14 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
             "mix_guard": mix_guard,
             "body_balance": body_balance,
             "detail_def": detail_def,
+            "detail_def_upper": (detail_def and not _limb_visible),
             "anatomy_count": anatomy_count,
+            "anatomy_count_upper": (anatomy_count and not _limb_visible),
+            "footwear": footwear,
+            "footwear_upper": (footwear and not _limb_visible),
+            "body_object_boundary": body_object_boundary,
+            "body_object_boundary_upper": (body_object_boundary
+                                           and not _limb_visible),
             "hint_defense": hint_defense,
             "remove_item": bool(remove_item),
             "furniture": bool(furniture_pos),
@@ -750,6 +821,47 @@ class CameraDirector:
                 llm_extra = (llm_extra.rstrip("., ") + ", " + llm_anatomy
                              if llm_extra.strip() else llm_anatomy)
 
+        # 한국어→영어 번역 (규칙/수동 tier 전용). LLM tier 는 위 블록이 이미 영문화.
+        # assemble 출력(scene)만 번역하고, 판정/경고/프리플라이트는 원본(한글)
+        # 텍스트로 둔다 (한글 마커 기반 가드 판정 보존).
+        # 시놉시스(다문장)면 문장별 구조화로 응집된 영문 장면을 만든다 — 단문/
+        # 번역 불가 시 기존 단일 번역으로 폴백(기존 동작 보존, 조립 로직 비변경).
+        # LLM tier 는 이 분기를 타지 않아 깊은 서사 이해는 LLM 확장 결과가 된다.
+        _scene_assembled = scene
+        if tier != "llm" and scene:
+            if _looks_like_synopsis(scene):
+                _syn = structure_ko_synopsis(scene)
+                _syn_en = _syn.get("scene_en", "")
+                if _syn_en and _syn_en != scene:
+                    _scene_assembled = _syn_en
+                    _h = _syn.get("hints", {}) or {}
+                    _h_log = ", ".join(f"{k}" for k, v in _h.items()
+                                       if v and k != "sentence_count")
+                    _log(f"[Camera Director] 시놉시스 구조화 완료 "
+                         f"({_h.get('sentence_count', 0)}문장 → 영문 장면)"
+                         + (f" · 이해: {_h_log}" if _h_log else ""))
+                else:
+                    # 왜(Why) _has_cjk 가드인가 (2026-10-13 실측): translate_ko_to_en
+                    # 은 비CJK 입력에 None 을 돌려준다(설계상 번역 불필요). 그 None 을
+                    # 실패로 로그하면 영어 topic 매 실행이 "번역 실패" 오경고가 된다 —
+                    # 실제 로그 5연속이 그 오경고였다 (엔진·모델·의존성 전부 정상).
+                    if _has_cjk(scene):
+                        _tr = translate_ko_to_en(scene)
+                        if _tr:
+                            _scene_assembled = _en_normalize(_tr)
+                            _log("[Camera Director] 주제를 영어로 번역했습니다 (tc-big)")
+                        else:
+                            _log("[Camera Director] ⚠ 주제 번역 실패 — 원문 사용")
+                    # else: 영어 원문 그대로 (번역 불필요 — 실패 로그 없음)
+            else:
+                if _has_cjk(scene):
+                    _tr = translate_ko_to_en(scene)
+                    if _tr:
+                        _scene_assembled = _en_normalize(_tr)
+                        _log("[Camera Director] 주제를 영어로 번역했습니다 (tc-big)")
+                    else:
+                        _log("[Camera Director] ⚠ 주제 번역 실패 — 원문 사용")
+
         if not topic:
             _log("[Camera Director] ⚠ 주제가 비어 있습니다 — 카메라 조항만 출력됩니다.")
 
@@ -762,7 +874,7 @@ class CameraDirector:
                                         steps=pf_steps, cfg=pf_cfg,
                                         denoise=pf_denoise):
             _log(f"[Camera Director] 출발 점검 ⚠ {_warn}")
-        positive = assemble(scene, camera, image_count=image_count, topic=topic,
+        positive = assemble(_scene_assembled, camera, image_count=image_count, topic=topic,
                             image_labels=image_labels)
         # 가드 판정은 resolve_guard_plan 한 곳에서. run() 과 run_prompt() 가
         # 각자 반복하던 시대를 끝내고, 짝이 어긋날 수 없게 했다.
@@ -777,6 +889,8 @@ class CameraDirector:
         body_balance = _gflags["body_balance"]
         detail_def = _gflags["detail_def"]
         anatomy_count = _gflags["anatomy_count"]
+        footwear = _gflags["footwear"]
+        body_object_boundary = _gflags["body_object_boundary"]
         hint_defense = _gflags["hint_defense"]
         char_sheet = _gpos["character_sheet"]
         _furn_text = _gpos["furniture"]
@@ -810,6 +924,10 @@ class CameraDirector:
                  "(다리·팔·어깨·손가락 뭉개짐 방어)")
         if anatomy_count:
             positive = positive.rstrip(". ") + ". " + _gpos["anatomy_count"] + "."
+        if footwear:
+            positive = positive.rstrip(". ") + ". " + _gpos["footwear"] + "."
+        if body_object_boundary:
+            positive = positive.rstrip(". ") + ". " + _gpos["body_object_boundary"] + "."
         if _furn_text:
             positive = positive.rstrip(". ") + ". " + _furn_text + "."
             _log("[Camera Director] 가구·사물 DNA 가드 활성 ("
@@ -870,7 +988,21 @@ class CameraDirector:
                                   detail_def=detail_def,
                                   furniture=bool(_furn_text),
                                   remove_item=bool(_rm_text),
-                                  anatomy_count=anatomy_count)
+                                   anatomy_count=anatomy_count,
+                                   anatomy_count_upper=bool(
+                                       _plan["flags"].get(
+                                           "anatomy_count_upper")),
+                                   detail_def_upper=bool(
+                                       _plan["flags"].get(
+                                           "detail_def_upper")),
+                                   footwear=footwear,
+                                   footwear_upper=bool(
+                                       _plan["flags"].get(
+                                           "footwear_upper")),
+                                   body_object_boundary=body_object_boundary,
+                                   body_object_boundary_upper=bool(
+                                       _plan["flags"].get(
+                                           "body_object_boundary_upper")))
         self._last_camera = dict(camera)
         self._last_llm_extra = llm_extra
         self._last_image_count = image_count
@@ -1130,6 +1262,23 @@ class CameraDirectorEncode(CameraDirector):
         camera = getattr(self, "_last_camera", dict(DEFAULTS))
         camera_text = build_camera_conditioning(camera)
         external_prompt = (prompt_in or "").strip()
+        # 한국어→영어 번역 (규칙/수동 tier 전용, 비ASCII 감지 시에만 동작).
+        # LLM tier 는 cam_llm.py 가 이미 영문으로 확장하므로 여기선 번역 안 함.
+        # 번역된 영문은 아래 _user_text 조립에만 쓰고, 가드 판정은 원본 한글
+        # external_prompt 를 그대로 쓴다 (한글 마커 기반 검증 동작 보존).
+        _tier_rp = ("llm" if "llm" in (automation or "").lower()
+                    else "auto" if "auto" in (automation or "").lower()
+                    else "manual")
+        external_prompt_en = external_prompt
+        # _has_cjk 가드 (2026-10-13): 영어 prompt_in 은 번역 대상이 아니라
+        # None(번역 불필요)이 정상이다. 가드 없이 로그하면 매 실행 오경고.
+        if _tier_rp != "llm" and external_prompt and _has_cjk(external_prompt):
+            _tr = translate_ko_to_en(external_prompt)
+            if _tr:
+                external_prompt_en = _tr
+                _log("[Camera Director] prompt_in 한글을 영어로 번역했습니다 (tc-big)")
+            else:
+                _log("[Camera Director] ⚠ 번역 실패 — prompt_in 원문을 사용합니다")
         # latent 크기 점검 (base run에는 latent가 없어 여기서만 가능).
         for _warn in preflight_warnings(external_prompt or (topic or ""),
                                         camera, latent_mp=_latent_mp(latent_image)):
@@ -1188,6 +1337,8 @@ class CameraDirectorEncode(CameraDirector):
         _remove_item_pi = _gflags_pi["remove_item"]
         _detail_def_pi = _gflags_pi["detail_def"]
         _anatomy_count_pi = _gflags_pi["anatomy_count"]
+        _footwear_pi = _gflags_pi["footwear"]
+        _boundary_pi = _gflags_pi["body_object_boundary"]
         _pose_pos_pi = _gpos_pi["pose"]
         _phys_pos_pi = _gpos_pi["physics"]
         _phys_neg_pi = _plan_pi["physics_neg"]
@@ -1210,7 +1361,51 @@ class CameraDirectorEncode(CameraDirector):
             base_text = self._combine_prompt_text(base_text, outfit_anchor)
             base_text = self._combine_prompt_text(base_text, duo_anchor)
             base_text = self._combine_prompt_text(base_text, role_anchor)
-            base_text = self._combine_prompt_text(base_text, external_prompt)
+            # topic 칸도 **장면 텍스트로 포함**한다 (2026-10-13 사용자 지시).
+            # 왜(Why) 고쳤나: 종전에는 prompt_in 이 연결되면 topic 텍스트가
+            # 프롬프트에서 **조용히 빠졌다.** 판정용 텍스트(_eth_text_pi)에는
+            # 합쳐지고 프롬프트에는 안 들어가는 어중간한 상태라, 사용자가 topic 에
+            # 써 놓고 "반영됐겠지" 하면 로그로도 알 수 없었다(조용한 무시 금지).
+            # 중복 회피: prompt_in 이 이미 같은 문장을 담고 있으면 붙이지 않고
+            # 그 사실을 로그로 말한다 — 두 번 넣으면 샘플러가 같은 장면을 두 번 읽는다.
+            # (네거티브에는 넣지 않는다 — topic 은 긍정 서술이라 부정문이 되면
+            #  positive 와 정면 충돌한다. 2026-10-11 MIX_GUARD 실측과 같은 이유.)
+            _scene_pi = (topic or "").strip()
+            _scene_pi_en = _scene_pi
+            if _tier_rp != "llm" and _scene_pi:
+                if _looks_like_synopsis(_scene_pi):
+                    _syn = structure_ko_synopsis(_scene_pi)
+                    _syn_en = _syn.get("scene_en", "")
+                    if _syn_en and _syn_en != _scene_pi:
+                        _scene_pi_en = _syn_en
+                        _h = _syn.get("hints", {}) or {}
+                        _h_log = ", ".join(f"{k}" for k, v in _h.items()
+                                           if v and k != "sentence_count")
+                        _log(f"[Camera Director] topic 시놉시스 구조화 완료 "
+                             f"({_h.get('sentence_count', 0)}문장 → 영문 장면)"
+                             + (f" · 이해: {_h_log}" if _h_log else ""))
+                    else:
+                        # _has_cjk 가드 — 영어 topic 은 번역 대상이 아니라
+                        # translate 가 None(정상)을 돌려 기본값(_scene_pi)을
+                        # 유지한다. 가드 없이 호출해도 결과는 같고 조용하다.
+                        if _has_cjk(_scene_pi):
+                            _tr = translate_ko_to_en(_scene_pi)
+                            if _tr:
+                                _scene_pi_en = _en_normalize(_tr)
+                else:
+                    if _has_cjk(_scene_pi):
+                        _tr = translate_ko_to_en(_scene_pi)
+                        if _tr:
+                            _scene_pi_en = _en_normalize(_tr)
+            _user_text = external_prompt_en
+            if _scene_pi:
+                if _scene_pi.lower() in external_prompt.lower():
+                    _log("[Camera Director] topic 칸 텍스트가 prompt_in 에 이미 "
+                         "포함돼 있어 중복을 생략합니다 (장면 문장 1회만)")
+                else:
+                    _user_text = self._combine_prompt_text(
+                        _scene_pi_en, external_prompt_en)
+            base_text = self._combine_prompt_text(base_text, _user_text)
             positive_text = self._combine_prompt_text(base_text, camera_text)
         else:
             positive_text = prompt_out
@@ -1227,6 +1422,11 @@ class CameraDirectorEncode(CameraDirector):
             nudity_guard = nudity_anatomy_guard(external_prompt or topic)
             if nudity_guard:
                 positive_text = self._combine_prompt_text(positive_text, nudity_guard)
+            # 사용자가 직접 지시한 가림만 반영한다 (자동 개입 아님).
+            cover_guard = coverage_guard(external_prompt or topic)
+            if cover_guard:
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          cover_guard)
             # 다중 참조 실행이면 믹스 가드도 Skills positive에 병합한다.
             # 왜(Why): base run()의 믹스 가드는 standalone assemble 결과에만 붙고,
             # prompt_in 경로는 앵커를 다시 조립하므로 유실되기 때문이다.
@@ -1251,6 +1451,12 @@ class CameraDirectorEncode(CameraDirector):
             if _anatomy_count_pi:
                 positive_text = self._combine_prompt_text(
                     positive_text, _gpos_pi["anatomy_count"])
+            if _footwear_pi:
+                positive_text = self._combine_prompt_text(
+                    positive_text, _gpos_pi["footwear"])
+            if _boundary_pi:
+                positive_text = self._combine_prompt_text(
+                    positive_text, _gpos_pi["body_object_boundary"])
             if _cs_text_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _cs_text_pi)
@@ -1308,7 +1514,17 @@ class CameraDirectorEncode(CameraDirector):
             pose_ref=bool(_pose_pos_pi), physics_neg=_phys_neg_pi,
             detail_def=_detail_def_pi, furniture=bool(_furn_pos_pi),
             remove_item=_remove_item_pi, anatomy_count=_anatomy_count_pi,
-            character_sheet=bool(_cs_text_pi))
+            character_sheet=bool(_cs_text_pi),
+            anatomy_count_upper=bool(
+                _plan_pi["flags"].get("anatomy_count_upper")),
+            detail_def_upper=bool(
+                _plan_pi["flags"].get("detail_def_upper")),
+            footwear=_footwear_pi,
+            footwear_upper=bool(
+                _plan_pi["flags"].get("footwear_upper")),
+            body_object_boundary=_boundary_pi,
+            body_object_boundary_upper=bool(
+                _plan_pi["flags"].get("body_object_boundary_upper")))
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
         # 카메라 전용 negative로 덮어쓰면서 조용히 버려졌기 때문이다.

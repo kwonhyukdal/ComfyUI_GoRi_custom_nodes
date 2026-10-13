@@ -55,7 +55,7 @@ Type a one-line topic (Korean OK), attach optional images and optional positive/
 - **denoise 1.0 caveat**: the preflight check warns. `denoise` is "how much to redraw", so 1.0 barely uses the source pixels and effectively regenerates from scratch. **0.6~0.8** is recommended to preserve reference shape, colour and detail. At 1.0 fine detail (legs, arms, shoulders, hands) degrades first and furniture drifts far from the reference. Note: the bundled workflow intentionally uses `denoise=1.0` and `switch=true` (changing them breaks the workflow output) — the 0.6~0.8 recommendation is for general reference runs.
 - **Pixel spacing measurement (no topic needed)**: with 2+ reference images and no action wording in the topic, the node measures the **distance between subjects and the bottom margin** straight from the reference pixels (numpy only, no new dependency). Close → "stay in contact", measurably apart → "keep that separation", bottom margin → "keep the same amount of floor visible". So the reference's spatial relationship survives even if you never type "pressed against the wall". The console prints the measurement, e.g. `픽셀 공간 측정 (간격 0% · 영역 1개 · 근접 · 하단 여백 8%)`.
   - The gap is graded in three steps: touching / apart / **far apart at opposite frame edges** (two people at the left and right edges get a "wide empty space" instruction, not a "moderately separated" one). Vertically stacked arrangements (lying, stairs, top-down) are detected separately and get a "do not align them on the same level" instruction. Two touching people are detected by counting two heads; silhouette width is deliberately not used because a close-up single person measured wider (0.50) than a touching pair (0.44) in testing.
-  - Limit: without segmentation it only reads **how far apart** things are. How many people, and whether it is a fight or an embrace, is left to the topic text. External segmentation models (YOLO-World, SAM, GrabCut) are deliberately not used — install friction and GPL-3.0 licensing; this node stays dependency-free.
+  - Limit: without segmentation it only reads **how far apart** things are. How many people, and whether it is a fight or an embrace, is left to the topic text. External segmentation models (YOLO-World, SAM, GrabCut) are deliberately not used — install friction and GPL-3.0 licensing; this node stays **dependency-free (no external pip packages)**. The optional Korean→English translation (tc-big) is a separate ~420MB model asset downloaded once and **not bundled** in the repo; without it Korean passes through unchanged (graceful fallback), so 100% offline operation still holds.
 - If the topic already names a camera shot (`full-body shot`, `close-up shot`, `wide shot`, …), your shot wins over the default camera shot.
 - On people-reference image scenes, a `face and body preservation guard` is added. It keeps the original face structure, pelvis/hip/shoulder/waist ratios, and skin tone, and stops background color from spilling onto skin. Not applied to product/cat/background-only scenes.
 - `prompt_out` carries a generic positive quality guard: natural skin, normal human proportions, five fingers, natural face, identity consistency.
@@ -131,7 +131,7 @@ GoRi Camera Director Skills ── prompt_out ───────────�
 |---|---|---|---|
 | `positive_out` | `CONDITIONING` | `KSampler.positive` | Qwen prompt + people-reference identity anchor + camera phrases, encoded once. `positive` conditioning is ignored |
 | `negative_out` | `CONDITIONING` | `KSampler.negative` | Keeps existing negative conditioning if any; only camera/video failure modes merged |
-| `prompt_out` | `STRING` | `Show Text` / other prompt-rewrite nodes | Debug string identical to the real positive string |
+| `prompt_out` | `STRING` | `Show Text` / other prompt-rewrite nodes | Debug string identical to the real positive string. Connect it to the Consistency Keeper's `camera_prompt` to pass outfit-change / scene-change instructions through |
 | `image_out` | `IMAGE` | I2V start frame / upscale / Preview Image | The role planner's elected main reference (first connected if unelected), passed through. Empty when unconnected |
 | `reference_latent_out` | `LATENT` | pass-2 correction node / straight into VAE Decode | VAE latent of the same slot as the main reference (cache lookup, no re-encode). Empty without `vae` |
 
@@ -261,11 +261,38 @@ A sheet with **uneven** cut spacing may not be detected. Write `캐릭터 시트
 
 **Preset priority:** `specific preset` > `직접 설정 (custom)` (dropdowns) > `자동 (auto)` (tier judgment)
 - e.g. preset=`시네마틱 인물` + tier=`llm` → **camera=preset-locked, LLM expands only the scene**
+- Preset list: `자동 (auto)` · `직접 설정 (custom)` · `시네마틱 인물 (cinematic portrait)` · `제품 히어로 (product hero)` · `CF 버티컬 (vertical ad)` · `다큐 핸드헬드 (doc handheld)` · `드라마틱 롱샷 (dramatic long shot)`
 
 **Console log (Korean):**
 ```
 📷 Camera Director | tier=llm preset=자동 (auto) source=LLM 판단 | shot=근접 (CU) lens=85mm f/1.4 ... | scene=LLM 확장
 ```
+
+## 3b. Korean→English translation (rule/manual tier, optional)
+
+On `규칙 (auto)` / `수동 (manual)` tiers, when the topic or external prompt (`prompt_in`)
+is Korean, the node's **built-in translator (tc-big, Helsinki-NLP/opus-mt-tc-big-ko-en,
+cc-by-4.0)** translates it to English and sends it out through `positive_out` /
+`negative_out` / `prompt_out`. The `AI 판단 (llm)` tier still uses `cam_llm.py` to
+build the English scene (the two paths never mix).
+
+- **Model location**: `ComfyUI/models/translation/tc-big-ko-en` (or the node's
+  `models/translation/tc-big-ko-en`, or the directory pointed to by the
+  `GORI_TRANSLATE_MODEL` env var). **Not bundled in the repo; download once.**
+- **Graceful fallback**: if the model is missing or fails to load, translation is
+  silently disabled and the **original (Korean) text passes through unchanged**.
+  The node never crashes.
+- **No impact for English users** — if there is no Korean in the input, the model is
+  never even loaded.
+- **Quality**: more accurate than `opus-mt-ko-en` on domain terms (lens scan,
+  kloptops, chgbot meaning inversion, etc.). As a generative translation, double-check
+  camera-specific terms in the result.
+- **Dependencies**: translation is optional. Only one ~420MB model asset (not bundled)
+  is needed; the core node still has **zero pip dependencies**. Without the translation
+  model, 100% offline operation still holds.
+- **CTranslate2 is not used**: tc-big uses the `transformers` path only (the CT2 build
+  has an English-only shared vocabulary and cannot represent Korean source tokens —
+  verified by measurement).
 
 ## 4. LLM setup (pick one for tier=llm)
 
@@ -397,6 +424,7 @@ Python 3.10/3.12).
 - [ ] 1. Shows in the node list after install
 - [ ] 2. `직접 설정 (custom)`+`85mm` etc. → English clauses in output
 - [ ] 3. tier=llm + Korean topic → expanded into an English scene
+- [ ] 3b. tier=rule/manual + Korean topic → translated to English into positive_out/prompt_out (if tc-big model present; otherwise passes through unchanged)
 - [ ] 4. llm run with no key → console fallback log + normal output
 - [ ] **5. Same-seed A/B** (camera off/on) → visible framing/texture difference
 - [ ] 6. Motion applied in video → camera move visible

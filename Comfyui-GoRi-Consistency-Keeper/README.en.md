@@ -11,15 +11,34 @@ reduce identity/composition drift. **Does not redraw**
 ## Wiring
 
 ```text
-LoadImage → VAE Encode ── original_latent ──→ ┐
+LoadImage → VAE Encode ── camera_latent ──→ ┐
 (GoRi) Camera Director Skills ── reference_latent_out ── camera_latent ──→ (GoRi) Consistency Keeper ── latent_out ──→ VAE Decode → SaveImage
 KSampler ── LATENT ── sampled_latent ──→ ┘
 Same VAE ── vae ──→ ┘ (body mask, optional. Global pull without it)
+Camera Director ── prompt_out ── camera_prompt ──→ ┘ (outfit change / scene change instructions, optional)
 ```
 
-`original_image` (IMAGE, optional) sets the original reference from an
+`original_image` (`image_1`, optional) sets the original reference from an
 image instead of a latent. Qwen Edit's latent output is an all-zero
 empty canvas, so this is the accurate source there (takes priority).
+
+## Reference image slots (`image_1`–`image_10`, optional)
+
+Connect the **same images under the same numbers** as on the camera node.
+A new socket appears each time you link one (`image_1` linked → `image_2`
+shows up, and so on).
+
+| Slot | Role |
+|---|---|
+| `image_1` | Main subject (identity reference) |
+| `image_2`–`image_8` | Helper references — join the global DNA pull |
+| `image_9` | Appearance reference (upper-body box) |
+| `image_10` | Appearance reference (lower-body box) |
+
+Connect the Camera Director's `prompt_out` to `camera_prompt`. Instructions
+like "change the outfit" or "change the background" are then honoured
+(outfit change → face-focused pull, scene change → background pull skipped).
+Left empty, the node does the default whole-body pull.
 
 ## Widgets
 
@@ -97,6 +116,20 @@ Limit: a region is left alone when the reference itself has no detail there
 MediaPipe for landmarks; without it the node logs a one-time notice and falls
 back to its existing behaviour.
 
+## Automatic hand-shape correction (no setting needed)
+
+Clumped or overlapping fingers are pulled up to 10 times toward a spread
+shape. The target is a 95-point score; even below it, the best attempt is
+applied. Console example:
+
+```
+[GoRi Consistency Keeper] ⚠ hand physics violation (score=33.3/100 < 95): ['stuck fingertips', 'overlap 1-2']
+[GoRi Consistency Keeper] hand micro-pull applied (7 passes, final score=100.0/100)
+```
+
+Limit: it cannot **create** fingers (only unclump them). Below 95 after
+10 passes, the best state is applied with a "below target" warning.
+
 ## Character sheet reference detection (no setting needed)
 
 The node checks from pixels whether the `original` reference is a **character
@@ -171,6 +204,12 @@ Latent blending only holds for matched poses:
 1. Match the reference image pose to the output (most reliable)
 2. Lower strengths to 0.1–0.15
 3. A console "poses differ greatly" warning means do one of the above
+
+The background (outside the person) is pulled toward the reference too.
+If its composition differs (e.g. furniture in another spot), the offset
+object can print through translucently — step 1 (match the composition)
+is the answer. A scene-change instruction via `camera_prompt` skips the
+background pull automatically.
 
 ## Troubleshooting
 

@@ -33,4 +33,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GoRi_ConsistencyKeeper": "(GoRi) Consistency Keeper",
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "__version__"]
+# 프론트엔드 확장: image_2~10 단자를 연결 개수에 맞춰 점진적으로 공개.
+# image_1(1번 슬롯)는 고정이라 건드리지 않는다. 카메라 폴더의
+# progressive JS 와 같은 계약(연결된 마지막 단자 + 빈칸 1개)이며,
+# 키퍼 노드에만 후킹하므로 카메라 노드는 건드리지 않는다.
+WEB_DIRECTORY = "./web"
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY",
+           "__version__"]

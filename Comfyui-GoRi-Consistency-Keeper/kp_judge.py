@@ -155,13 +155,13 @@ def judge_points(pts, physics=False):
          "low_indices": [관절 인덱스],
          "frame": (ox, oy, scale) or None}
 
-    왜(Why) v1 은 damaged 를 **반환하지 않는다**: 기하 판정을 실측해 봤는데
+    왜(Why) 기본 경로는 damaged 를 **반환하지 않는다**: 기하 판정을 실측해 봤는데
     쓸 만한 신호가 없었다. 정상 사진에서 투영 팔길이의 좌우 차이가 최대 0.745
     (몸통길이 기준, 2026-10-01 실측) 나 났다 — 한쪽 팔이 앞으로 나온 사진에서는
     그게 정상이다. 임계값을 추측으로 넣으면 정상 사진의 절반이 "손상" 으로
-    분류된다. 그러니 기하 검사 없이 판정할 수 있는 유일한 신뢰 신호인
-    **가시성만** 쓴다. 기준 데이터를 실측해 넣을 때 damaged 를 연다.
-    `_JUDGE_DAMAGED` 는 그때를 위해 상수로 남아 있다.
+    분류된다. 그래서 기본(physics=False)은 기하 검사 없이 판정할 수 있는 유일한
+    신뢰 신호인 **가시성만** 쓴다. damaged 는 위에서 설명한 opt-in 물리 규칙
+    경로(physics=True)로만 열린다 — 기본 호출부의 결과는 그대로다.
 
     왜(Why) undetermined 가 꼭 필요한가: 발 가시성은 실측 중앙값이 0.08~0.21 다.
     이걸 "정상"으로 떨어뜨리면 **스스로도 못 본 영역을 신뢰**하게 된다.
@@ -174,7 +174,7 @@ def judge_points(pts, physics=False):
                        "detail": "landmark 없음"})
         return {"verdict": _JUDGE_UNDETERMINED, "confidence": 1.0,
                 "checks": checks, "low_visibility": [], "low_indices": [],
-                "frame": None}
+                "frame": None, "damage_regions": []}
 
     checks.append({"check_id": "pose_detected", "ok": True, "detail": ""})
 
@@ -184,7 +184,7 @@ def judge_points(pts, physics=False):
                        "detail": "몸통 길이가 하한 이하거나 퇴화"})
         return {"verdict": _JUDGE_UNDETERMINED, "confidence": 1.0,
                 "checks": checks, "low_visibility": [], "low_indices": [],
-                "frame": None}
+                "frame": None, "damage_regions": []}
     checks.append({"check_id": "body_frame", "ok": True, "detail": ""})
 
     low = []

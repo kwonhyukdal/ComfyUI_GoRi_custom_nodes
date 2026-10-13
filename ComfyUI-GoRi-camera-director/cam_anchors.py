@@ -59,11 +59,29 @@ def build_identity_anchor(image_count: int, topic: str, image_labels=None) -> st
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
     plan = _person_object_plan(topic, labels)
     first = str(plan["main"])
-    return (f"Use reference image {first} as the exact identity source for the main person. "
-            "Preserve the same facial identity and same facial structure, age, ethnicity, hairstyle, "
-            "and clothing unless the instruction explicitly changes them. "
-            "Render natural realistic skin texture with visible pores and fine detail, "
+    head = (f"Use reference image {first} as the exact identity source for the main person. "
+            "Preserve the same facial identity and same facial structure, age, ethnicity, hairstyle")
+    tail = ("Render natural realistic skin texture with visible pores and fine detail, "
             "soft directional light, subtle film grain, no airbrushed smoothing.")
+    # 왜(Why) 교체 감지면 의상 보존 문구를 바꾸나 (2026-10-13 실측): 종전에는
+    # 감지와 무관하게 "Do not change any clothing, shoe ..." 를 **무조건** 내보냈다.
+    # 사용자가 지시한 신발 교체("단화를 신고")와 같은 프롬프트에 유지 지시가
+    # 공존하자 모델은 둘 중 하나만 반영했다 — 실측에서 신발이 베이지 슬리퍼로
+    # 일부만 바뀌었다. 명시 교체가 있으면 **적용 + 나머지 보존**으로 바꾼다.
+    # 신원(얼굴·헤어) 문구는 어느 쪽이든 남는다 — reference_guard 2026-10-02
+    # 결정과 같은 원칙이다. 이 문구는 그대로 키퍼(camera_prompt)로 전달돼
+    # _prompt_intent 가 의도로 읽는다(교체 동사 change + 의류 명사).
+    if _is_text_outfit_change(topic or ""):
+        return (head
+                + ". Apply the clothing change exactly as instructed by the user, "
+                "and keep every other garment, shoe, and accessory exactly as in "
+                "the reference image. "
+                + tail)
+    return (head
+            + ", exact outfit including every garment, exact shoes, exact accessories and jewelry "
+            "unless the instruction explicitly changes them. "
+            "Do not change, replace, or alter any clothing, shoe, or accessory from the reference image. "
+            + tail)
 
 
 def build_single_person_anchor(image_count: int, topic: str, image_labels=None) -> str:
@@ -184,8 +202,11 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
                     "same facial structure, same hairstyle, "
                     "same body proportions, same overall color identity")
         return (f"preserve the same subject identity as reference image {main}, "
-                "same facial structure, same hairstyle, same outfit, "
-                "same body proportions, same overall color identity")
+                "same facial structure, same hairstyle, same exact outfit including every garment, "
+                "same exact shoes, same exact accessories and jewelry, "
+                "same body proportions, same overall color identity. "
+                "Do not change, replace, or alter any clothing, shoe, or accessory "
+                "unless the user explicitly requests a clothing change.")
     duo = build_duo_person_anchor(image_count, topic, image_labels=image_labels)
     if duo:
         # 두 번째 reference가 인물 역할이면 복제 금지 대신 두 정체성 보존을 둔다.
