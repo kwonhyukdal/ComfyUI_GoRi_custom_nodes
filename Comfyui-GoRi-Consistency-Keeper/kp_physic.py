@@ -183,12 +183,25 @@ def _scan_lines(edge_mask, min_len):
     out = []
     m = (edge_mask > 0).astype(_np.uint8)
     n_lab, lab = cv2.connectedComponents(m, connectivity=8)
+    if n_lab <= 1:
+        return out
+    # 2026-10-16 오딧: 예전엔 성분마다 np.where(lab == i) 로 전화면을 훑어
+    # O(성분수 x HxW) 였다 — 1024px 합성 최악(성분 ~1만) 20초, 실사(927
+    # 성분) 1.9초 실측. 픽셀을 한 번에 모아 라벨로 정렬하고 성분별
+    # 슬라이스로 나눈다. nonzero 는 행 우선(C 순서)이라 성분 안 픽셀
+    # 순서가 기존 np.where 와 동일하다 — _fit_line 입력이 같다.
+    ys_a, xs_a = _np.nonzero(lab)
+    lab_a = lab[ys_a, xs_a]
+    order = _np.argsort(lab_a, kind="stable")
+    ys_a, xs_a, lab_a = ys_a[order], xs_a[order], lab_a[order]
+    starts = _np.searchsorted(lab_a, _np.arange(1, n_lab), side="left")
+    ends = _np.searchsorted(lab_a, _np.arange(1, n_lab), side="right")
     for i in range(1, n_lab):
-        ys, xs = _np.where(lab == i)
-        if len(xs) < 8:
+        s, e = int(starts[i - 1]), int(ends[i - 1])
+        if e - s < 8:
             continue
         p1, p2, length, straight = _fit_line(
-            _np.stack([xs, ys], axis=1).astype(_np.float32))
+            _np.stack([xs_a[s:e], ys_a[s:e]], axis=1).astype(_np.float32))
         if length < min_len or straight > _STRAIGHT_MAX:
             continue
         d = p2 - p1
@@ -960,10 +973,16 @@ def physic_pull_pass(vae, out, rgb, strength=0.15, cache=None, max_iter=10,
 
     반환: (out_latent, best_score, iter_done) — kp_body_object 와 같은
     best-keep 계약. 개선이 없으면 입력 그대로(iter_done=0).
+    종료 사유는 physic_pull_last_error() 로 읽는다 (2026-10-16 오딧:
+    "건너뜀" 로그만으로는 디코드 실패인지 개선 실패인지 구분이 안 됐다
+    — 손 모듈 kp_hand_repair 와 같은 규율).
     """
+    global _LAST_ERROR
+    _LAST_ERROR = None
     import torch as _t
     if (_person_mask_fn is None or _decode_latent_rgb_safe is None
             or _encode_rgb_safe is None or _downsample_mask is None):
+        _LAST_ERROR = "helpers_unbound"
         return out, None, 0
     try:
         from .kp_math import _match_spatial as _match_spatial
@@ -971,6 +990,7 @@ def physic_pull_pass(vae, out, rgb, strength=0.15, cache=None, max_iter=10,
         from kp_math import _match_spatial as _match_spatial
     try:
         if rgb is None:
+            _LAST_ERROR = "input_rgb_none"
             return out, None, 0
         u8 = (_np.clip(rgb, 0.0, 1.0) * 255.0).astype(_np.uint8) \
             if rgb.dtype != _np.uint8 else rgb.copy()
@@ -995,6 +1015,7 @@ def physic_pull_pass(vae, out, rgb, strength=0.15, cache=None, max_iter=10,
                     and sc["censor"] is None and sc.get("shoelace"):
                 # 끈 플래그만 남은 경우 — 워핑 교정 경로가 없어 반복이
                 # 무의미하다(디코드/인코드 낭비). 판정은 note 로그로 남는다.
+                _LAST_ERROR = "shoelace_only"
                 break
             if best_out is not None and best_out is not cur \
                     and sc["score"] < best_score:
@@ -1002,29 +1023,43 @@ def physic_pull_pass(vae, out, rgb, strength=0.15, cache=None, max_iter=10,
             warped = _apply_corrections(u8, sc)
             warped_lat = _encode_rgb_safe(vae, warped)
             if warped_lat is None:
+                _LAST_ERROR = "encode_failed"
                 break
             warped_lat = _match_spatial(warped_lat, cur)
             if warped_lat is None:
+                _LAST_ERROR = "spatial_mismatch"
                 break
             Pm = _person_mask_fn(u8)
             if Pm is None:
+                _LAST_ERROR = "person_mask_failed"
                 break
             mask_lat = _downsample_mask(_np.asarray(Pm), cur.shape)
             if mask_lat is None:
+                _LAST_ERROR = "mask_downsample_failed"
                 break
             mask_t = _t.from_numpy(_np.ascontiguousarray(mask_lat)).to(
                 device=cur.device, dtype=cur.dtype)
             cur = cur + strength * mask_t * (warped_lat - cur)
             rgb2 = _decode_latent_rgb_safe(vae, cur)
             if rgb2 is None:
+                _LAST_ERROR = "redecode_failed"
                 break
             u8 = (_np.clip(rgb2, 0.0, 1.0) * 255.0).astype(_np.uint8)
             it_done = it + 1
         if best_out is None or best_out is out:
+            if _LAST_ERROR is None:
+                _LAST_ERROR = "no_improvement"
             return out, best_score, 0
+        _LAST_ERROR = None
         return best_out, best_score, it_done
-    except Exception:
+    except Exception as _e:
+        _LAST_ERROR = "exception:%s: %s" % (type(_e).__name__, _e)
         return out, None, 0
+
+
+def physic_pull_last_error():
+    """가장 최근 physic_pull_pass 의 종료 사유 (str) 또는 None (성공/미실행)."""
+    return _LAST_ERROR
 
 
 # 아래 헬퍼들은 consistency_keeper 의 것을 가져쓰기 위해 런타임에 바인딩된다.
@@ -1034,6 +1069,7 @@ _downsample_mask = None
 _person_mask_fn = None
 _pose_fn = None
 _hands_fn = None
+_LAST_ERROR = None
 
 
 def _bind_helpers(decode_fn, encode_fn, downsample_fn, person_mask_fn,

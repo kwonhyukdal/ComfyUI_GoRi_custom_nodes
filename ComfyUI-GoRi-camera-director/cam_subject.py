@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import threading
 
 try:
     from .cam_util import *  # noqa: F403
@@ -12,8 +13,63 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "ANIMAL_SUBJECT_KEYWORDS", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS"
+"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "ANIMAL_SUBJECT_KEYWORDS", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "set_reference_kinds", "clear_reference_kinds",
+"_hint_person_slots", "_hint_pose_slots", "_text_names_slots", "intent_core"
 ]
+
+
+# ---------------------------------------------------------------------------
+# 참조 자동 분류 힌트 (2026-10-19)
+#
+# 왜(Why) 전역 힌트인가: 슬롯 역할을 쓰는 함수가 12곳(cam_anchors 6 ·
+# cam_guards 4 · camera_director 2)이다. 전부에 인자를 하나씩 더하면 호출부와
+# 테스트를 함께 고쳐야 하고, 하나를 빠뜨리면 그 가드만 조용히 옛 규약(첫 연결 =
+# 주 피사체)으로 돌아간다. 대신 실행 시작에 한 번 심고 끝에 지운다 —
+# ComfyUI 는 프롬프트를 한 번에 하나씩 실행하므로 thread-local 이면 충분하다.
+#
+# 힌트는 **토픽이 슬롯 번호를 하나도 말하지 않을 때만** 쓰인다. 사용자가
+# "2번 의상" 이라고 적었으면 그 판정이 언제나 이긴다.
+# ---------------------------------------------------------------------------
+_KIND_HINT = threading.local()
+
+
+def set_reference_kinds(kinds) -> None:
+    """{슬롯번호: 'person'|'unknown'} 을 이번 실행의 힌트로 심는다."""
+    try:
+        clean = {int(k): str(v) for k, v in (kinds or {}).items()}
+    except (TypeError, ValueError):
+        clean = {}
+    _KIND_HINT.kinds = clean or None
+
+
+def clear_reference_kinds() -> None:
+    """실행이 끝나면 지운다 (다음 실행에 새지 않게)."""
+    _KIND_HINT.kinds = None
+
+
+def _hint_person_slots() -> list:
+    """힌트가 말하는 인물 슬롯. 9·10번은 외양 참조라 제외한다."""
+    kinds = getattr(_KIND_HINT, "kinds", None) or {}
+    return sorted(int(k) for k, v in kinds.items()
+                  if v == "person" and int(k) not in (9, 10))
+
+
+def _hint_pose_slots() -> list:
+    """힌트가 말하는 포즈 슬롯 (2026-10-19). 9·10번은 외양 참조라 제외한다.
+
+    왜(Why) topic 전용이던 것을 여는가: LLM 이 이미지를 보고 "이 칸은 포즈"라고
+    알려 줘도 plan 의 pose_slots 는 topic 텍스트(_pose_role_slots)만 봐서
+    포즈 가드가 안 나갔다 — topic 을 비운 사용자에게만 해당하던 구멍이다.
+    """
+    kinds = getattr(_KIND_HINT, "kinds", None) or {}
+    return sorted(int(k) for k, v in kinds.items()
+                  if v == "pose" and int(k) not in (9, 10))
+
+
+def _text_names_slots(text: str) -> bool:
+    """토픽이 슬롯 번호를 직접 지목했는가 ("2번", "image 3", "이미지 4")."""
+    return bool(re.search(r"(?:이미지|image|img)\s*_?\d+|\d+\s*번", text or "",
+                          re.IGNORECASE))
 
 
 # 의상 어휘의 **단일 출처** (2026-10-11 검토). OUTFIT_RELATION_PATTERNS 와
@@ -64,6 +120,7 @@ def _reference_items(image_items=None, image_list=None, image=None):
     """연결된 reference 이미지를 (원래 image_N 번호, 이미지) 목록으로 정규화한다."""
     items = []
 
+    # 슬롯 원소를 (번호, 값) 쌍으로 items 에 넣는다 — 번호가 없으면 순번으로 대체
     def add(raw, fallback_index):
         if raw is None:
             return
@@ -107,8 +164,14 @@ HUMAN_SUBJECT_KEYWORDS = (
 _MODEL_OBJECT_PATTERN = re.compile(r"(?:3d|3-d|3차원|scale)\s*(?:model|모델)")
 
 
+# 사람 주제인지 — 의상 교체 표현도 사람으로 보고, 동물/사물 명시가 있으면 양보한다
 def _is_human_subject(text: str) -> bool:
     t = (text or "").lower()
+    # 토픽이 비었는데 참조에서 사람이 검출됐으면 사람 주제로 본다 (2026-10-19).
+    # 인물 가드가 전부 이 함수 하나로 게이트되므로 여기서 힌트를 읽으면
+    # 12개 호출부를 고치지 않아도 일관되게 켜진다.
+    if not t.strip() and _hint_person_slots():
+        return True
     # **의상 교체** 표현은 사람을 함의한다(2026-09-29 실측 결함 수정).
     # "1 의상, 2 교체" 에는 인물 키워드가 하나도 없어서 이 함수가 False 였다.
     # 결과적으로 identity 앵커·해부·발란스 등 **인물 가드가 전부 조용히
@@ -214,6 +277,7 @@ _KO_SUFFIX_CHARS = (
     "에"          # 방향
     "에서"        # 출발
     "로"          # 방향
+    "으로"        # 방향 (2026-10-16 오딧: 없어서 "사람으로" 가 미인식)
     "만"          # 제한
     "도"          # 주제
     "까지"        # 한계
@@ -258,11 +322,11 @@ def _ko_word_present(text: str, word: str) -> bool:
         nxt = text[i + len(word): i + len(word) + 1]
         if nxt == "" or not ("가" <= nxt <= "힣"):
             return True
+        # _KO_SUFFIX_CHARS 는 음절 나열 **문자열**이다(괄호 안 인접 문자열
+        # 연결) — 한 글자가 그 안에 있으면 조사 첫 글자다. "까지"/"부터" 는
+        # 각각 "까"/"부" 로 이미 포함되므로 별도 분기가 필요 없다(2026-10-16
+        # 오딧: 도달 불가 분기 2개 제거).
         if nxt in _KO_SUFFIX_CHARS:
-            return True
-        if nxt == "까" and text[i + len(word):i + len(word) + 2] == "까지":
-            return True
-        if nxt == "부" and text[i + len(word):i + len(word) + 2] == "부터":
             return True
         start = i + 1
 
@@ -330,6 +394,7 @@ REFLECTION_KEYWORDS = (
 _REFLECTION_ASCII_WORDS = ("glass",)
 
 
+# 거울/반사 장면인지 — ASCII 단어는 경계 검사, 한글 키워드는 포함 검사
 def _is_reflection_scene(text: str) -> bool:
     t = (text or "").lower()
     if any(_ascii_word_present(t, word)
@@ -338,6 +403,7 @@ def _is_reflection_scene(text: str) -> bool:
     return any(keyword in t for keyword in REFLECTION_KEYWORDS)
 
 
+# 여러 인물을 요청한 문장인지 — 다인 키워드 포함 여부만 본다
 def _is_multi_person_request(text: str) -> bool:
     t = (text or "").lower()
     return any(keyword in t for keyword in MULTI_PERSON_KEYWORDS)
@@ -387,7 +453,7 @@ SECOND_PERSON_PATTERNS = (
     # 없으면 보조 역할(배경/신원 억제)로 강등되고 duo 앵커가 2번을 빼고
     # 인용한다. 주석은 "2개를 모두 수집" 이라 써 두고 코드는 한 개만
     # 수집하는 주석-코드 불일치였다.
-    r"([1-9]|10)\s*(?:번|번째)\s*(?:와|과|및|그리고|·|,|、|\+)\s*([2-9]|10)\s*(?:번|번째)?[^,，.。;；!！?？\n]{0,16}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람|커플|쌍)",
+    r"([1-9]|10)\s*(?:번|번째)\s*(?:와|과|및|그리고|·|,|\+)\s*([2-9]|10)\s*(?:번|번째)?[^,，.。;；!！?？\n]{0,16}?(?:남성|남자|신랑|아버지|소년|여성|여자|신부|어머니|소녀|인물|사람|커플|쌍)",
     r"\b(?:image|img)\s*_?\s*([1-9]|10)\s*(?:and|&|,)\s*(?:image|img)?\s*_?\s*([2-9]|10)\b" + _NO_SLOT_REF + r"{0,24}?\b(?:man|male|guy|gentleman|boy|woman|female|lady|girl|person|people|couple)\b",
 )
 
@@ -681,6 +747,79 @@ _EN_GARMENT_WORDS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# 의도 분석용 코어 — 태그형 프롬프트 필터 (2026-10-19)
+#
+# 왜(Why) 필요한가: prompt_in 으로 들어오는 실제 사용자 프롬프트는 **태그 나열**
+# 이다("masterpiece, best quality, 1girl, ..."). 역할·의상·시트·다인물 감지는
+# 짧은 자연어 문장을 기준으로 설계돼 있어 태그 잡음에 오탐한다. 실측:
+#   서술 조각 "wearing a summer dress" → `_is_text_outfit_change` True
+#   → 신원 앵커가 "same exact outfit" 보존 분기를 버리고
+#     "same overall color identity" 분기로 바뀐다 — **참조 의상 보존이 조용히
+#     사라진다**(사용자는 교체를 요청한 적 없음). 문장형 대조 실험으로 확인.
+#
+# 규칙: **출력 텍스트는 건드리지 않는다.** 의도 감지에만 쓰는 필터다.
+#   - 쉼표 4개 미만 = 문장형으로 보고 그대로 돌려준다(기존 동작 100% 보존.
+#     테스트 말뭉치 35개 중 쉼표 4개 이상은 0개라 회귀 여지가 없다)
+#   - 태그형이면 조각별로 보는데, 다섯 중 하나라도 걸리면 살리고 나머지는 버린다:
+#     1) 슬롯 번호 (이미지 2 / image 3 / 2번) — 역할 지정은 절대 놓치면 안 된다
+#     2) 지시 동사 — _OUTFIT_VERB 보다 좁은 목록. "wearing" 은 **서술**이라
+#        넣지 않는다(오탐의 출발점)
+#     3) 역할 어휘 (포즈·의상·배경/pose·outfit·background) — 역할 문장 근거
+#     4) 피사체 지시어 (1girl·solo·여성/character) — 사람 가드 근거.
+#        버리면 가드가 꺼지므로 넣는다
+#     5) 시트 어휘 (시트·turnaround·lineup) — 시트 분기 근거
+#   - 전부 버려지면 "" — 감지 대상이 없는 깨끗한 텍스트(오탐 0)
+# ---------------------------------------------------------------------------
+_INTENT_SLOT_RE = re.compile(
+    r"(?:이미지|image|img)\s*_?\s*\d+|\d+\s*번", re.IGNORECASE)
+_INTENT_VERB_KO = ("입혀", "입히", "갈아입", "교체", "바꿔", "바꾸", "바뀌",
+                   "적용", "변경", "착용", "벗기")
+_INTENT_VERB_EN = ("apply", "replace", "swap", "change into", "put on",
+                   "dress her", "dress him", "dress the")
+_INTENT_ROLE_KO = ("포즈", "자세", "의상", "옷", "옷차림", "배경", "화풍",
+                   "스타일", "소품", "제품", "사물", "촬영", "구도", "조명")
+_INTENT_ROLE_EN = ("pose", "outfit", "garment", "background", "style",
+                   "object", "prop", "product", "composition", "lighting",
+                   "camera", "reference")
+_INTENT_SUBJECT = ("girl", "boy", "woman", "man", "lady", "guy", "person",
+                   "people", "solo", "character", "여성", "남성", "여자",
+                   "남자", "사람", "인물", "소녀", "소년")
+
+
+def intent_core(text: str) -> str:
+    """태그형 프롬프트에서 의도 조각만 남긴 분석용 텍스트. 출력엔 쓰지 않는다.
+
+    쉼표가 4개 미만이면 문장형으로 보고 원문을 그대로 돌려준다.
+    """
+    t = text or ""
+    if t.count(",") < 4:
+        return t
+    # 시트·동물 어휘는 모듈 뒤편에 정의돼 있어 여기서 합친다(모듈 로드 후 호출).
+    # 왜(Why) 동물 어휘를 합치나 (2026-10-19 실측): _INTENT_SUBJECT 에는
+    # 고양이·강아지·동물 세 개뿐이라, 태그형 프롬프트("...a cat sitting,
+    # animal, detailed fur...")에서 동물 조각이 전부 버려져 동물 감지가
+    # 소실됐다(_is_animal_subject 가 원문 True → 코어 False). 전체 동물
+    # 어휘를 담은 ANIMAL_SUBJECT_KEYWORDS 를 그대로 재사용해 중복을 피한다.
+    _subject_vocab = _INTENT_SUBJECT + ANIMAL_SUBJECT_KEYWORDS
+    _sheet_vocab = CHARACTER_SHEET_TOPICS + MULTI_PERSON_SHEET_TOPICS
+    kept = []
+    for frag in t.split(","):
+        f = frag.strip()
+        if not f:
+            continue
+        low = f.lower()
+        if (_INTENT_SLOT_RE.search(low)
+                or any(w in low for w in _INTENT_VERB_KO)
+                or any(w in low for w in _INTENT_VERB_EN)
+                or any(w in low for w in _INTENT_ROLE_KO)
+                or any(w in low for w in _INTENT_ROLE_EN)
+                or any(w in low for w in _subject_vocab)
+                or any(w in low for w in _sheet_vocab)):
+            kept.append(f)
+    return ", ".join(kept)
+
+
 def _is_text_outfit_change(text: str) -> bool:
     """의상 참조 이미지 없이 텍스트만으로 옷 교체를 명시했는가.
 
@@ -741,6 +880,111 @@ def _is_text_outfit_change(text: str) -> bool:
     if re.search(r"(?:다른|새|새로운|완전히 다른)\s*(?:옷|의상|드레스|차림|신발|구두|단화|샌들|outfit|dress)", t):
         return True
     return False
+
+
+# 신발 교체 지시 판별. 왜(Why) 별도 함수인가 (2026-10-15 실측): footwear 가드는
+# 인물 + 참조 실행이면 무조건 "keep that footwear(reference)" 를 보낸다
+# (camera_director resolve_guard_plan 의 footwear 플락). 그런데 사용자가
+# "앞이 막혀 있는 흰색 단화" 처럼 신발을 바꾸라고 하면 두 문구가 같은
+# positive 에서 정면 충돌한다 — 2026-10-13 에 identity anchor 는 교체
+# 인식으로 고쳤는데 이 가드는 그대로 남아 있었다. 교체 의도
+# (=_is_text_outfit_change)면서 신발 어휘가 있는 문장에만 변형을 쓴다.
+_SHOE_TOPIC_EN = (r"shoes|shoe|sandals|sandal|boots|boot|heels|heel|"
+                  r"sneakers|sneaker|slippers|slipper|loafers|loafer|"
+                  r"flats|footwear")
+_SHOE_TOPIC_KO = r"단화|구두|샌들|운동화|신발|하이힐|부츠|슬리퍼|플랫"
+
+
+def _topic_changes_shoes(text: str) -> bool:
+    """텍스트가 신발을 바꾸는 지시인지 (의상 교체 의도 + 신발 어휘).
+
+    명시 유지("keep the same shoes", "원래 단화를")는
+    _is_text_outfit_change 가 먼저 False 를 돌려 여기까지 오지 않는다.
+    한국어는 \\b 가 글자 경계를 못 만든다(단화|를 둘 다 \\w) — 한국어 쪽은
+    경계 없이 부분 문자열로 본다.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if not _is_text_outfit_change(t):
+        return False
+    return bool(re.search(_SHOE_TOPIC_KO, t)
+                or re.search(r"\b(?:" + _SHOE_TOPIC_EN + r")\b", t.lower()))
+
+
+# 의류 색상 감지 (2026-10-15 실측): "흰색 단화" 지시에도 결과물의 신발은
+# 크림/베이지색이 나왔다. 색상어가 의류·신발 명사에 **인접**할 때만
+# (색상, 품목) 쌍을 돌려준다 — "흰색 벽" 같은 배경·가구 색은 건드리지
+# 않는다. 한글은 명사 위치에서 뒤쪽 8자 window, 영문은 색상어+품목
+# (사이 16자 이내, 같은 문장). off-white 는 영문 lookbehind 로 뺀다.
+_ITEM_COLOR_KO = (
+    ("하얀색", "white"), ("하얀", "white"),
+    ("흰색", "white"), ("흰", "white"),
+    ("검은색", "black"), ("검정색", "black"),
+    ("검은", "black"), ("검정", "black"),
+    ("빨간색", "red"), ("빨간", "red"), ("빨강", "red"),
+    ("파란색", "blue"), ("파란", "blue"), ("파랑", "blue"),
+    ("초록색", "green"), ("초록", "green"),
+    ("노란색", "yellow"), ("노란", "yellow"),
+    ("분홍색", "pink"), ("분홍", "pink"),
+    ("회색", "gray"), ("잿빛", "gray"),
+    ("갈색", "brown"),
+    ("베이지", "beige"),
+    ("아이보리", "ivory"),
+    ("보라색", "purple"), ("보라", "purple"),
+)
+_ITEM_NOUN_KO = (
+    r"단화|구두|신발|샌들|운동화|부츠|하이힐|슬리퍼|플랫|로퍼"
+    r"|드레스|원피스|셔츠|블라우스|스웨터|코트|재킷|자켓"
+    r"|바지|치마|스커트|모자|가방|의상"
+)
+_ITEM_COLOR_EN = ("white|black|red|blue|green|yellow|pink|gray|grey"
+                  "|brown|beige|ivory|purple|orange")
+_ITEM_NOUN_EN = (
+    r"shoes|shoe|sandals|sandal|boots|boot|heels|heel|flats|sneakers"
+    r"|slippers|loafers|dress|skirt|shirt|blouse|sweater|coat|jacket"
+    r"|pants|hat|bag|outfit"
+)
+# 영문 단수 -> 복수 정규화 (프롬프트 문구는 복수로 굳힌다).
+_ITEM_NOUN_EN_MAP = {
+    "shoe": "shoes", "sandal": "sandals", "boot": "boots", "heel": "heels",
+}
+_KO_ITEM_EN = {
+    "단화": "shoes", "구두": "shoes", "신발": "shoes", "운동화": "sneakers",
+    "슬리퍼": "slippers", "플랫": "flats", "로퍼": "loafers",
+    "샌들": "sandals", "부츠": "boots", "하이힐": "high heels",
+    "드레스": "dress", "원피스": "dress", "셔츠": "shirt",
+    "블라우스": "blouse", "스웨터": "sweater", "코트": "coat",
+    "재킷": "jacket", "자켓": "jacket", "바지": "pants",
+    "치마": "skirt", "스커트": "skirt", "모자": "hat", "가방": "bag",
+    "의상": "outfit",
+}
+
+
+def _topic_item_color(text):
+    """(색상 영문, 품목 영문) — 색상어가 의류·신발 명사에 인접할 때만.
+
+    없으면 None. 오판이 더 나쁘다(무의미한 색상 보강) — 조건은 인접성
+    하나로만 본다. 영문은 같은 문장 안에서 색상어+품목 16자 이내,
+    한글은 명사 앞 8자 window 에 색상어.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    low = t.lower()
+    m = re.search(
+        r"(?<![\w-])(" + _ITEM_COLOR_EN + r")\b[^.]{0,16}?\b("
+        + _ITEM_NOUN_EN + r")\b", low)
+    if m:
+        color = "gray" if m.group(1) == "grey" else m.group(1)
+        noun = m.group(2)
+        return color, _ITEM_NOUN_EN_MAP.get(noun, noun)
+    for m in re.finditer(_ITEM_NOUN_KO, t):
+        window = t[max(0, m.start() - 8):m.start()]
+        for ko_color, en_color in _ITEM_COLOR_KO:
+            if ko_color in window:
+                return en_color, _KO_ITEM_EN.get(m.group(0), "items")
+    return None
 
 
 def _is_empty_scene(text: str) -> bool:
@@ -958,8 +1202,12 @@ def _person_object_plan(text, labels):
         persons = persons - {main}
     # 첫 식별이 **의상 소스**면(옷 사진이 1번) 그 옷을 입을 사람이 주 피사체다.
     # 옷을 신원 소스로 지목하면 사람이 사라진다 -- 실측에서 확인된 결함.
+    # 사물 슬롯은 후보에서 뺀다 -- 2026-10-16 오딧 실측: "1 의상, 2 의자" 에서
+    # 의자가 주 피사체로 지정돼 "use reference image 2 as the main identity"
+    # 지시가 나갔다(의자를 사람 신원으로 쓰라는 뜻이 된다).
     if main in outfits:
-        rest = [x for x in label_ns if x not in outfits and x not in poses]
+        rest = [x for x in label_ns
+                if x not in outfits and x not in poses and x not in objects]
         if rest:
             # 교체를 명시했으면(rest 안에서 대상이 보이면) 그 사람을 우선한다.
             pick = next((x for x in rest if x in targets), None)
@@ -973,6 +1221,26 @@ def _person_object_plan(text, labels):
             main = rest[0]
             if main in persons:
                 persons = persons - {main}
+    # 참조 자동 분류 힌트 — 토픽이 슬롯 번호를 하나도 말하지 않았을 때만.
+    # 왜(Why) 여기서 덮어쓰나: main 은 지금까지 "첫 연결"이었다. 1번이 옷
+    # 사진이면 프롬프트가 그 옷을 사람 신원으로 지목한다. 픽셀에서 사람을
+    # 찾았으면 그 칸이 주 피사체다. 토픽이 번호를 말했으면 사용자 판정이 이긴다.
+    # 2026-10-19: person 뿐 아니라 outfit/object/item/pose 까지 받는다
+    # (LLM 이 역할을 알려 주면 그 값이 픽셀 판정을 덮는다).
+    if not _text_names_slots(text):
+        _kinds = getattr(_KIND_HINT, "kinds", None) or {}
+        _hp = [x for x in _hint_person_slots() if x in set(label_ns)]
+        _h_out = sorted(l for l in label_ns if _kinds.get(l) == "outfit")
+        _h_obj = sorted(l for l in label_ns
+                        if _kinds.get(l) in ("object", "item"))
+        _h_pose = sorted(l for l in label_ns if _kinds.get(l) == "pose")
+        if _hp or _h_out or _h_obj or _h_pose:
+            if _hp:
+                main = _hp[0]
+                persons = sorted(set(_hp[1:]) - {main})
+            outfits = sorted(set(_h_out) - {main})
+            objects = sorted(set(_h_obj) - {main} - set(outfits))
+            poses = sorted(set(_h_pose) - {main} - set(objects) - set(outfits))
     return {"main": main, "persons": sorted(persons), "objects": sorted(objects),
             "poses": sorted(poses), "outfits": sorted(outfits)}
 
@@ -993,10 +1261,18 @@ CHARACTER_SHEET_TOPICS = ("캐릭터 시트", "캐릭터시트", "캐릭터시",
 # 먼저 나눠 판정한다.
 # (2026-10-07 라운드 2) "여명" 은 여기서 뺐다 — "강남 야경 여명"(새벽빛) 같은
 # 풍경 topic 에서 다인물 시트로 오탐했다. "여러 인물" 등 나머지 어휘가 대신한다.
+# (2026-10-19) 영어 "multiple characters" 가 없어서 명세의 다인물 키워드가
+# 빗나갔다 — topic 에 그 단어를 쓰면 어느 분기도 못 타고, 이어서 픽셀 감지가
+# 시트로 잡으면 **"Every view is the same ONE SINGLE person"** 이 라인업에
+# 들어가는 정반대 지시가 나갔다(실측: 1인=False, 다인=False). 그래서 영어
+# 변형("multiple·several·different characters")과 한국어 조합을 함께 넣었다.
+# 고의로 뺀 것: "cast" 단독 — "cast shadow"(그림자)에 걸린다. "cast sheet" 만.
 MULTI_PERSON_SHEET_TOPICS = (
     "여러 캐릭터", "여러캐릭터", "인물 시트", "인물시트", "다캐릭터", "다 캐릭터",
     "라인업", "lineup", "cast sheet", "ensemble sheet", "오디션 시트",
     "여러 인물", "복수 캐릭터", "다인물 시트",
+    "multiple characters", "several characters", "different characters",
+    "여러 명의 캐릭터", "여러명의 캐릭터", "다른 캐릭터", "다른캐릭터",
 )
 
 

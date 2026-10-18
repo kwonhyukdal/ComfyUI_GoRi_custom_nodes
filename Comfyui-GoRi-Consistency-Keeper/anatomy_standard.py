@@ -163,6 +163,7 @@ def correct_order_violations(pts, checks):
         return None
     fixed = False
 
+    # y 를 [0,1] 로 클램프해 넣고 fixed 표시 — 랜드마크가 정의 밖으로 나가지 않게
     def _set_y(idx, y):
         nonlocal fixed
         # 왜(Why) clamp (2026-10-07 감사): 어깨 y 가 표준 간격보다 화면

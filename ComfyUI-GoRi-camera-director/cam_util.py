@@ -51,6 +51,7 @@ def _note_once(key: str, msg: str) -> None:
     _log(msg)
 
 
+# JSON 데이터 파일 로드 — 없거나 깨졌으면 내장 기본값으로 (노드는 계속 뜬다)
 def _load(name: str, fallback):
     try:
         with open(os.path.join(HERE, name), encoding="utf-8") as fh:

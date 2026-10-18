@@ -14,7 +14,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"CHARACTER_SHEET_NEGATIVE", "CHARACTER_SHEET_PEOPLE_NEGATIVE", "CHARACTER_SHEET_VIEWS", "_SHEET_MIN_PANELS", "_SHEET_MIN_SPACING_RATIO", "_SHEET_MIN_CELL_SIMILARITY", "_SHEET_PROFILE_W", "_SHEET_SIG_GRID", "_column_profile", "_row_profile", "_panels_from_profile", "_axis_spacing_ratio", "_best_axis", "_sheet_cell_boxes", "_cell_signature", "_cell_similarity", "_sheet_normalize", "_looks_like_sheet", "sheet_like_slots", "_np_as_rgb", "character_sheet_guard"
+"CHARACTER_SHEET_NEGATIVE", "CHARACTER_SHEET_PEOPLE_NEGATIVE", "CHARACTER_SHEET_VIEWS", "_SHEET_MIN_PANELS", "_SHEET_MIN_SPACING_RATIO", "_SHEET_MIN_CELL_SIMILARITY", "_SHEET_PROFILE_W", "_SHEET_SIG_GRID", "_column_profile", "_row_profile", "_panels_from_profile", "_axis_spacing_ratio", "_best_axis", "_sheet_cell_boxes", "_cell_signature", "_cell_similarity", "_sheet_normalize", "_looks_like_sheet", "sheet_like_slots", "_weak_metrics", "weak_sheet_slots", "_np_as_rgb", "character_sheet_guard"
 ]
 
 
@@ -127,6 +127,17 @@ _SHEET_MIN_CELL_SIMILARITY = 0.20
 
 # 프로파일의 크기. 512면 충분하고 더 볼 필요 없다(비용 대비 정보량 낮음).
 _SHEET_PROFILE_W = 512
+
+# **약한 시트 게이트** (2026-10-19). 엄격 게이트(패널 4·간격 0.45·유사도 0.20)를
+# 못 채운 "시트에 가까운" 슬롯을 가리킨다. 단독으로는 아무 것도 하지 않는다 —
+# 호출부가 **topic 의 1인 시트 선언**과 교차할 때만 latent 제외에 쓴다.
+# 왜(Why) 필요한가: 3뷰 줄(삼면도) 실측 (n=4, greg=0.44, sim=0.315) — 간격이
+# 기준 0.45 를 0.01 탈락해서 "시트 레이아웃을 복사하지 마"라는 지시와 시트가
+# latent 로 들어가는 모순이 나왔다. 지시는 이미 나가고 있었다.
+# 오탐 실측(일반 사진 10종 + 숲 배경): 전 축 밴드 0개 → (0, 0.0, 0.0).
+# 약하게 잡히려고 해도 n≥3 자체가 안 나온다. 문턱은 이 실측에서 골랐다.
+_SHEET_WEAK_MIN_PANELS = 3
+_SHEET_WEAK_MIN_SPACING = 0.40
 
 
 # 셀 서명의 격자 크기. 8x8 은 색/명도 구조를 남기면서 노이즈는 줄인다.
@@ -540,13 +551,75 @@ def _np_as_rgb(img):
         return None
 
 
-def character_sheet_guard(image_count: int, topic: str, image_labels=None, pixel_sheet_slots=None) -> str:
+def _weak_metrics(arr):
+    """약한 시트 측정: (밴드 수, 간격 균일도, 셀 유사도). 시트가 아니면 (0,0,0).
+
+    엄격 `_looks_like_sheet` 와의 차이는 밴드 하한(3 대 4)과 간격 문턱(0.40 대
+    0.45)뿐이다. 측정은 프로파일을 다시 돌린다 — 호출부가 topic 시트 선언일 때만
+    쓰므로 일반 실행 비용은 0 이다.
+    """
+    try:
+        a = _sheet_normalize(arr)
+        if a is None:
+            return 0, 0.0, 0.0
+        best = (0, 0.0)
+        for prof in (_column_profile(a), _row_profile(a)):
+            if prof is None:
+                continue
+            bands = _panels_from_profile(prof)
+            if len(bands) < _SHEET_WEAK_MIN_PANELS:
+                continue
+            greg = _axis_spacing_ratio(bands)
+            if greg > best[1]:
+                best = (len(bands), greg)
+        n, greg = best
+        sim = _cell_similarity(a) if n else 0.0
+        return n, greg, sim
+    except Exception:  # noqa: BLE001
+        return 0, 0.0, 0.0
+
+
+def weak_sheet_slots(image_items) -> list:
+    """엄격 게이트는 못 채운 '시트에 가까운' 슬롯 번호 목록 (문자열).
+
+    **단독으로는 아무 것도 하지 않는다.** 호출부가 topic 의 1인 시트 선언과
+    교차할 때만 latent 제외·슬롯 지목에 쓴다. 실측 근거는 _SHEET_WEAK_* 주석.
+    """
+    slots = []
+    try:
+        for item in (image_items or []):
+            if not (isinstance(item, (list, tuple)) and len(item) >= 2):
+                continue
+            label, img = item
+            if img is None:
+                continue
+            try:
+                arr = _np_as_rgb(img)
+            except Exception:  # noqa: BLE001
+                continue
+            if arr is None:
+                continue
+            n, greg, sim = _weak_metrics(arr)
+            if (n >= _SHEET_WEAK_MIN_PANELS
+                    and greg >= _SHEET_WEAK_MIN_SPACING
+                    and sim >= _SHEET_MIN_CELL_SIMILARITY):
+                slots.append(str(label))
+    except Exception:  # noqa: BLE001
+        pass
+    return slots
+
+
+def character_sheet_guard(image_count: int, topic: str, image_labels=None, pixel_sheet_slots=None, sheet_kind: str = "", weak_sheet_slots=None, declared_topic=None) -> str:
     """캐릭터 시트 참조 가드 — 시트는 신원 소스, 출력은 카메라 구도 한 컷.
 
     왜(Why): 사용자가 시트를 연결하는 목적은 **신원 일관성**이다. 실사용 표준
     구조는 정면·후면 전신 + 상부 얼굴 정면·후면 + 좌우 측면(한 사람)인데,
     이 뷰들을 "여러 사람"으로 세면 신원 의도와 정반대가 된다. 실측으로
     시트 참조 실행에서 뷰가 별개 인물로 복제되는 문제가 있었다.
+
+    declared_topic: **사용자가 원래 쓴 topic** (LLM 확장 scene 제외). 발동
+    근거는 이 것과 픽셀 판별뿐이다. None 이면 구 호출자 호환으로 topic 을
+    그대로 쓴다(직접 부르는 테스트가 이 경로).
     """
     # 다인물 시트 어휘("인물 시트"·"라인업" 등)는 CHARACTER_SHEET_TOPICS에
     # 없어서 여기서 걸러지면 아래 분기에 도달하지 못한다 → 둘 다 시트로 인정.
@@ -554,9 +627,14 @@ def character_sheet_guard(image_count: int, topic: str, image_labels=None, pixel
     # 6뷰 반복 구조가 보이면 발동한다 (2026-09-28 실측: topic 이 비어
     
     # 있어 1인 시트가 결과에 2명으로 복제됨). 정보는 이미 픽셀에 있다.
+    # **발동 근거는 사용자 선언 또는 픽셀뿐** (2026-10-19). 판정 텍스트는
+    # topic + LLM scene 인데, scene 에 우연히 "different characters" 가
+    # 들어가는 건 시트가 없어도 일상적이다 — 실측: 그 상태로 다인물 시트
+    # 가드가 발동해 "reference image 1 is a sheet" 라는 거짓 지시가 나갔다.
+    _declared = topic if declared_topic is None else (declared_topic or "")
     px_slots = [str(s) for s in (pixel_sheet_slots or [])]
-    if image_count <= 0 or not (_is_character_sheet_request(topic)
-                                or _is_multi_person_sheet(topic)
+    if image_count <= 0 or not (_is_character_sheet_request(_declared)
+                                or _is_multi_person_sheet(_declared)
                                 or px_slots):
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
@@ -570,11 +648,21 @@ def character_sheet_guard(image_count: int, topic: str, image_labels=None, pixel
     if px_slots:
         sheet_slot = ", ".join(px_slots)
         sheet_ref = f"reference image(s) {sheet_slot}"
+    elif (weak_sheet_slots and _is_character_sheet_request(topic)
+          and not _is_multi_person_sheet(topic)):
+        # 엄격 게이트는 못 채웠지만 topic 이 1인 시트를 선언했고 약한 패턴이
+        # 잡혔다 → 그 슬롯을 지목한다 (2026-10-19). first 로 물러서면
+        # 2026-09-29 의 "시트가 아닌 칸을 시트라 지목" 실측이 약한 시트에서
+        # 그대로 되살아난다.
+        sheet_slot = ", ".join(str(s) for s in weak_sheet_slots)
+        sheet_ref = f"reference image(s) {sheet_slot}"
     else:
         sheet_slot = first
         sheet_ref = f"reference image {first}"
     # 다인물 시트(라인업·오디션)는 "전부 한 사람"이 틀린 지시가 된다.
-    if _is_multi_person_sheet(topic):
+    # 토픽 어휘 또는 **LLM 판정**(sheet_kind) — 픽셀만으로는 같은 사람 반복과
+    # 다른 캐릭터 나열을 가를 수 없다(실측 sim 0.415 대 0.216).
+    if _is_multi_person_sheet(topic) or sheet_kind == "multi":
         return (f"multi-person reference sheet: {sheet_ref} is a "
                 "sheet showing SEVERAL DIFFERENT characters side by side, each "
                 "one a distinct individual with their own face, hair and "

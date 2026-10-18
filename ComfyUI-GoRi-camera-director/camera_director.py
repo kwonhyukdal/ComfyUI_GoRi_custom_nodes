@@ -6,10 +6,13 @@
 
 합의된 규칙:
 - 텍스트 경로만 관여 (model/latent 경로 무관)
-- 자동화 tier: auto(규칙, **기본**) / llm(AI 판단) / manual(수동) — llm 실패 시 auto 폴백
+- 자동화 tier: auto(규칙, **기본**) / llm(AI 판단) — llm 실패 시 auto 폴백
   왜(Why) 기본이 auto 인가: LLM 을 쓰면 키가 필요하고 원본 이미지가 외부로
   나간다. 기본값을 llm 으로 두면 API 키 없는 사람이 매 실행마다 실패한다.
-- 프리셋 우선순위: 특정 프리셋 > 직접 설정(드롭다운) > 자동(auto: tier 판정)
+- 프리셋 우선순위: 프리셋은 **칸별 기준값**이고 드롭다운은 그 위의 가감이다.
+  값을 넣은 칸은 그 값(프리셋 + 추가 - 제거)으로 고정되고, '자동'으로 되돌린
+  칸만 프리셋에서 빠져 tier(규칙/LLM) 판정을 받는다. 모든 칸이 자동이면
+  프리셋 전체를 쓴다(API·구 워크플로 경로).
 - 출력 영문, 라벨 한글, 콘솔 로그 한글
 """
 
@@ -24,13 +27,12 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.21"
+__version__ = "1.9.54"
 
 
 import json
 import os
 import re
-import sys
 import threading
 import time
 import uuid
@@ -59,6 +61,7 @@ try:
     from .cam_physics import *  # noqa: F403
     from .cam_spacing import *  # noqa: F403
     from .cam_sheet import *  # noqa: F403
+    from .cam_classify import *  # noqa: F403
     from .cam_llm import *  # noqa: F403
     from .cam_translate import *  # noqa: F403
     from .cam_translate import _has_cjk
@@ -72,6 +75,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
     from cam_physics import *  # noqa: F403
     from cam_spacing import *  # noqa: F403
     from cam_sheet import *  # noqa: F403
+    from cam_classify import *  # noqa: F403
     from cam_llm import *  # noqa: F403
     from cam_translate import *  # noqa: F403
     from cam_translate import _has_cjk
@@ -177,9 +181,50 @@ def preflight_warnings(_topic: str, camera: dict, latent_mp=None,
 # 노드
 # ---------------------------------------------------------------------------
 
+def _reference_roles_from_llm(obj, labels) -> dict:
+    """LLM JSON 의 references[] → {슬롯: 역할}. 잘못된 값은 버린다.
+
+    역할 어휘는 여기서 닫는다 — LLM 이 임의 문자열을 보내면 plan 이 오염된다.
+    """
+    allowed = {"person", "outfit", "object", "background", "style", "pose"}
+    try:
+        valid = {int(str(l)) for l in (labels or [])}
+    except (TypeError, ValueError):
+        valid = set()
+    refs = obj.get("references") if isinstance(obj, dict) else None
+    out = {}
+    if not isinstance(refs, list):
+        return out
+    for item in refs:
+        if not isinstance(item, dict):
+            continue
+        try:
+            slot = int(item.get("slot"))
+        except (TypeError, ValueError):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if slot in valid and role in allowed:
+            out[slot] = role
+    return out
+
+
+def _sheet_kind_from_llm(obj) -> str:
+    """LLM JSON 의 sheet_kind → "" | "single" | "multi". 그 밖은 버린다.
+
+    왜(Why) 화이트리스트인가: 이 값은 다인물 시트 분기를 뒤집는다. "multi" 가
+    날아오면 "전부 한 사람" 지시 대신 "패널마다 다른 인물" 지시가 나가므로,
+    임의 문자열을 통과시키면 사용자가 시트 어휘도 없이 분기가 뒤집힌다.
+    """
+    if not isinstance(obj, dict):
+        return ""
+    kind = str(obj.get("sheet_kind") or "").strip().lower()
+    return kind if kind in ("single", "multi") else ""
+
+
 def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
                        image_items, primary_image, _reference_images,
-                       tier="", llm_hint=""):
+                       tier="", llm_hint="", weak_sheet_slots=None,
+                       sheet_kind="", declared_topic=None):
     """한 실행의 가드 판정을 **한 곳에서** 모아서 돌려준다.
 
     왜(Why) `_reference_images` 는 받기만 하나: 예전 리팩터 전에는 여기서
@@ -230,11 +275,27 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # upper 변형(화면에 없는 발·다리 문구 제외)을 쓴다.
     footwear = is_human and image_count >= 1
     body_object_boundary = is_human and image_count >= 1
+    # 의복 경계 (2026-10-16 실측, 파란 동그라미): 생성물에서 손이 치마 자락에
+    # 삼켜졌다. 카메라에는 이 경우를 덮는 가드가 없었다(가구 경계는 furniture
+    # 전용). 가구 경계와 **같은 게이트**를 쓴다 — 인물 + 참조 실행. 게이트를
+    # 넓히면 다른 경로의 문구가 함께 늘어나므로 기존 계약 범위로 시작한다.
+    garment_boundary = is_human and image_count >= 1
+    # 신발 교체 지시면 유지 가드를 교체 가드로 갈아탄다 (2026-10-15 실측):
+    # "앞이 막혀 있는 흰색 단화" 지시와 "keep that footwear(reference)" 가
+    # 같은 positive 에서 정면 충돌했다 (2026-10-13 에 identity anchor 는
+    # 고쳤는데 이 가드는 남아 있었다). CU/ECU 에서는 발이 화면에 없으므로
+    # 기존 upper 변형 그대로 — 교체 문구가 없는 발을 그려 넣는다.
+    footwear_change = (footwear and _limb_visible
+                       and _topic_changes_shoes(text))
     # llm_hint 방어어는 LLM 판정이 실제로 이뤄진 실행에만.
     hint_defense = tier == "llm" and bool((llm_hint or "").strip())
 
-    # 포즈 참조: topic에 포즈 역할이 명시된 슬롯.
-    pose_slots = _pose_role_slots(text) & set(labels)
+    # 포즈 참조: topic에 포즈 역할이 명시된 슬롯 + **힌트가 말하는 포즈 슬롯**.
+    # 왜(Why) 힌트도 보나 (2026-10-19): LLM 이 이미지를 보고 "이 칸은 포즈"라고
+    # 알려 줘도 topic 전용으로만 돌리면 포즈 가드가 안 나갔다. topic 을 비운
+    # 사용자에게만 해당하던 구멍이라 힌트를 합친다. 힌트의 pose 는 병합 지점에서
+    # "픽셀이 사람을 찾은 슬롯"을 걸러냈으므로 여기서는 그대로 신뢰한다.
+    pose_slots = (_pose_role_slots(text) | set(_hint_pose_slots())) & set(labels)
     pose_pos = _pose_reference_guard(pose_slots)
     # 물리·공간: topic의 접촉/동작 동사 → 이미지의 물리 상태.
     phys_pos, phys_neg = physics_contact_guard(text)
@@ -255,14 +316,40 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     grounding = ""
     if not phys_pos and is_human:
         grounding = physics_grounding_guard(text)
+    # 지면 고정 (2026-10-15 실측, 파란 동그라미): 배경-참조 지정이면 피사체가
+    # 딛은 지면도 그 참조여야 한다 — run10 에서 참조 배경(흙바닥)과 달리 바닥이
+    # 콘크리트로 나왔다. negative 는 물리 negative 채널(phys_neg)로 함께 흘린다
+    # — 짝인 방어를 한곳에서 만들어 어긋날 수 없게 한다.
+    ground_pos, ground_neg = ground_reference_guard(text)
+    if ground_neg:
+        phys_neg = (phys_neg + ", " + ground_neg) if phys_neg else ground_neg
 
     # 캐릭터 시트: 텍스트 의도 또는 **픽셀 판별** 중 하나라도.
+    # declared_topic 은 사용자가 원래 쓴 topic — 시트 가드 발동 근거.
+    # subject_text 는 topic + LLM scene 으로 더 넓지만(분기 판정용),
+    # 발동에는 쓰지 않는다(2026-10-19 거짓 발동 실측).
     pixel_sheet = sheet_like_slots(image_items)
     sheet_text = character_sheet_guard(
-        image_count, text, image_labels=labels, pixel_sheet_slots=pixel_sheet)
+        image_count, text, image_labels=labels, pixel_sheet_slots=pixel_sheet,
+        sheet_kind=sheet_kind, weak_sheet_slots=weak_sheet_slots,
+        declared_topic=declared_topic)
 
     furniture_slots = _object_dna_slots(text, labels, image_count)
     furniture_pos = _furniture_dna_guard(text, furniture_slots)
+    # 참조 사물 외형 고정 (2026-10-16 실측, 파란 동그라미): 의자 등받이 채널
+    # 터프팅이 사라지고 색이 밝아졌다. FURNITURE_DNA 는 "정체성 유지"라 어떤
+    # 특징인지 지명하지 못하고, denoise=1.0 에서 참조 픽셀은 거의 안 쓰인다 —
+    # 문구가 유일한 전달 경로다. 참조에서 대표색을 읽어 따로 굳힌다.
+    # 슬롯 이미지는 라벨로 찾을 수 있어야 하므로 여기서 한 번만 만든다.
+    _slot_images = {}
+    for _pair in (image_items or []):
+        try:
+            _lbl, _img = _pair
+            _slot_images[int(str(_lbl))] = _img
+        except (TypeError, ValueError):
+            continue
+    furn_surface_pos, furn_surface_neg = object_appearance_guard(
+        text, _slot_images, furniture_slots)
     remove_item = _remove_item_guard(text)
 
     pos = {
@@ -281,14 +368,18 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         "anatomy_count": ((ANATOMY_COUNT_POSITIVE if _limb_visible
                            else ANATOMY_COUNT_POSITIVE_UPPER)
                           if anatomy_count else ""),
-        "footwear": (_footwear_guard(_shot)[0] if footwear else ""),
+        "footwear": (FOOTWEAR_CHANGE_POSITIVE if footwear_change
+                     else (_footwear_guard(_shot)[0] if footwear else "")),
         "body_object_boundary": (_body_object_boundary_guard(_shot)[0]
                                  if body_object_boundary else ""),
+        "garment_boundary": (_garment_boundary_guard(_shot)[0]
+                             if garment_boundary else ""),
         "furniture": furniture_pos,
         "character_sheet": sheet_text,
         "pose": pose_pos,
         "spacing": spacing_pos,
         "physics": phys_pos or grounding,
+        "ground": ground_pos,
     }
     return {
         "positive": pos,
@@ -305,6 +396,8 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
             "body_object_boundary": body_object_boundary,
             "body_object_boundary_upper": (body_object_boundary
                                            and not _limb_visible),
+            "garment_boundary": garment_boundary,
+            "garment_boundary_upper": (garment_boundary and not _limb_visible),
             "hint_defense": hint_defense,
             "remove_item": bool(remove_item),
             "furniture": bool(furniture_pos),
@@ -314,8 +407,14 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         "physics_neg": phys_neg,
         "pose_slots": sorted(pose_slots),
         "pixel_sheet_slots": list(pixel_sheet),
+        # 약한 시트 슬롯 — latent 제외 보조용. 엄격 pixel_sheet_slots 과 달리
+        # **시트 가드 발동에는 쓰지 않는다**(오탐 방지). Skills 경로가
+        # _last_guard_plan 으로 이 값을 물고 간다.
+        "weak_sheet_slots": [str(s) for s in (weak_sheet_slots or [])],
         "spacing_measure": spacing_measure,
         "furniture_slots": furniture_slots,
+        "furniture_surface_pos": furn_surface_pos,
+        "furniture_surface_neg": furn_surface_neg,
     }
 
 
@@ -335,6 +434,7 @@ class CameraDirector:
                    "image 단자에 연결된 이미지는 image_out으로 그대로 통과됩니다 "
                    "(I2V 시작프레임 배선 정리용, 영상 생성 기능 아님).")
 
+    # 내부용 베이스 클래스 입력 정의 — 노출 노드는 이걸 상속해 확장한다
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -342,7 +442,7 @@ class CameraDirector:
                 "topic": ("STRING", {"default": "", "multiline": True,
                                      "dynamicPrompts": False}),
                 "preset": (preset_names(),),
-                "automation": (["AI 판단 (llm)", "규칙 (auto)", "수동 (manual)"],
+                "automation": (["AI 판단 (llm)", "규칙 (auto)"],
                                {"default": "규칙 (auto)", "label": "automation ai"}),
                 "shot": ([AUTO] + list(SHOT),),
                 "lens": ([AUTO] + list(LENS),),
@@ -373,10 +473,16 @@ class CameraDirector:
                 # 하단 근처에 둔다 (맨 끝은 구 워크플로 호환용 추가 영역).
                 # 겉으로는 평범한 지시 위젯이지만, 입력값은 필터 없이 LLM에
                 # 그대로 전달된다(로컬 uncensored 모델과 함께 쓰면 자유 지시 가능).
+                # 2026-10-17: UI에서 행을 숨긴다("hidden" 옵션 — 프런트엔드가
+                # 레이아웃에서 hidden 위젯을 제외한다). 기능은 API·스크립트
+                # 전용으로 살리고, 위젯 선언은 남겨 widgets_values 위치
+                # 매핑(구 워크플로 호환)을 보존한다. hidden 을 모르는 판은
+                # 예전처럼 보일 뿐이다(소프트 저하).
                 "llm_hint": ("STRING", {
-                    "default": "", "multiline": True,
+                    "default": "", "multiline": True, "hidden": True,
                     "tooltip": "LLM에게 전달할 짧은 지시 (구도·조명·무드·장면 등). "
-                               "AI 판단 (llm) 티어에서만 적용된다.",
+                               "AI 판단 (llm) 티어에서만 적용된다. "
+                               "UI에는 표시되지 않는다(API·스크립트 전용).",
                 }),
                 # --- 이후 추가 위젯은 반드시 맨 뒤에 둘 것 ---
                 # 왜(Why): 구 워크플로 파일의 위치 기반 매핑이 밀려
@@ -404,11 +510,15 @@ class CameraDirector:
     # ----- 값 정규화 -------------------------------------------------------
     @staticmethod
     def _widget_camera(**kw) -> dict:
-        """드롭다운 라벨 → 카메라 dict. AUTO/무효값은 DEFAULTS 유지."""
+        """드롭다운 라벨 → 카메라 dict. AUTO/무효값은 DEFAULTS 유지.
+
+        다중 선택(콤마 구분)은 유효 라벨이 전부 맞을 때만 채택한다.
+        """
         cam = dict(DEFAULTS)
         for key, val in kw.items():
-            if val and val != AUTO and val in _TABLES.get(key, {}):
-                cam[key] = val
+            norm = normalize_multi_value(val, _TABLES.get(key, {}))
+            if norm:
+                cam[key] = norm
         return cam
 
     @staticmethod
@@ -437,8 +547,10 @@ class CameraDirector:
         return cam
 
     # ----- 본체 ------------------------------------------------------------
-    def run(self, topic, preset, automation, shot, lens, angle, composition,
-            lighting, grade, motion, speed, amplitude, motion2=AUTO,
+    def run(self, topic="", preset=AUTO, automation="",
+            shot=AUTO, lens=AUTO, angle=AUTO, composition=AUTO,
+            lighting=AUTO, grade=AUTO, motion=AUTO, speed=AUTO,
+            amplitude=AUTO, motion2=AUTO,
             prompt_in=None, provider="OpenAI", model="gpt-4o-mini", api_key="",
             custom_base_url="", extra_negative="", image=None,
             image_list=None, image_items=None, llm_hint="", unique_id=None,
@@ -448,6 +560,15 @@ class CameraDirector:
         # 실행 기록과 사진 메타데이터에서 자기 api_key를 먼저 지운다. 두 인자는
         # 이미 바인딩되어 실행에 쓰이므로 기록 제거와 무관하게 정상 동작한다.
         png_scrubbed = False
+        # 이전 실행의 참조 분류 힌트를 지우고 시작한다 (2026-10-19 실측 결함).
+        # 왜(Why) 끝이 아니라 시작에서 지우나: run() 도중 예외가 나면 함수 끝의
+        # clear_reference_kinds() 가 건너뛰어진다. _KIND_HINT 는 thread-local 이고
+        # ComfyUI 는 노드를 스레드풀에서 돌리므로, 다음 실행이 같은 스레드에
+        # 배정되면 옛 힌트가 새 실행에 샌다. 특히 다음 실행이 이미지 없는
+        # 경로(reference_items 없음)면 set_reference_kinds 를 아예 안 불러
+        # 옛 힌트가 그대로 남는다(실측). 시작에서 무조건 초기화하면 예외 경로의
+        # 누수까지 방어된다 — 정리 시점을 옮기는 것보다 안전하다.
+        clear_reference_kinds()
         if _scrub_api_key_from_prompt(prompt, unique_id):
             _log("사진 메타데이터 안전: 실행 기록의 api_key 제거")
         if _scrub_api_key_from_extra_pnginfo(extra_pnginfo, unique_id, api_key):
@@ -461,35 +582,82 @@ class CameraDirector:
         # 프롬프트 진입점: 선 연결(prompt_in)이 있으면 우선, 없으면 topic 칸
         external = (prompt_in or "").strip()
         if external:
+            # topic 칸에 글자가 있으면 **버려진다** — 대체 세맨텍스는 계약
+            # (테스트 "선연결 시 외부 프롬프트 우선")이라 유지하지만, 조용한
+            # 손실은 원인 없는 오판을 만든다. 슬롯 지시("2번은 포즈만")가
+            # 사라졌는데 결과가 이상한 이유를 사용자가 알 수 없게 되므로
+            # 한 번 분명히 알린다 (2026-10-19 사용자 지적).
+            if (topic or "").strip():
+                _log("[Camera Director] prompt_in 에 선이 연결되어 topic 칸의 "
+                     "글자는 쓰이지 않습니다 — 슬롯 역할·시트·포즈 지시가 필요하면 "
+                     "그 내용을 연결된 프롬프트 쪽에 함께 넣어 주세요")
             topic, topic_src = external, "외부(prompt_in)"
         else:
             topic, topic_src = (topic or "").strip(), "topic 칸"
+        # 의도 분석용 코어 — 태그형 프롬프트의 잡음을 걷어낸 텍스트.
+        # **출력(장면 문장)은 topic 그대로**고, 역할·의상·시트·포즈 같은
+        # 의도 감지만 이 걸 본다(2026-10-19 태그 오탐 실측).
+        analysis = intent_core(topic)
         automation = automation or ""
+        # 구버전 '직접 설정 (custom)' 등 알 수 없는 프리셋은 자동으로 폴백
+        if preset not in ([AUTO] + list(PRESETS.keys())):
+            preset = AUTO
         low_a = automation.lower()
-        tier = ("llm" if "llm" in low_a
-                else "auto" if "auto" in low_a
-                else "manual")
+        # tier 는 llm / auto 두 가지뿐이다 (수동 tier 는 제거됐다).
+        # 왜(Why) 수동이 없어도 되는가: 각 기능 드롭다운이 다중 선택을 지원하고,
+        # 사용자가 고른 값은 tier(규칙/LLM)가 고정값으로 존중한다. 즉 "내가 고른
+        # 값만 쓰기" 는 드롭다운 선택으로 표현된다 (선택이 없으면 AUTO 로 두고
+        # 규칙/LLM 이 채운다). 값이 비거나 알 수 없으면 규칙(auto) 이 기본이다.
+        tier = "llm" if "llm" in low_a else "auto"
 
         widget_pairs = [("shot", shot), ("lens", lens), ("angle", angle),
                         ("composition", composition), ("lighting", lighting),
                         ("grade", grade), ("motion", motion),
                         ("speed", speed), ("amplitude", amplitude),
                         ("motion2", motion2)]
-        widget_cam = self._widget_camera(**dict(widget_pairs))
 
-        # 1) 카메라: 특정 프리셋 > 직접 설정(명시 항목만 고정) > tier 판정
-        # 왜(Why): 직접 설정에서 "자동 (auto)"으로 둔 항목까지 DEFAULTS로 고정되어
-        # 규칙/LLM 판정이 전혀 반영되지 않는 문제가 있었다. 명시한 항목만 고정하고
-        # AUTO 항목은 tier(규칙/LLM) 판정에 맡긴다.
-        forced, cam_source = None, ""
-        fixed_cam, locked = None, set()
-        if preset in PRESETS:
-            forced = self._preset_camera(preset)
-            cam_source = f"프리셋 '{preset}'"
-            locked = set(forced)
-        elif preset == CUSTOM:
-            fixed_cam = {k: v for k, v in widget_pairs if v and v != AUTO}
-            locked = set(fixed_cam)
+        # 1) 카메라: 프리셋 = 칸별 기준값, 드롭다운 = 그 위의 가감
+        # 왜(Why) 예전 규칙을 바꿨나: "프리셋 + 한 칸이라도 직접 고르면 프리셋
+        # 전체를 버린다" 였다. 그래서 프리셋을 고른 뒤 한 칸만 더하면 나머지
+        # 아홉 칸이 자동 판정으로 돌아가, 사용자가 고른 프리셋이 사라진 것처럼
+        # 보였다. 이제 프리셋은 **칸별 기준값**이고 드롭다운은 가감이다:
+        #   값이 있는 칸  그 값(프리셋 값 + 추가분 - 제거분)으로 고정
+        #   '자동'인 칸   그 칸만 프리셋에서 빠지고 tier(규칙/LLM)가 채운다
+        # 모든 칸이 자동이면 프리셋 전체를 쓴다 — 위젯을 채우지 않고 큐에 넣는
+        # API·구 워크플로 경로를 그대로 살리기 위해서다.
+        fixed_cam = {}
+        for _k, _v in widget_pairs:
+            _norm = normalize_multi_value(_v, _TABLES.get(_k, {}))
+            if _norm:
+                fixed_cam[_k] = _norm
+
+        preset_cam = self._preset_camera(preset) if preset in PRESETS else None
+        preset_added, preset_removed = [], []
+        cam_source = ""
+        if preset_cam is not None:
+            if not fixed_cam:
+                # 위젯이 전부 '자동' — 프리셋만 고른 상태(또는 API 경로).
+                fixed_cam = dict(preset_cam)
+                cam_source = f"프리셋 '{preset}'"
+            else:
+                _kept = {}
+                for _k, _pv in preset_cam.items():
+                    _wv = fixed_cam.get(_k)
+                    if _wv is None:
+                        # 이 칸을 '자동'으로 되돌렸다 -> 프리셋에서만 제외.
+                        preset_removed.append((_k, _pv))
+                        continue
+                    _kept[_k] = _pv
+                    for _lbl in split_multi(_wv):
+                        if _lbl not in split_multi(_pv):
+                            preset_added.append((_k, _lbl))
+                    for _lbl in split_multi(_pv):
+                        if _lbl not in split_multi(_wv):
+                            preset_removed.append((_k, _lbl))
+                fixed_cam = {**_kept, **fixed_cam}
+                cam_source = f"프리셋 '{preset}' + 직접 조정"
+        locked = set(fixed_cam)
+
 
         # 2) LLM (tier=llm일 때 1회만 — 실패 시 규칙 폴백)
         #    연결된 이미지들은 원래 image_N 번호를 유지하며 vision 전달 + 캐시 키에 이미지 서명 포함
@@ -500,6 +668,50 @@ class CameraDirector:
         appearance_ref = 9 in image_labels or 10 in image_labels
         primary_image = reference_images[0] if reference_images else None
         image_count = len(reference_images)
+        # 참조 자동 분류 (2026-10-19) — 슬롯 번호가 아니라 픽셀로 사람을 찾는다.
+        # 왜(Why) 필요한가: 1번에 옷이나 사물을 넣는 사용자가 있다. 예전 규약은
+        # "첫 연결 = 주 피사체"라서 그 옷이 사람 신원으로 지목됐다. 토픽이 슬롯을
+        # 지목하면 그 판정이 우선하고(cam_subject 힌트 규칙), 비었을 때만 쓴다.
+        ref_kinds = {}
+        if reference_items:
+            try:
+                ref_kinds = classify_references(reference_items)
+                set_reference_kinds(ref_kinds)
+                _persons = person_slots(ref_kinds)
+                if _persons:
+                    _log("[Camera Director] 참조 자동 분류 — 인물 슬롯 "
+                         + "/".join(str(x) for x in _persons)
+                         + f" (분석 {len(ref_kinds)}칸)")
+            except Exception as _e:  # noqa: BLE001
+                ref_kinds = {}
+                _log("[Camera Director] 참조 자동 분류 실패 "
+                     f"({type(_e).__name__}) — 기존 규약으로 진행")
+        # 캐릭터 시트 픽셀 판별 — LLM 비전 노트용으로 여기서 한 번 더 부른다.
+        # 왜(Why) 여기서도 부르나: resolve_guard_plan 안의 판별은
+        # _plan(=LLM 블록 뒤)에서야 끝나는데, LLM 에게 보내는 image_note 는
+        # 그보다 앞에서 만들어진다. 그래서 토픽이 비어 있으면 픽셀이 시트를
+        # 찾아도 LLM 은 시트라는 맥락 없이 6뷰 이미지를 받았다(2026-10-19 실측).
+        # 비용은 장당 약 9ms.
+        pixel_sheet = []
+        weak_sheet = []
+        if reference_items:
+            try:
+                pixel_sheet = sheet_like_slots(reference_items)
+                # **1인 시트를 topic 에 선언했을 때만** 약한 시트(3뷰 줄)를
+                # 측정한다 (2026-10-19). 왜 조건을 붙이나: 약한 게이트는
+                # n≥3·간격 0.40 으로 느슨해서, 단독으로 쓰면 오탐이 latent
+                # 제외로 바로 연결된다. 지시는 이미 topic 에서 나가고 있으므로
+                # "지시와 파이프라인이 모순되는" 경우만 구제한다.
+                if (_is_character_sheet_request(analysis)
+                        and not _is_multi_person_sheet(analysis)):
+                    weak_sheet = weak_sheet_slots(reference_items)
+                    if weak_sheet:
+                        _log("[Camera Director] 약한 시트 패턴 — "
+                             + "/".join(weak_sheet)
+                             + "번 (엄격 게이트 미달, topic 시트 선언과 교차)")
+            except Exception:  # noqa: BLE001
+                pixel_sheet = []
+                weak_sheet = []
         llm_obj = None
         img_sig, img_b64, img_b64s = None, None, []
         converted_labels = []
@@ -507,7 +719,7 @@ class CameraDirector:
         metrics = {}
         # 포즈 지정 슬롯은 topic 텍스트로 판정한다 (이미지가 없어도 참조 슬롯
         # 번호가 텍스트에 있으면 유효하므로).
-        _pose_slots = _pose_role_slots(topic or "")
+        _pose_slots = _pose_role_slots(analysis)
         if primary_image is not None:
             try:
                 metrics = image_metrics(primary_image)
@@ -517,9 +729,9 @@ class CameraDirector:
         # AI 판단 (llm)이면 판정 재료가 있는 한 항상 LLM을 호출한다.
         # 재료 = topic 텍스트 또는 연결된 이미지(비전 판정).
         # 왜(Why): topic이 비어 있어도 이미지+provider 설정만으로 판정 가능하며,
-        # "판단 안 함"이 기대되는 상황은 규칙/수동 티어를 고른 경우뿐이다.
+        # "판단 안 함"이 기대되는 상황은 규칙 티어를 고른 경우뿐이다.
         llm_attempted = False
-        resolved_model = model  # LLM 미호출 실행(규칙/수동)의 이력 기록용 기본값
+        resolved_model = model  # LLM 미호출 실행(규칙)의 이력 기록용 기본값
         _t0 = time.perf_counter()
         if tier == "llm" and (topic or reference_images):
             llm_attempted = True
@@ -551,7 +763,7 @@ class CameraDirector:
                     # 왜(Why): 첫 연결이 반드시 주 피사체인 것은 아니다 -- 첫 연결이
                     # 핸드백 + 다음이 여성이면 여성이 주 피사체여야 하고, 사물 명시
                     # 슬롯은 사람으로 변하지 않도록 제한해야 한다.
-                    plan = _person_object_plan(topic, converted_labels)
+                    plan = _person_object_plan(analysis, converted_labels)
                     main_label = plan["main"]
                     if len(converted_labels) == 1:
                         image_note = (f"\nReference image {main_label} is attached. Prefer keeping its existing "
@@ -636,8 +848,20 @@ class CameraDirector:
                                    "but image conversion failed. Treat them as text "
                                    "intent: natural, soft, realistic, non-clinical "
                                    "appearance; never include them as panels/crops/collages.")
-                if converted_labels and _is_character_sheet_request(topic):
-                    image_note += ("\nOne attached reference is a character sheet "
+                # 캐릭터 시트 설명 — **토픽 어휘 또는 픽셀 판별** 중 하나.
+                # 왜(Why) 픽셀도 넣나 (2026-10-19): 토픽을 비워 두면 이 설명이
+                # 아예 빠져 LLM 이 6뷰 이미지를 "시트"라는 맥락 없이 받았다.
+                # 규칙 경로의 가드 문장은 픽셀만으로도 나가지만 LLM 신원 서술에는
+                # 맥락이 없어 패널을 여러 사람으로 세는 서술이 나왔다.
+                # 다인물 토픽("여러 캐릭터"·"multiple characters" 등)은 제외한다 —
+                # 거기 "전부 한 사람" 설명이 들어가면 정반대 지시가 된다.
+                if converted_labels and (
+                        _is_character_sheet_request(analysis)
+                        or (pixel_sheet and not _is_multi_person_sheet(analysis))):
+                    _sh_ref = (" (image(s) "
+                               + ", ".join(str(x) for x in pixel_sheet)
+                               + ")") if pixel_sheet else ""
+                    image_note += (f"\nOne attached reference{_sh_ref} is a character sheet "
                                    "(the same person shown from several angles). "
                                    "Treat every view as one identical person — same "
                                    "face, hairstyle, body type, outfit — and keep "
@@ -646,6 +870,27 @@ class CameraDirector:
                                    "labels, not a reproduction of the sheet's grid or "
                                    "multi-panel layout, unless the user explicitly "
                                    "requests a character sheet as output.")
+                if ref_kinds:
+                    _pp = person_slots(ref_kinds)
+                    if _pp:
+                        image_note += (
+                            "\nPixel analysis of the attached references: image(s) "
+                            + ", ".join(str(x) for x in _pp)
+                            + " contain a person. Treat those slots as the human "
+                            "identity source(s); the other slots are non-person "
+                            "references (background, object, garment or style) "
+                            "unless the topic says otherwise.")
+                    else:
+                        image_note += (
+                            "\nPixel analysis of the attached references: no person "
+                            "was detected in any slot. Do not invent a person from "
+                            "them; use them for environment, objects or style.")
+                if converted_labels:
+                    # references[] 를 슬롯 번호로 쓰게 하려면 첨부 순서를 알려야 한다.
+                    image_note += (
+                        "\nAttached image order and slot numbers: "
+                        + ", ".join(str(x) for x in converted_labels)
+                        + ". Use these numbers in references[].slot.")
                 resolved_model = resolve_model(provider, model)
                 hint_text = (llm_hint or "").strip()
                 # 사용자 지시는 LLM user 메시지 끝에 최우선 블록으로 붙인다.
@@ -667,7 +912,7 @@ class CameraDirector:
                              f"ComfyUI 모델을 GPU에서 내림 (이후 샘플러에서 자동 재로드)")
                 llm_obj = llm_client.chat(
                     provider, resolved_model, api_key, llm_system(),
-                    llm_user(topic, forced if forced is not None else fixed_cam)
+                    llm_user(topic, fixed_cam)
                     + image_note + hint_note,
                     image_b64=img_b64, image_b64s=img_b64s,
                     image_sig=img_sig if not img_b64s else None,
@@ -731,7 +976,7 @@ class CameraDirector:
                 llm_obj = None
                 _notify_llm_status(unique_id, "fail")
         else:
-            # llm이 실제로 동작하지 않는 실행(규칙/수동 티어, 재료 없음)이면 소등
+            # llm이 실제로 동작하지 않는 실행(규칙 티어, 재료 없음)이면 소등
             _notify_llm_status(unique_id, "off")
             if tier == "llm" and not (topic or reference_images):
                 _log("[Camera Director] AI 판단 (llm)이지만 topic과 이미지가 모두 "
@@ -740,29 +985,66 @@ class CameraDirector:
                 _log("[Camera Director] llm_hint는 AI 판단 (llm) 티어에서만 적용됩니다 "
                      f"(현재 tier={tier})")
 
-        if forced is not None:
-            camera = dict(forced)
-        elif tier == "manual":
-            camera = ({**DEFAULTS, **fixed_cam} if fixed_cam is not None
-                      else dict(widget_cam))
-            cam_source = "직접 설정(수동)" if fixed_cam is not None else "수동(드롭다운)"
-        elif tier == "auto":
+        # LLM 이 이미지를 보고 역할을 알려 줬으면 픽셀 판정을 덮는다 (2026-10-19).
+        # 왜(Why) 덮나: 픽셀만으로는 옷/사물/배경을 가를 수 없다. LLM 은 본다.
+        _llm_kinds = _reference_roles_from_llm(llm_obj, converted_labels)
+        if _llm_kinds:
+            # **픽셀이 사람을 찾은 슬롯은 LLM 의 pose 라벨을 받지 않는다.**
+            # 왜(Why): 포즈 맵(골격)은 랜드마크가 안 잡혀 unknown 이지만, 실제
+            # 인물 사진을 LLM 이 pose 로 오라벨하면 그 슬롯의 신원이 통째로
+            # 날아간다(포즈 가드는 "얼굴·의상·신원은 버린다"고 말한다). 픽셀이
+            # 사람을 봤으면 픽셀 판정이 이긴다 — 2026-09-28 실측의 "신원 상실"
+            # 부류라 가장 보수적으로 닫는다. 포즈 맵은 사람이 안 잡히므로
+            # 정상 경로는 그대로 통과한다.
+            _px_persons = {int(k) for k, v in ref_kinds.items()
+                           if v == "person"}
+            _gated = {k: v for k, v in _llm_kinds.items()
+                      if not (v == "pose" and int(k) in _px_persons)}
+            if _gated != _llm_kinds:
+                _log("[Camera Director] LLM 포즈 라벨 거부 — 픽셀에서 사람이 "
+                     "검출된 슬롯 "
+                     + "/".join(str(k) for k in sorted(set(_llm_kinds)
+                                                       - set(_gated)))
+                     + "번은 신원 소스로 유지합니다")
+                _llm_kinds = _gated
+        if _llm_kinds:
+            ref_kinds.update(_llm_kinds)
+            set_reference_kinds(ref_kinds)
+            _log("[Camera Director] LLM 참조 역할 — "
+                 + ", ".join(f"{k}번={v}" for k, v in sorted(_llm_kinds.items())))
+
+        # LLM 의 시트 판정 (2026-10-19) — 픽셀만으로는 같은 사람 반복과 다른
+        # 캐릭터 나열을 가를 수 없다(실측 sim 0.415 대 0.216). LLM 은 faces·
+        # hair·outfit 을 보므로 이 판정을 할 수 있다. 어휘는 single/multi 로
+        # 닫혀 있고, 값이 없으면 "" (기존 topic 분기 그대로).
+        _sheet_kind = _sheet_kind_from_llm(llm_obj)
+        if _sheet_kind:
+            _log("[Camera Director] LLM 시트 판정 — "
+                 + ("패널마다 다른 인물" if _sheet_kind == "multi"
+                    else "전부 같은 한 사람"))
+
+        if tier == "auto":
             camera, locked, _ = resolve_rules_camera(topic, metrics, fixed_cam, locked)
-            hints_note = " + 이미지 힌트" if camera.get("_hints") else ""
-            cam_source = ("직접 설정+규칙" if fixed_cam else "규칙") + hints_note
+            if preset_cam is None:
+                hints_note = " + 이미지 힌트" if camera.get("_hints") else ""
+                cam_source = ("직접 설정+규칙" if fixed_cam else "규칙") + hints_note
         else:  # llm
             llm_cam = self._llm_camera(llm_obj) if llm_obj else None
             if llm_cam is not None:
-                camera = {**llm_cam, **(fixed_cam or {})}  # 명시 고정값이 LLM보다 우선
-                cam_source = ("LLM 판단" + ("(이미지 참조)" if image_count else "")
-                              + ("+직접 고정" if fixed_cam else ""))
+                camera = {**llm_cam, **(fixed_cam or {})}  # 고정값이 LLM보다 우선
+                if preset_cam is None:
+                    cam_source = ("LLM 판단" + ("(이미지 참조)" if image_count else "")
+                                  + ("+직접 고정" if fixed_cam else ""))
             else:
                 camera, locked, _ = resolve_rules_camera(
                     topic, metrics, fixed_cam, locked)
-                hints_note = " + 이미지 힌트" if camera.get("_hints") else ""
-                cam_source = (("직접 설정+규칙" if fixed_cam else "규칙")
-                              + ("(LLM 폴백)" if llm_attempted else "(LLM 생략)")
-                              + hints_note)
+                if preset_cam is None:
+                    hints_note = " + 이미지 힌트" if camera.get("_hints") else ""
+                    cam_source = (("직접 설정+규칙" if fixed_cam else "규칙")
+                                  + ("(LLM 폴백)" if llm_attempted else "(LLM 생략)")
+                                  + hints_note)
+                elif llm_attempted:
+                    cam_source += "(LLM 폴백)"
 
         explicit_shot = topic_shot_label(topic)
         if explicit_shot and "shot" not in locked:
@@ -821,7 +1103,7 @@ class CameraDirector:
                 llm_extra = (llm_extra.rstrip("., ") + ", " + llm_anatomy
                              if llm_extra.strip() else llm_anatomy)
 
-        # 한국어→영어 번역 (규칙/수동 tier 전용). LLM tier 는 위 블록이 이미 영문화.
+        # 한국어→영어 번역 (규칙 tier 전용). LLM tier 는 위 블록이 이미 영문화.
         # assemble 출력(scene)만 번역하고, 판정/경고/프리플라이트는 원본(한글)
         # 텍스트로 둔다 (한글 마커 기반 가드 판정 보존).
         # 시놉시스(다문장)면 문장별 구조화로 응집된 영문 장면을 만든다 — 단문/
@@ -833,7 +1115,7 @@ class CameraDirector:
                 _syn = structure_ko_synopsis(scene)
                 _syn_en = _syn.get("scene_en", "")
                 if _syn_en and _syn_en != scene:
-                    _scene_assembled = _syn_en
+                    _scene_assembled = fix_footwear_clause(scene, _syn_en)
                     _h = _syn.get("hints", {}) or {}
                     _h_log = ", ".join(f"{k}" for k, v in _h.items()
                                        if v and k != "sentence_count")
@@ -848,7 +1130,9 @@ class CameraDirector:
                     if _has_cjk(scene):
                         _tr = translate_ko_to_en(scene)
                         if _tr:
-                            _scene_assembled = _en_normalize(_tr)
+                            _scene_assembled = _en_normalize(
+                                fix_footwear_clause(
+                                    scene, fix_pose_clause(scene, _tr)))
                             _log("[Camera Director] 주제를 영어로 번역했습니다 (tc-big)")
                         else:
                             _log("[Camera Director] ⚠ 주제 번역 실패 — 원문 사용")
@@ -857,10 +1141,43 @@ class CameraDirector:
                 if _has_cjk(scene):
                     _tr = translate_ko_to_en(scene)
                     if _tr:
-                        _scene_assembled = _en_normalize(_tr)
+                        _scene_assembled = _en_normalize(
+                            fix_footwear_clause(
+                                scene, fix_pose_clause(scene, _tr)))
                         _log("[Camera Director] 주제를 영어로 번역했습니다 (tc-big)")
                     else:
                         _log("[Camera Director] ⚠ 주제 번역 실패 — 원문 사용")
+        # 배경 지정 문장 보정 (2026-10-15): 번역기가 뭉갠 자기참조 배경
+        # 문장은 지시력을 잃는다 — 한글 원문 근거로 정식 문장이 되돌린다.
+        _scene_assembled = fix_background_clause(scene, _scene_assembled)
+        # 부채 보유 문장 복구 (2026-10-15): 번역이 없앤 부채를 한글 원문
+        # 근거로 되붙인다 (같은 이유 — 없어진 지시는 생성물에도 없다).
+        _scene_assembled = fix_fan_clause(scene, _scene_assembled)
+        # 포즈 분기 문장 (2026-10-13, PROVISIONAL): 포즈 동사가 있는 장면은
+        # 묘사 쪽으로 당긴다. 참조와 같으면 무해(일치하므로)하고 다르면
+        # 분기를 지시한다. 샘플러 추종은 사용자 A/B 로 확인한다.
+        _scene_assembled = add_pose_divergence(
+            _scene_assembled, image_count, scene)
+        # 정면 응시 보강 (2026-10-15 실측): "정면을 바라보며" 가 있어도
+        # 생성 결과는 시선을 옆으로 돌렸다. 사람 주제 + 정면 markers 일 때만
+        # positive 보강문과 negative 회피어를 짝으로 준다.
+        _gaze_pos, _gaze_neg = gaze_forward_guard(
+            (topic or "") + " " + (scene or ""), _scene_assembled)
+        if _gaze_pos:
+            _scene_assembled = (_scene_assembled.rstrip().rstrip(".")
+                                + ". " + _gaze_pos)
+            _log("[Camera Director] 정면 응시 가드 활성 (positive 보강 + "
+                 "negative 회피어)")
+        # 의류 색상 고정 (2026-10-15 실측): "흰색 단화" 지시에도 결과는
+        # 크림/베이지색이 나왔다. 색상어가 의류 명사에 인접한 주제에서만
+        # (positive 고정문, negative 오색) 짝을 준다.
+        _item_pos, _item_neg = color_adherence_guard(
+            (topic or "") + " " + (scene or ""), _scene_assembled)
+        if _item_pos:
+            _scene_assembled = (_scene_assembled.rstrip().rstrip(".")
+                                + ". " + _item_pos)
+            _log("[Camera Director] 의류 색상 고정 가드 활성 (positive 고정 + "
+                 "negative 오색)")
 
         if not topic:
             _log("[Camera Director] ⚠ 주제가 비어 있습니다 — 카메라 조항만 출력됩니다.")
@@ -879,9 +1196,11 @@ class CameraDirector:
         # 가드 판정은 resolve_guard_plan 한 곳에서. run() 과 run_prompt() 가
         # 각자 반복하던 시대를 끝내고, 짝이 어긋날 수 없게 했다.
         _plan = resolve_guard_plan(
-            (topic or "") + " " + (scene or ""), camera, image_count,
+            (analysis or "") + " " + (scene or ""), camera, image_count,
             image_labels, image_items, primary_image, reference_images,
-            tier=tier, llm_hint=llm_hint)
+            tier=tier, llm_hint=llm_hint,
+            weak_sheet_slots=weak_sheet, sheet_kind=_sheet_kind,
+            declared_topic=topic or "")
         _gpos = _plan["positive"]
         _gflags = _plan["flags"]
         nudity_guard_text = nudity_anatomy_guard((topic or "") + " " + (scene or ""))
@@ -891,6 +1210,7 @@ class CameraDirector:
         anatomy_count = _gflags["anatomy_count"]
         footwear = _gflags["footwear"]
         body_object_boundary = _gflags["body_object_boundary"]
+        garment_boundary = _gflags["garment_boundary"]
         hint_defense = _gflags["hint_defense"]
         char_sheet = _gpos["character_sheet"]
         _furn_text = _gpos["furniture"]
@@ -928,11 +1248,25 @@ class CameraDirector:
             positive = positive.rstrip(". ") + ". " + _gpos["footwear"] + "."
         if body_object_boundary:
             positive = positive.rstrip(". ") + ". " + _gpos["body_object_boundary"] + "."
+        # 의복 경계 (2026-10-16) — 손이 치마에 삼켜진 실측. 위 가구 경계와 짝.
+        if garment_boundary:
+            positive = positive.rstrip(". ") + ". " + _gpos["garment_boundary"] + "."
+            _log("[Camera Director] 의복 경계 가드 활성 "
+                 "(손·사지가 옷에 잠기지 않음)")
         if _furn_text:
             positive = positive.rstrip(". ") + ". " + _furn_text + "."
             _log("[Camera Director] 가구·사물 DNA 가드 활성 ("
                  + "/".join(str(x) for x in sorted(_plan["furniture_slots"]))
                  + "번 — 형태·재질·색·비율 원본 유지)")
+        # 참조 사물 외형 고정 (2026-10-16 실측) — 가구 DNA 문구와 **짝**이다.
+        # 한쪽만 붙으면 방어가 조용히 사라진다 (같은 이음새 결함 실측 다수).
+        _fsurf_pos = _plan.get("furniture_surface_pos", "")
+        if _fsurf_pos:
+            positive = positive.rstrip(". ") + ". " + _fsurf_pos + "."
+            _log("[Camera Director] 사물 외형 고정 가드 활성 (표면 구조 보존"
+                 + (", 참조 대표색 고정" if "surface colour lock" in _fsurf_pos
+                    else ", 색 판독 실패 — 구조만")
+                 + ")")
         if _rm_text:
             _log("[Camera Director] 반쪽 물체·찌꺼기 방어 활성 "
                  "(제거된 사물은 완전 제거 또는 그대로)")
@@ -944,11 +1278,20 @@ class CameraDirector:
         # 조용히 아무 지시도 안 나가는 것을 막기 위해 무엇을 쓸 수 있는지
         # 알려준다(2026-09-28 실측: 포즈 이미지에서 옷까지 복제됨).
         if image_count >= 2 and not (topic or "").strip() and not _px_sheet:
-            _log('[Camera Director] ⚠ topic 이 비어 있어 참조 이미지의 역할을 '
-                 '구분하지 못했습니다. 기본값으로 1번=주 피사체, 나머지=배경/구도/'
-                 '조명 전용(옷·얼굴은 복사 안 함)이 적용됩니다. 포즈·시트·인물 '
-                 '구분을 원하면 topic 에 \'2번은 포즈만, 3번은 1인 캐릭터 시트\' '
-                 '처럼 역할을 적어주세요')
+            _auto_p = person_slots(ref_kinds)
+            if _auto_p:
+                _log("[Camera Director] topic 이 비어 있어 픽셀 분석으로 역할을 "
+                     "정했습니다 — 인물 슬롯 "
+                     + "/".join(str(x) for x in _auto_p)
+                     + f", 그중 {_auto_p[0]}번을 주 피사체로 사용합니다. 다른 칸은 "
+                     "보조 참조(배경·사물·스타일)입니다. 역할을 직접 정하려면 "
+                     "topic 에 '2번은 포즈만' 처럼 적어주세요")
+            else:
+                _log('[Camera Director] ⚠ topic 이 비어 있고 참조에서 사람도 '
+                     '찾지 못했습니다. 기본값으로 1번=주 피사체, 나머지=배경/구도/'
+                     '조명 전용(옷·얼굴은 복사 안 함)이 적용됩니다. 포즈·시트·인물 '
+                     '구분을 원하면 topic 에 \'2번은 포즈만, 3번은 1인 캐릭터 시트\' '
+                     '처럼 역할을 적어주세요')
         if char_sheet:
             positive = positive.rstrip(". ") + ". " + char_sheet + "."
             _log("[Camera Director] 캐릭터 시트 참조 가드 활성 "
@@ -968,6 +1311,10 @@ class CameraDirector:
             positive = positive.rstrip(". ") + ". " + _phys_pos + "."
             _log("[Camera Director] 물리·공간 가드 활성 (접촉/동작 상태를 "
                  "이미지 조건으로 번역)")
+        if _gpos["ground"]:
+            positive = positive.rstrip(". ") + ". " + _gpos["ground"] + "."
+            _log("[Camera Director] 배경 지면 고정 가드 활성 (참조 지면으로 "
+                 "통일 + 콘크리트/실내 매끈 바닥 방어)")
         # hint_defense/mix_guard/body_balance 는 _last_guard_plan 안에 있다.
         # 개별로 저장하면 plan 과 값이 어긋날 수 있고(그러면 짝인 negative 가
         # 사라진다), 읽는 곳도 plan 이므로 중복이다.
@@ -976,9 +1323,10 @@ class CameraDirector:
         self._last_subject_text = ((topic or "") + " " + (scene or ""))
         negative = build_negative(camera, extra=extra_negative or "",
                                   llm_extra=llm_extra,
-                                  topic=((topic or "") + " " + (scene or "")),
+                                  topic=((analysis or "") + " " + (scene or "")),
                                   hint_defense=hint_defense, mix_guard=mix_guard,
                                   appearance_ref=appearance_ref,
+                                  sheet_kind=_sheet_kind,
                                   body_balance=body_balance,
                                   character_sheet=bool(char_sheet),
                                   image_count=image_count,
@@ -1000,18 +1348,57 @@ class CameraDirector:
                                        _plan["flags"].get(
                                            "footwear_upper")),
                                    body_object_boundary=body_object_boundary,
-                                   body_object_boundary_upper=bool(
-                                       _plan["flags"].get(
-                                           "body_object_boundary_upper")))
+                                    body_object_boundary_upper=bool(
+                                        _plan["flags"].get(
+                                            "body_object_boundary_upper")),
+                                   garment_boundary=garment_boundary,
+                                    garment_boundary_upper=bool(
+                                        _plan["flags"].get(
+                                            "garment_boundary_upper")))
+        # 정면 응시 회피어 (2026-10-15) — positive 보강문과 짝이다.
+        # 한쪽만 붙으면 방어가 조용히 사라진다 (같은 이음새 결함 실측 다수).
+        if _gaze_neg:
+            negative = negative.rstrip("., ") + ", " + _gaze_neg
+        # 의류 오색 (2026-10-15) — 고정 positive 와 짝이다.
+        if _item_neg:
+            negative = negative.rstrip("., ") + ", " + _item_neg
+        # 사물 표면 소실·표백 회피어 (2026-10-16) — 위 표면 구조 고정과 짝이다.
+        _fsurf_neg = _plan.get("furniture_surface_neg", "")
+        if _fsurf_neg:
+            negative = negative.rstrip("., ") + ", " + _fsurf_neg
+        # 자동 분류 역할 문장 (2026-10-19) — 토픽이 슬롯을 지목하지 않았을 때만.
+        # 왜(Why) 여기서 붙이나: 기존 가드 파이프라인은 텍스트 기반이라 분류
+        # 결과를 억지로 끼워 넣으면 판정과 충돌한다. 문장 하나를 더하는 방식이
+        # 가장 좁고 되돌리기 쉽다. 토픽이 "2번 의상" 이라고 했으면 쓰지 않는다.
+        if ref_kinds and not _text_names_slots(analysis):
+            _auto_roles = auto_reference_roles_positive(ref_kinds, image_labels)
+            if _auto_roles:
+                positive = positive.rstrip(". ") + ". " + _auto_roles + "."
+                _log("[Camera Director] 자동 역할 문장 적용 ("
+                     + ", ".join(f"{k}번={v}"
+                                 for k, v in sorted(ref_kinds.items())) + ")")
         self._last_camera = dict(camera)
         self._last_llm_extra = llm_extra
         self._last_image_count = image_count
         self._last_image_labels = list(image_labels)
+        # Skills(run_prompt) 경로는 run() 을 거치지 않으므로 LLM 시트 판정을
+        # 상태로 넘긴다 (_last_image_labels 와 같은 폴백 패턴, 2026-09-29 결함
+        # 교훈). 없으면 "" — 기존 topic 분기 그대로.
+        self._last_sheet_kind = _sheet_kind
 
         hint_text = (" | hints: " + "; ".join(hints)) if hints else ""
+        # 프리셋 위에 얹은 가감을 남긴다. 이 로그가 없으면 "프리셋을 골랐는데
+        # 왜 이 값이 나왔는지"를 사용자가 확인할 방법이 없다.
+        if preset_added or preset_removed:
+            _add = ", ".join(f"{_k}={_v}" for _k, _v in preset_added) or "없음"
+            _rem = ", ".join(f"{_k}={_v}" for _k, _v in preset_removed) or "없음"
+            _log(f"[Camera Director] 프리셋 '{preset}' 가감 — 추가: {_add} / 제외: {_rem}")
+        # 값이 여러 개(콤마 구분)일 수 있다 — 그대로 찍으면 무엇이 골라졌는지 보인다.
         _log(f"📷 Camera Director | tier={tier} preset={preset} source={cam_source} "
-             f"| in={topic_src} shot={camera['shot']} lens={camera['lens']} "
-             f"angle={camera['angle']} motion={camera['motion']} | scene={scene_src} "
+             f"| in={topic_src} shot={camera.get('shot', '')} "
+             f"lens={camera.get('lens', '')} "
+             f"angle={camera.get('angle', '')} motion={camera.get('motion', '')} "
+             f"| scene={scene_src} "
              f"| image={image_count if image_count else 'none'}{hint_text}")
         _post_telemetry(
             tier=tier, preset=preset, automation=automation,
@@ -1037,6 +1424,8 @@ class CameraDirector:
             },
             elapsed_ms=int((time.perf_counter() - _t0) * 1000))
         _release_vram()
+        # 분류 힌트는 이번 실행 한정이다 — 다음 실행(다른 이미지)에 새지 않게 지운다.
+        clear_reference_kinds()
         return (positive, negative, primary_image)
 
 
@@ -1059,6 +1448,7 @@ class CameraDirectorEncode(CameraDirector):
                    "positive/negative conditioning과 prompt_out으로 출력합니다. "
                    "positive_out/negative_out은 KSampler에, prompt_out은 확인용으로 사용하세요.")
 
+    # 노출 노드 입력 정의 — 베이스에 clip(필수)/vae(선택)를 더하고 image 류를 뺀다
     @classmethod
     def INPUT_TYPES(cls):
         base = CameraDirector.INPUT_TYPES()
@@ -1081,6 +1471,10 @@ class CameraDirectorEncode(CameraDirector):
                 "optional": True,
                 "tooltip": f"Reference image #{i}",
             })
+        # 포즈 맵 입력 (2026-10-14): 맨 뒤 — 기존 소켓 순서·위젯 매핑 보호.
+        # DWPreprocessor 결과(검은 배경 + 색 뼈대)를 받는다. 참조 사진이
+        # 아니라 image_items(개수·vision·latent)에 넣지 않는다.
+        optional["pose_image"] = ("IMAGE",)
         return {"required": required, "optional": optional,
                 "hidden": dict(base.get("hidden", {}))}
 
@@ -1138,6 +1532,15 @@ class CameraDirectorEncode(CameraDirector):
         target_w, target_h = CameraDirectorEncode._reference_target_size(latent_image)
         for _label, image in image_items:
             try:
+                # **(H,W,C) 3차원 입력을 (1,H,W,C) 로 정규화한다** (2026-10-19).
+                # 왜(Why): ComfyUI IMAGE 는 4차원이 정상이지만, 3차원이 들어오면
+                # image[:1] 이 (W,C) 가 돼 movedim 조회가 죽는다. per-image
+                # except 가 그것을 **조용히 제외**해서 — "연결은 됐는데 참조가
+                # 왜 안 먹지" 의 원인이 로그 한 줄로만 남았다(테스트 중 실측:
+                # "tuple index out of range"). 배치 축을 채우면 같은 이미지가
+                # 정상 경로로 들어간다.
+                if getattr(image, "ndim", 0) == 3:
+                    image = image.unsqueeze(0)
                 cache_key = _qwen_ref_cache_key(image, target_w, target_h, vae)
                 cached = _qwen_ref_cache_get(cache_key, vae)
                 if cached is not None:
@@ -1215,12 +1618,14 @@ class CameraDirectorEncode(CameraDirector):
             )
         return conditioning
 
+    # conditioning 이어 붙이기 — 베이스가 없으면 카메라 것만 반환
     @staticmethod
     def _combine_conditioning(base_conditioning, director_conditioning):
         if base_conditioning is None:
             return director_conditioning
         return base_conditioning + director_conditioning
 
+    # 프롬프트 문장 합치기 — 마침표 하나로 자연스럽게 이어 붙인다
     @staticmethod
     def _combine_prompt_text(base_text: str, camera_text: str) -> str:
         base = (base_text or "").strip().rstrip("., ")
@@ -1231,18 +1636,20 @@ class CameraDirectorEncode(CameraDirector):
             return base + "."
         return base + ". " + camera
 
-    def run_prompt(self, clip, topic, preset, automation, shot, lens, angle,
-                   composition, lighting, grade, motion, speed, amplitude,
-                   motion2=AUTO,
+    # 프롬프트 전용 실행 본체 — 판정/가드/문장 조립 후 conditioning 2개 + 문장 + 이미지 + latent 반환
+    def run_prompt(self, clip, topic="", preset=AUTO, automation="",
+                   shot=AUTO, lens=AUTO, angle=AUTO, composition=AUTO,
+                   lighting=AUTO, grade=AUTO, motion=AUTO, speed=AUTO,
+                   amplitude=AUTO, motion2=AUTO,
                    prompt_in=None, provider="OpenAI", model="gpt-4o-mini",
                    api_key="", custom_base_url="", positive=None, negative=None,
                    vae=None, latent_image=None,
                    image_1=None, image_2=None, image_3=None, image_4=None,
                    image_5=None, image_6=None, image_7=None, image_8=None,
-                   image_9=None, image_10=None, llm_hint="", unique_id=None,
-                   prompt=None, extra_pnginfo=None,
-                   vision_detail=VISION_DETAIL_DEFAULT,
-                   pf_steps=0, pf_cfg=0.0, pf_denoise=0.0):
+                    image_9=None, image_10=None, llm_hint="", unique_id=None,
+                    prompt=None, extra_pnginfo=None,
+                    vision_detail=VISION_DETAIL_DEFAULT,
+                    pf_steps=0, pf_cfg=0.0, pf_denoise=0.0, pose_image=None):
         image_items = [
             (1, image_1), (2, image_2), (3, image_3), (4, image_4), (5, image_5),
             (6, image_6), (7, image_7), (8, image_8), (9, image_9), (10, image_10),
@@ -1262,20 +1669,22 @@ class CameraDirectorEncode(CameraDirector):
         camera = getattr(self, "_last_camera", dict(DEFAULTS))
         camera_text = build_camera_conditioning(camera)
         external_prompt = (prompt_in or "").strip()
-        # 한국어→영어 번역 (규칙/수동 tier 전용, 비ASCII 감지 시에만 동작).
+        # 한국어→영어 번역 (규칙 tier 전용, 비ASCII 감지 시에만 동작).
         # LLM tier 는 cam_llm.py 가 이미 영문으로 확장하므로 여기선 번역 안 함.
         # 번역된 영문은 아래 _user_text 조립에만 쓰고, 가드 판정은 원본 한글
         # external_prompt 를 그대로 쓴다 (한글 마커 기반 검증 동작 보존).
-        _tier_rp = ("llm" if "llm" in (automation or "").lower()
-                    else "auto" if "auto" in (automation or "").lower()
-                    else "manual")
+        # tier 는 llm / auto 두 가지뿐이다 (수동 제거).
+        _tier_rp = "llm" if "llm" in (automation or "").lower() else "auto"
         external_prompt_en = external_prompt
         # _has_cjk 가드 (2026-10-13): 영어 prompt_in 은 번역 대상이 아니라
         # None(번역 불필요)이 정상이다. 가드 없이 로그하면 매 실행 오경고.
         if _tier_rp != "llm" and external_prompt and _has_cjk(external_prompt):
             _tr = translate_ko_to_en(external_prompt)
             if _tr:
-                external_prompt_en = _tr
+                external_prompt_en = fix_fan_clause(
+                    external_prompt,
+                    fix_footwear_clause(
+                        external_prompt, fix_pose_clause(external_prompt, _tr)))
                 _log("[Camera Director] prompt_in 한글을 영어로 번역했습니다 (tc-big)")
             else:
                 _log("[Camera Director] ⚠ 번역 실패 — prompt_in 원문을 사용합니다")
@@ -1313,50 +1722,88 @@ class CameraDirectorEncode(CameraDirector):
         _plan_pi = getattr(self, "_last_guard_plan", None)
         if _plan_pi is None:
             # run() 없이 단독 호출된 경우(테스트·재사용). 같은 함수로 판정한다.
+            # 참조 분류 힌트도 여기서 다시 심는다 — run() 이 끝나며 지웠기 때문.
+            if image_items:
+                try:
+                    set_reference_kinds(classify_references(image_items))
+                except Exception as _e:  # noqa: BLE001
+                    # run() 경로(위)와 같은 이유로 원인을 남긴다 — 조용히
+                    # 삼키면 "참조가 왜 안 먹지" 를 로그로 추적할 수 없다.
+                    _log("[Camera Director] 참조 자동 분류 실패(단독 호출) "
+                         f"({type(_e).__name__}) — 기존 규약으로 진행")
             # 왜(Why) 인자에서 다시 유도하나 (2026-10-05 감사): 예전엔
             # _last_tier/_last_llm_hint 를 읽었지만 이 속성을 쓰는 곳이
             # 저장소에 하나도 없어 폴백이 항상 tier=""/llm_hint="" 로
             # 판정했다 — 유령 속성. run() 이 automation 에서 tier 를
             # 유도하는 것과 같은 식을 이 함수의 인자로 재현한다.
             _low_a_pi = (automation or "").lower()
-            _tier_pi = ("llm" if "llm" in _low_a_pi
-                        else "auto" if "auto" in _low_a_pi
-                        else "manual")
+            # tier 는 llm / auto 두 가지뿐이다 (수동 제거).
+            _tier_pi = "llm" if "llm" in _low_a_pi else "auto"
+            # 약한 시트(3뷰 줄) — run() 을 거치지 않은 단독 호출에서도
+            # topic 시트 선언과 교차하면 측정한다.
+            _weak_sheet_pi = []
+            if (_is_character_sheet_request(_eth_text_pi)
+                    and not _is_multi_person_sheet(_eth_text_pi)):
+                try:
+                    _weak_sheet_pi = weak_sheet_slots(image_items)
+                except Exception:  # noqa: BLE001
+                    _weak_sheet_pi = []
             _plan_pi = resolve_guard_plan(
                 _eth_text_pi, camera, last_count, last_labels, image_items,
                 (image_items[0][1] if image_items else None), [],
-                tier=_tier_pi, llm_hint=llm_hint)
+                tier=_tier_pi, llm_hint=llm_hint,
+                weak_sheet_slots=_weak_sheet_pi,
+                sheet_kind=getattr(self, "_last_sheet_kind", ""),
+                declared_topic=topic or "")
         _gpos_pi = _plan_pi["positive"]
         _gflags_pi = _plan_pi["flags"]
         _px_sheet_pi = _plan_pi["pixel_sheet_slots"]
+        # 약한 시트(3뷰 줄) — run() 이 측정해 plan 에 실어 보낸 값. 엄격 판정과
+        # 합쳐 latent 제외에만 쓴다(가드 발동에는 안 쓴다).
+        _weak_pi = _plan_pi.get("weak_sheet_slots") or []
         if _px_sheet_pi:
             _log(f"[Camera Director] 참조 이미지 {'/'.join(_px_sheet_pi)}번에서 "
                  "캐릭터 시트 패턴 감지 (topic 문구와 무관)")
         _cs_text_pi = _gpos_pi["character_sheet"]
         _furn_pos_pi = _gpos_pi["furniture"]
+        # 참조 사물 외형 고정 (2026-10-16) — 가구 DNA 문구와 짝이다.
+        _furn_surf_pos_pi = _plan_pi.get("furniture_surface_pos", "")
+        _furn_surf_neg_pi = _plan_pi.get("furniture_surface_neg", "")
         _remove_item_pi = _gflags_pi["remove_item"]
         _detail_def_pi = _gflags_pi["detail_def"]
         _anatomy_count_pi = _gflags_pi["anatomy_count"]
         _footwear_pi = _gflags_pi["footwear"]
         _boundary_pi = _gflags_pi["body_object_boundary"]
+        _garment_pi = _gflags_pi["garment_boundary"]
         _pose_pos_pi = _gpos_pi["pose"]
         _phys_pos_pi = _gpos_pi["physics"]
         _phys_neg_pi = _plan_pi["physics_neg"]
+        # 정면 응시 (2026-10-15): external_prompt 없는 실행에서도 아래
+        # 병합부가 이름을 찾을 수 있게 미리 빈 값으로 둔다.
+        _gaze_pos_pi, _gaze_neg_pi = "", ""
+        # 의류 색상 (2026-10-15): 같은 이유로 미리 빈 값으로 둔다.
+        _item_pos_pi, _item_neg_pi = "", ""
         if external_prompt:
+            # 의도 분석용 코어 (2026-10-19). 외부 프롬프트는 태그 나열이라
+            # 서술 조각("wearing a summer dress")이 옷 교체로 오탐돼 신원
+            # 앵커의 의상 보존 분기가 조용히 사라졌다(실측). 감지에는 코어를
+            # 쓰고 출력 문장은 외부 프롬프트를 그대로 쓴다.
+            _analysis_pi = intent_core(" ".join(
+                x for x in (external_prompt, topic) if x))
             identity_anchor = build_identity_anchor(
-                last_count, external_prompt, image_labels=last_labels)
+                last_count, _analysis_pi, image_labels=last_labels)
             single_person_anchor = build_single_person_anchor(
-                last_count, external_prompt, image_labels=last_labels)
+                last_count, _analysis_pi, image_labels=last_labels)
             # Qwen 표준 경로에도 의상 교체 의도가 명확하면 의상 전용 가드를 둔다.
             # 왜(Why): 이 가드는 standalone 경로(assemble)에만 있어 prompt_in
             # 사용 시 의상 융합 방지 문구가 전혀 안 들어갔기 때문이다.
-            outfit_anchor = outfit_guard(last_count, external_prompt)
+            outfit_anchor = outfit_guard(last_count, _analysis_pi)
             duo_anchor = build_duo_person_anchor(
-                last_count, external_prompt, image_labels=last_labels)
+                last_count, _analysis_pi, image_labels=last_labels)
             # duo(2인)일 때는 보조-role 제한 가드를 빼고 duo 정체성 보존을 둔다.
             # 왜(Why): role 제한은 image_2의 인물 역할을 금지해 남성이 사라지기 때문이다.
             role_anchor = "" if duo_anchor else build_secondary_role_anchor(
-                last_count, external_prompt, image_labels=last_labels)
+                last_count, _analysis_pi, image_labels=last_labels)
             base_text = self._combine_prompt_text(identity_anchor, single_person_anchor)
             base_text = self._combine_prompt_text(base_text, outfit_anchor)
             base_text = self._combine_prompt_text(base_text, duo_anchor)
@@ -1391,12 +1838,17 @@ class CameraDirectorEncode(CameraDirector):
                         if _has_cjk(_scene_pi):
                             _tr = translate_ko_to_en(_scene_pi)
                             if _tr:
-                                _scene_pi_en = _en_normalize(_tr)
+                                _scene_pi_en = _en_normalize(
+                                    fix_footwear_clause(
+                                        _scene_pi,
+                                        fix_pose_clause(_scene_pi, _tr)))
                 else:
                     if _has_cjk(_scene_pi):
                         _tr = translate_ko_to_en(_scene_pi)
                         if _tr:
-                            _scene_pi_en = _en_normalize(_tr)
+                            _scene_pi_en = _en_normalize(
+                                fix_footwear_clause(
+                                    _scene_pi, fix_pose_clause(_scene_pi, _tr)))
             _user_text = external_prompt_en
             if _scene_pi:
                 if _scene_pi.lower() in external_prompt.lower():
@@ -1405,11 +1857,93 @@ class CameraDirectorEncode(CameraDirector):
                 else:
                     _user_text = self._combine_prompt_text(
                         _scene_pi_en, external_prompt_en)
+            # 배경 지정 문장 보정 (2026-10-15, base run과 동일 판정):
+            # 번역기가 뭉갠 자기참조 배경 문장은 지시력을 잃는다.
+            _ko_user_pi = (topic or "") + " " + (external_prompt or "")
+            _user_text = fix_background_clause(_ko_user_pi, _user_text)
+            # 부채 보유 문장 복구 (2026-10-15, base run과 동일 판정).
+            _user_text = fix_fan_clause(_ko_user_pi, _user_text)
+            # 포즈 분기 문장 (2026-10-13, PROVISIONAL): _scene_pi_en 과
+            # external_prompt_en 을 합친 뒤 한 번만. 각자에 붙이면 문장이
+            # 2회 중복된다 (add_pose_divergence 는 같은 문장 중복을 막지만
+            # 합친 텍스트에 2개 들어가면 그대로 둔다).
+            _user_text = add_pose_divergence(
+                _user_text, last_count or len(image_items or []),
+                (topic or "") + " " + (external_prompt or ""))
+            # 정면 응시 보강 (2026-10-15, base run과 동일 판정) —
+            # negative 회피어는 아래 병합부에서 짝으로 붙는다.
+            _gaze_pos_pi, _gaze_neg_pi = gaze_forward_guard(
+                (topic or "") + " " + (external_prompt or ""), _user_text)
+            if _gaze_pos_pi:
+                _user_text = (_user_text.rstrip().rstrip(".")
+                              + ". " + _gaze_pos_pi)
+                _log("[Camera Director] 정면 응시 가드 활성 (positive 보강 + "
+                     "negative 회피어)")
+            # 의류 색상 고정 (2026-10-15, base run과 동일 판정) —
+            # negative 오색은 아래 병합부에서 짝으로 붙는다.
+            _item_pos_pi, _item_neg_pi = color_adherence_guard(
+                (topic or "") + " " + (external_prompt or ""), _user_text)
+            if _item_pos_pi:
+                _user_text = (_user_text.rstrip().rstrip(".")
+                              + ". " + _item_pos_pi)
+                _log("[Camera Director] 의류 색상 고정 가드 활성 (positive "
+                     "고정 + negative 오색)")
             base_text = self._combine_prompt_text(base_text, _user_text)
             positive_text = self._combine_prompt_text(base_text, camera_text)
         else:
             positive_text = prompt_out
             single_person_anchor = ""
+        # 포즈 맵 + 프롬프트 묘사를 **함께** 쓴다 (2026-10-14 사용자 지시).
+        # pose_image 가 연결되고 판독되면 맵 문장을 프롬프트에 **보탠다**.
+        # image_items(개수·vision·latent)에는 넣지 않는다 — 맵은 참조 사진이
+        # 아니라 강제 원본이라 개수 가드·신원 판독·확산 prior 에 닿으면 안 된다.
+        # 왜(Why) 종전의 "분기 문장 제거" 를 되돌렸나 (2026-10-14 실측 A/B):
+        #   종전엔 맵이 판독되면 _POSE_DIVERGENCE("포즈는 위 묘사를 따른다")를
+        #   지워 맵을 단독 권위로 만들었다. 그러면 프롬프트에 적은 포즈 묘사가
+        #   힘을 잃는다. 실측으로 묘사 문장 하나가 실제로 포즈를 바꾼다 —
+        #   같은 그래프에서 "이미지2의 의자에 앉아있다" 를 넣자 서 있음(SUV
+        #   배경)이 벤치에 앉음(공원)으로 바뀌었고, 그 한 문장이 유일한 차였다.
+        #   두 선언은 방향이 같다(둘 다 참조 사진의 포즈를 밀어낸다) — 함께
+        #   두면 서로를 보강한다. 맵이 말하지 않는 것(구도·장면)은 묘사가 채운다.
+        #   주의: 토픽과 맵이 정반대 포즈를 말하면 두 문장이 부딪힌다. 그때는
+        #   로그로 드러나므로 사용자가 어느 쪽을 고칠지 판단한다.
+        # 미연결·판독불가면 기존과 바이트 동일.
+        if pose_image is not None:
+            try:
+                _parsed = parse_dw_pose_map(pose_image)
+                _map_class = _parsed.get("pose")
+                if _map_class:
+                    _log(f"[Camera Director] 목표 포즈(맵): {_map_class}")
+                    _map_sentence = pose_map_sentence(
+                        _map_class, _parsed.get("detail"))
+                    if _map_sentence:
+                        positive_text = self._combine_prompt_text(
+                            positive_text, _map_sentence)
+                        _log("[Camera Director] 포즈맵 문장을 프롬프트 묘사에 "
+                             "보탭니다 (묘사 유지 — 둘 다 사용)")
+                else:
+                    _why = (_parsed.get('detail') or {}).get('reason')
+                    _hint = ""
+                    if _why == "no-limb-mass":
+                        # 실측 2026-10-14: DW 는 원본 해상도 캔버스에 그린 뒤
+                        # resolution 크기로 줄여 반환한다. 원본이 크면 선이
+                        # 1px 대로 얇아져 팔다리 덩어리가 하나도 안 남는다.
+                        # DW **앞**에 ImageScaleToTotalPixels 를 두면 살아난다
+                        # (실측 0개 -> 4개, 도트 0색 -> 9색).
+                        _hint = (" — DW 앞에 ImageScaleToTotalPixels(약 1MP)를 "
+                                 "두면 선 굵기가 살아납니다")
+                    elif _why in ("no-thigh-mass", "ambiguous-mass"):
+                        # 실측 2026-10-14: 정면에서 다리를 앞으로 뻗은 앉음은
+                        # 2D 투영이 서 있음과 구분되지 않는다(굴곡각 12~15도).
+                        # 접촉 임계를 풀면 오히려 서 있음으로 **오판**하므로
+                        # None 을 유지한다. 프롬프트 묘사가 그 자리를 받는다.
+                        _hint = (" — 정면 앉음은 2D 투영이 서 있음과 겹칩니다. "
+                                 "포즈는 프롬프트 문장으로 묘사하세요")
+                    _log("[Camera Director] 포즈 맵 판독 불가 — 기존 방식 유지 "
+                         f"(사유={_why}){_hint}")
+            except Exception as _e:
+                _log("[Camera Director] 포즈 맵 판독 실패 "
+                     f"({type(_e).__name__}) — 기존 방식 유지")
         # 아래 가드 병합은 prompt_in 경로에만 적용한다.
         # 왜(Why): standalone 경로의 prompt_out(assemble 결과)에는 매크로·노출·
         # 믹스·외양·발란스·시트 가드가 이미 들어 있어, 그대로 다시 붙이면
@@ -1457,19 +1991,30 @@ class CameraDirectorEncode(CameraDirector):
             if _boundary_pi:
                 positive_text = self._combine_prompt_text(
                     positive_text, _gpos_pi["body_object_boundary"])
+            # 의복 경계 (2026-10-16) — 위 가구 경계와 짝이다.
+            if _garment_pi:
+                positive_text = self._combine_prompt_text(
+                    positive_text, _gpos_pi["garment_boundary"])
             if _cs_text_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _cs_text_pi)
             if _furn_pos_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _furn_pos_pi)
+            # 참조 사물 외형 고정 (2026-10-16) — 위 가구 DNA 와 짝이다.
+            if _furn_surf_pos_pi:
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          _furn_surf_pos_pi)
             # (캐릭터 시트 문구는 위에서 _cs_text_pi 로 이미 병합했다.
             # 실행 간 캐시로 같은 문구를 또 붙이면 110단어어 positive 가 두 번
             # 들어가 token 을 중복 소비한다. 2026-09-28 실행 간 캐시 제거,
             # 2026-09-29 죽은 속성까지 정리)
             # 스케일 일관 가드도 prompt_in 경로에 병합한다.
-            # (standalone는 assemble에 이미 포함. 외부 프롬프트 기준 판정)
-            if _needs_scale_guard(external_prompt or topic, camera):
+            # (standalone는 assemble에 이미 포함. 판정 소스는 이 경로의
+            # 다른 가드(민족·동물·포즈)와 같은 _eth_text_pi 다 — 2026-10-16
+            # 감사: 예전 `external_prompt or topic` 은 prompt_in 연결 시
+            # topic 의 인물 표기를 못 보아 판정이 꺼질 수 있었다.)
+            if _needs_scale_guard(_eth_text_pi, camera):
                 positive_text = self._combine_prompt_text(positive_text,
                                                           SCALE_COHERENCE_POSITIVE)
             # 국가 표현형 가드도 prompt_in 경로에 병합한다.
@@ -1491,6 +2036,13 @@ class CameraDirectorEncode(CameraDirector):
             if _phys_pos_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _phys_pos_pi)
+            # 배경 지면 고정 가드도 prompt_in 경로에 병합한다 (base run과
+            # 동일 판정 — plan 하나가 두 경로의 positive/negative 를 만든다).
+            if _gpos_pi["ground"]:
+                positive_text = self._combine_prompt_text(
+                    positive_text, _gpos_pi["ground"])
+                _log("[Camera Director] 배경 지면 고정 가드 활성 (참조 지면으로 "
+                     "통일 + 콘크리트/실내 매끈 바닥 방어)")
             # 품질 가드도 prompt_in 경로에 병합한다 (base run의
             # assemble → add_quality_guard 에 해당. 왜(Why): 이 경로에만
             # 빠져 있어 prompt_in 실행에서 품질 지시가 없었다
@@ -1507,6 +2059,19 @@ class CameraDirectorEncode(CameraDirector):
         # 왜(Why): 이음새가 어긋나면 positive에 붙은 지시의 짝인 negative가
         # 조용히 사라진다 — 실측으로 국가 표현형(브라질)·동물 가드에서 확인됨.
         # 국가명은 한글 topic 칸에만 있을 수 있어 prompt_in만 보면 놓친다.
+        # 출력 가로세로비를 latent 에서 읽는다 (2026-10-16). DenoResolutionSetup
+        # 이 latent 크기를 정하므로 그 가로/세로가 곧 출력 비율이다. 화면비
+        # 인지형 다리 복제 에스컬레이션(16:9·19:6) 판정 근거로 쓴다.
+        _aspect_ratio_pi = None
+        if latent_image is not None:
+            try:
+                _s_pi = (latent_image["samples"]
+                         if isinstance(latent_image, dict) else latent_image)
+                _h_pi, _w_pi = int(_s_pi.shape[-2]), int(_s_pi.shape[-1])
+                if _h_pi and _w_pi:
+                    _aspect_ratio_pi = _w_pi / _h_pi
+            except Exception:  # noqa: BLE001
+                _aspect_ratio_pi = None
         negative_text = build_camera_negative(
             camera, prevent_duplicates=prevent_duplicates,
             topic=_eth_text_pi, image_count=last_count,
@@ -1515,6 +2080,7 @@ class CameraDirectorEncode(CameraDirector):
             detail_def=_detail_def_pi, furniture=bool(_furn_pos_pi),
             remove_item=_remove_item_pi, anatomy_count=_anatomy_count_pi,
             character_sheet=bool(_cs_text_pi),
+            sheet_kind=getattr(self, "_last_sheet_kind", ""),
             anatomy_count_upper=bool(
                 _plan_pi["flags"].get("anatomy_count_upper")),
             detail_def_upper=bool(
@@ -1524,7 +2090,11 @@ class CameraDirectorEncode(CameraDirector):
                 _plan_pi["flags"].get("footwear_upper")),
             body_object_boundary=_boundary_pi,
             body_object_boundary_upper=bool(
-                _plan_pi["flags"].get("body_object_boundary_upper")))
+                _plan_pi["flags"].get("body_object_boundary_upper")),
+            garment_boundary=_garment_pi,
+            garment_boundary_upper=bool(
+                _plan_pi["flags"].get("garment_boundary_upper")),
+            aspect_ratio=_aspect_ratio_pi)
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
         # 카메라 전용 negative로 덮어쓰면서 조용히 버려졌기 때문이다.
@@ -1549,6 +2119,18 @@ class CameraDirectorEncode(CameraDirector):
         if _gflags_pi["body_balance"]:
             negative_text = (negative_text.rstrip("., ")
                              + ", " + BODY_BALANCE_NEGATIVE)
+        # 정면 응시 회피어 (2026-10-15) — positive 보강문과 짝이다.
+        if _gaze_neg_pi:
+            negative_text = (negative_text.rstrip("., ")
+                             + ", " + _gaze_neg_pi)
+        # 의류 오색 (2026-10-15) — 고정 positive 와 짝이다.
+        if _item_neg_pi:
+            negative_text = (negative_text.rstrip("., ")
+                             + ", " + _item_neg_pi)
+        # 사물 표면 소실·표백 회피어 (2026-10-16) — 위 표면 구조 고정과 짝이다.
+        if _furn_surf_neg_pi:
+            negative_text = (negative_text.rstrip("., ")
+                             + ", " + _furn_surf_neg_pi)
         # (캐릭터 시트 negative 는 build_camera_negative(character_sheet=) 가
         # 두 상수를 이미 넣는다. 수동 병합은 중복. 2026-09-28 제거)
         try:
@@ -1559,9 +2141,14 @@ class CameraDirectorEncode(CameraDirector):
             # 결과가 **시트 그대로** 렌더링됐다. 분리 실험으로 확정 —
             # 시트 없으면 항상 1인 정상, 시트 있으면 topic 에 장면을
             # 명시해도 4뷰. 프롬프트로는 이길 수 없다(pixel 힌트).
+            # **약한 시트(3뷰 줄)도 합친다** (2026-10-19): 엄격 게이트를
+            # 0.01 탈락한 삼면도가 지시("레이아웃을 복사하지 마")와 모순되게
+            # latent 로 들어가고 있었다. 약한 슬롯은 이미 topic 시트 선언과
+            # 교차한 것이므로(measure 조건) 여기서는 그대로 신뢰한다.
+            _latent_skip_pi = list(set(_px_sheet_pi) | set(_weak_pi))
             prepared = self._prepare_qwen_image_data(
                 image_items, vae=vae, latent_image=latent_image,
-                latent_skip_labels=_px_sheet_pi
+                latent_skip_labels=_latent_skip_pi
             )
         except Exception as exc:  # noqa: BLE001
             # reference 준비 실패해도 실행은 살린다 — 텍스트 전용으로 폴백.
@@ -1633,6 +2220,7 @@ class CameraDirectorEncode(CameraDirector):
                        f"{type(e).__name__}: {str(e)[:80]}")
             reference_latent_out = None
         _release_vram()
+        clear_reference_kinds()
         return (positive_out, negative_out, positive_text, image_out,
                 reference_latent_out)
 
@@ -1816,6 +2404,7 @@ def _qwen_ref_cache_key(image, target_w, target_h, vae) -> str:
     return f"{shape}|{target_w}x{target_h}|vae:{id(vae)}|{digest}"
 
 
+# 참조 캐시 조회 — VAE 는 weakref 로만 비교, 죽었으면 미스(재인코딩)
 def _qwen_ref_cache_get(key, vae=None):
     with _QWEN_REF_LOCK:
         cached = _QWEN_REF_CACHE.get(key)
@@ -1847,6 +2436,7 @@ def _qwen_ref_cache_get(key, vae=None):
     return rgb, latent
 
 
+# 참조 캐시 저장 — CPU latent + VAE weakref 만 남겨 GPU/VRAM 상주를 막는다
 def _qwen_ref_cache_put(key, value) -> None:
     rgb, latent, vae = value
     # 캐시에는 CPU latent + VAE weakref만 남긴다 (GPU 점유·VAE 상주 방지).

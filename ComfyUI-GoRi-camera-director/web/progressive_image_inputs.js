@@ -187,8 +187,16 @@ function updateVisibility(node) {
       }
     }
 
+    // 소켓 감산은 **새 노드에만** 한다 (2026-10-19 라이브 실측, 키퍼 JS 와 동일).
+    // 왜(Why) 로드된 노드를 빼는가: 노드 정의에는 image_1~image_10 이 항상
+    // 있으므로 워크플로를 열 때도 그 9개가 먼저 만들어졌다가 여기서 빠진다.
+    // 그 감산을 로드에도 적용하면 저장해 둔 사용자 크기가 매 열기마다
+    // (빠진 수 × 20px) 만큼 줄어든다 — 실측: 저장 500 -> 로드 후 320(9×20=180).
+    // 저장된 크기는 이미 소켓이 정리된 상태를 반영하므로 감산할 대상이 없다.
+    // _goriLoaded 는 onConfigure(로드)에서 동기로 서고, 이 함수는 50ms
+    // 디바운스로 그 뒤에 도므로 로드 경로에서 확실히 true 다.
     const removed = countBefore - count;
-    if (removed > 0 && Array.isArray(node.size)) {
+    if (removed > 0 && !node._goriLoaded && isSizeLike(node.size)) {
       node.setSize([node.size[0], node.size[1] - removed * SLOT_HEIGHT]);
     }
     // 왜(Why) 정착했을 때만 키를 기록하나 (2026-10-11 실측): 줄이기가 드래그
@@ -257,13 +265,20 @@ function scheduleVisibilityUpdate(node) {
   }, VISIBILITY_DEBOUNCE_MS));
 }
 
-// ----- topic 위젯 초기 축소 + 휠 스크롤 -----------------------------------
-// 새 노드의 기본 높이가 필요치보다 크고, topic textarea는 h-full(남는 공간
-// 전부 차지) 구조라 처음부터 수십 px 높게 나온다. 새 노드에 한해 높이를
-// 최소치로 줄인다. 이후 크기 조절은 노드 코너 드래그만 가능하고(위젯 자체는
-// resize:none), 텍스트가 넘치면 칸 안에서 휠 스크롤한다. 자동 확장은
-// 의도적으로 하지 않는다 — 여러 노드를 오자와 열에 맞춰 정돈해 두면 자동
-// 크기 변화가 배치를 흐트러뜨린다.
+// ----- topic 위젯 크기(하한 2줄) + 휠 스크롤 -------------------------------
+// 1.53.10 프런트엔드 실측: 위젯 높이의 진실은 프런트엔드가 쥔다 — DOM 위젯의
+// 최소 높이는 options.getMinHeight(없으면 요소 CSS 변수, 없으면 50px)로
+// 정해지고, **상한 콜백이 없는 위젯이 노드의 남는 공간을 전부 흡수한다**
+// (distributeSpace). 이 노드에서 흡수 위젯은 topic 하나다. 사용자 지시
+// (2026-10-17): 꺼냈을 때 표시되는 크기가 2칸(하한), 노드를 키우면 topic
+// 칸이 같이 커질 것(상한 없음 → 남는 공간이 전부 여기로), 노드 하단에 빈
+// 공간이 남지 않을 것. 그래서 **하한만** 2줄 측정값으로 묶고(아래
+// applyFixedTextareaHeight) 새 노드는 남는 공간이 0 인 높이로 줄인다
+// (shrinkNewNode — 프런트엔드 회계상 computeSize 최소치보다 약 16px 작다).
+// 위젯 자체는 resize:none 이라 크기 조절은 노드 코너 드래그로만 하고,
+// 텍스트가 넘치면 칸 안에서 휠 스크롤한다. 노드가 스스로 커지는 자동
+// 확장은 하지 않는다 — 여러 노드를 오자와 열에 맞춰 정돈해 두면 자동 크기
+// 변화가 배치를 흐트러뜨린다.
 
 /** topic textarea의 DOM 요소 (없으면 null) */
 function topicElement(node) {
@@ -271,14 +286,41 @@ function topicElement(node) {
     return w?.element ?? null;
 }
 
-/** 새 노드의 높이를 최소치로 맞춘다 (폭은 유지) */
+/** [w, h] 모양인가 — 노드 크기 판정.
+ * 왜(Why) Array.isArray 로는 안 되나 (2026-10-17 라이브 실측): 프런트엔드는
+ * node.size 를 Float32Array 로 들고 있다(프로브 덤프 {"0":400,"1":888},
+ * Array.isArray 는 false). 이 판정을 Array.isArray 로 쓰던 곳들이 통째로
+ * 죽은 코드가 됐다 — shrinkNewNode 가 그래서 새 노드를 2칸으로 줄이지
+ * 못했고(초기 2칸 실패의 원인), 소켓 해제 높이 보정(updateVisibility)과
+ * 팝업 앵커(computePopupScreenPos)도 같이 죽어 있었다. plain array 와
+ * typed array 를 모두 받는다. */
+function isSizeLike(v) {
+  return !!v && typeof v.length === "number" && v.length >= 2
+    && typeof v[0] === "number" && typeof v[1] === "number";
+}
+
+/** 새 노드의 높이를 "topic 2칸 + 남는 공간 0" 인 높이로 줄인다 (폭은 유지).
+ * 왜(Why) computeSize() 최소치가 아닌가: 프런트엔드는 computeSize 예산에
+ * 위젯마다 +4 와 꼬리 +8/+6 을 남기는데 실제 배치는 그 값을 소비하지 않는다
+ * (1.53.10 실측 — V1 은 그래서 최소치에서 하단 16px 공백이 생겼다).
+ * freeWidgetSpace 는 프런트엔드가 마지막 배치에서 노드에 심어 둔 여유값
+ * 이라 "여유가 캡과 같아지는 높이"를 역산할 수 있다:
+ * h = 현재높이 - (여유 - 캡). 제목·슬롯 높이는 약분된다. 값이 없거나
+ * (배치 전) 여유가 이미 캡 이하면 computeSize() 최소치로만 줄인다. */
 function shrinkNewNode(node) {
   if (typeof node?.computeSize !== "function") return;
-  if (!Array.isArray(node.size)) return;
+  if (!isSizeLike(node.size)) return;
   const min = node.computeSize();
-  if (!Array.isArray(min)) return;
-  if (node.size[1] > min[1]) {
-    node.setSize([Math.max(node.size[0], min[0]), min[1]]);
+  if (!isSizeLike(min)) return;
+  let h = min[1];
+  const w = (node.widgets || []).find((x) => x?.name === "topic");
+  const free = node.freeWidgetSpace;
+  if (w && typeof free === "number") {
+    const cap = topicWidgetHeight(w, w.element);
+    if (free > cap) h = node.size[1] - (free - cap);
+  }
+  if (node.size[1] > h) {
+    node.setSize([Math.max(node.size[0], min[0]), h]);
   }
 }
 
@@ -304,26 +346,33 @@ window.addEventListener("wheel", (e) => {
   }
 }, { capture: true, passive: false });
 
-/** topic·llm_hint textarea 고정 높이 — **1줄 최소치**.
- * 왜(Why) 고정인가: 두 위젯은 h-full 이라 노드 높이가 변할 때마다 함께
- * 늘어난다. 이미지 단자 추가/제거·새로고침·레이아웃 재계산으로 노드 높이가
- * 바뀌면 textarea 가 따라 커지거나 작아져서 배치가 흐트러진다. 높이를 고정하면
- * 노드 크기 변화와 무관하게 위젯 크기가 유지된다.
- * 왜(Why) 1줄인가 (2026-10-12 사용자 지시): 처음부터 크게 잡으면 노드가
- * 불필요하게 커진다. 최소(1줄)로 시작하고 넘치는 텍스트는 칸 안에서 휠
- * 스크롤한다(위 TOPIC_ELS 핸들러).
- * 왜(Why) 상수가 아니라 **측정**인가: 글꼴·줄간격·패딩이 프론트엔드 판마다
+/** topic·llm_hint textarea **하한** 높이 — **2줄** (2026-10-17 사용자 지시).
+ * 왜(Why) 하한인가: 두 위젯은 노드 높이가 변할 때마다 함께 늘어나고, 줄이면
+ * 잘린다. 노드 코너 드래그 하한이 이 밑으로 못 내려가게 잠근다. 상한은 열어
+ * 두어 노드를 키우면 칸이 같이 커진다(사용자 지시 2026-10-17 — 리사이즈가
+ * 고정이면 안 된다).
+ * 왜(Why) 2줄인가: 2026-10-12 에는 1줄 최소치였으나, 노드를 꺼냈을 때의 초기
+ * 표시가 2줄이어야 한다는 사용자 지시(2026-10-17)로 올렸다. 넘치는 텍스트는
+ * 칸 안에서 휠 스크롤한다(위 TOPIC_ELS 핸들러).
+ * 왜(Why) 상수가 아니라 **측정**인가: 글꼴·줄간격·패딩이 프런트엔드 판마다
  * 다르다. 상수로 박으면 어떤 판에서 잘리거나 남는다. */
-const FIXED_TEXTAREA_LINES = 1;
-const FIXED_TEXTAREA_FALLBACK_PX = 26;
+const FIXED_TEXTAREA_LINES = 2;
+const FIXED_TEXTAREA_FALLBACK_PX = 42;
 
-/** textarea 의 1줄 높이(px). 계산 불가면 근사치. */
-function textareaOneLineHeight(el) {
+/** textarea 의 고정 높이(px) = FIXED_TEXTAREA_LINES 줄 + 패딩.
+ * 캔버스 DOM 밖(계산된 스타일이 비어 있음)이면 알려진 실측 근사치를 돌려준다 —
+ * 값의 신뢰가 생기는 곳에서만 캐시한다(applyFixedTextareaHeight). */
+function textareaFixedHeight(el) {
   try {
     const cs = window.getComputedStyle(el);
-    let lh = parseFloat(cs.lineHeight);
+    const fsRaw = parseFloat(cs.fontSize);
+    const lhRaw = parseFloat(cs.lineHeight);
+    if (!isFinite(fsRaw) && !isFinite(lhRaw)) {
+      return FIXED_TEXTAREA_FALLBACK_PX; // 미부착 — 계산된 스타일 없음
+    }
+    let lh = lhRaw;
     if (!isFinite(lh) || lh <= 0) {
-      lh = (parseFloat(cs.fontSize) || 13) * 1.45;
+      lh = (isFinite(fsRaw) && fsRaw > 0 ? fsRaw : 13) * 1.45;
     }
     const pad = (parseFloat(cs.paddingTop) || 0)
       + (parseFloat(cs.paddingBottom) || 0);
@@ -337,30 +386,68 @@ function textareaOneLineHeight(el) {
   }
 }
 
-/** topic·llm_hint textarea 높이를 1줄 최소치로 고정한다.
+/** 위젯 레이아웃 높이(px) = textarea 높이 + 위·아래 margin.
+ * 프런트엔드(1.53.10 실측)는 DOM 요소 높이를 "위젯 레이아웃 높이 - 2*margin"
+ * 으로 배치한다(GraphView 의 DOM 위젯 레이어). 그래서 이 값이 요소 높이의
+ * 환산 기준이다 — 레이아웃 **하한**(레이아웃 캡)으로 쓰면 요소가 2줄이 되고,
+ * 요소 style 은 건드리지 않는다(프레임워크 배치를 이기면 리사이즈가 안 먹는다).
+ * 캐시는 부착 후에만 — 미부착 측정은 틀릴 수 있고, 틀린 값이 캐시되면
+ * 드로우 훅이 다시 재지 않는다. */
+function topicWidgetHeight(w, el) {
+  const px = el && el.isConnected
+    ? (el._goriFixedPx || (el._goriFixedPx = textareaFixedHeight(el)))
+    : textareaFixedHeight(el);
+  const m = typeof w?.margin === "number" ? w.margin : 10;
+  return px + m * 2;
+}
+
+/** topic·llm_hint 의 **하한** 높이를 2줄(측정값)로 묶는다 — 상한은 열어 둔다.
+ * 1) 레이아웃 하한: options.getMinHeight 를 주입한다. 프런트엔드(1.53.10
+ *    실측)는 이 값을 위젯 최소 높이로 읽는다(computeLayoutSize). 노드를
+ *    2줄 아래로 줄여도 이 밑으로는 안 내려가고, 노드 코너 드래그의 하한도
+ *    computeSize() 를 타므로 이 캡이 지킨다. computeSize 도 이 값을 읽으므로
+ *    DOM 부착 전에도 먼저 건다.
+ *    상한 콜백(maxHeight)은 **일부러 설치하지 않는다** — 상한이 없어야
+ *    노드의 남는 공간을 topic 이 전부 흡수해(distributeSpace) 노드를 키울
+ *    때 2줄 위로 같이 커지고(사용자 지시 2026-10-17), 하단에 회색 공백이
+ *    남지 않는다. 상한을 주면 남는 공간이 굳어 하단 공백이 된다(V1 실측).
+ * 2) 요소 style 은 **건드리지 않는다**: 프런트엔드가 위젯 레이아웃 높이 -
+ *    2*margin 으로 DOM 요소를 매 프레임 배치한다(GraphView 실측). 요소
+ *    height/min/max 를 우리가 고정하면 이 배치를 이겨서 리사이즈가 안
+ *    먹는다. 배치를 그대로 따르게 두면 레이아웃 높이만 조절하면 요소가
+ *    자동으로 채운다.
+ * rows 는 부착 후에만 맞춘다 — 미부착 요소는 줄 수가 화면에 의미가 없다.
  * 값이 이미 맞으면 **대입하지 않는다** — 매 드로우에서 불리는 함수라 무조건
  * 대입하면 스타일 재계산이 프레임마다 돈다. 측정값은 **요소에** 캐시한다
  * (새 요소가 붙으면 자동으로 다시 잰다 — DOM 재마운트 대응). */
 function applyFixedTextareaHeight(node) {
-  for (const name of ("topic", "llm_hint")) {
+  // 2026-10-17 실측 교훈: 여기가 ("topic", "llm_hint") 였다. 콤마 연산자라
+  // "llm_hint" 문자열의 **문자 단위**로 순회해 어느 위젯도 찾지 못했고,
+  // 이 함수 전체가 조용한 죽은 코드였다(1.9.36~42 의 고정 높이가 안 먹은 원인).
+  for (const name of ["topic", "llm_hint"]) {
     const w = (node.widgets || []).find((x) => x.name === name);
     const el = w?.element;
-    if (!el || !el.style) continue;
+    if (!el) continue;
+    if (w.options) {
+      if (!w._goriLayoutCap) {
+        // 호출 시점에 w.element 를 읽는다 — DOM 재마운트로 요소가 교체돼도
+        // 낡은 요소를 재지 않는다.
+        w._goriLayoutCap = () => topicWidgetHeight(w, w.element);
+      }
+      if (w.options.getMinHeight !== w._goriLayoutCap) {
+        w.options.getMinHeight = w._goriLayoutCap;
+      }
+    }
+    if (!el.isConnected) continue;
     if (el.rows !== FIXED_TEXTAREA_LINES) el.rows = FIXED_TEXTAREA_LINES;
-    let px = el._goriOneLinePx;
-    if (!px) px = el._goriOneLinePx = textareaOneLineHeight(el);
-    const want = px + "px";
-    if (el.style.height !== want) el.style.height = want;
-    if (el.style.minHeight !== want) el.style.minHeight = want;
-    if (el.style.maxHeight !== want) el.style.maxHeight = want;
   }
 }
 
-/** 고정 높이를 **매 드로우에서** 다시 보장한다.
- * 왜(Why) 드로우 훅인가 (2026-10-12 사용자 지시): 레이아웃/위젯 코드가 매
- * 프레임 textarea 의 style.height 를 다시 쓰기 때문에 생성 시 한 번만 적용하면
- * 새로고침·소켓 연결/해제 후 값이 달라진다. 드로우 직후 보정하면 사용자가 보는
- * 값이 항상 같다. 값이 같으면 대입하지 않으므로 비용은 비교뿐이다. */
+/** 하한 캡·rows 를 **매 드로우에서** 다시 보장한다.
+ * 왜(Why) 드로우 훅인가 (2026-10-12 사용자 지시): 레이아웃/위젯 배치가 매
+ * 프레임 다시 돌기 때문에 생성 시 한 번만 적용하면 새로고침·소켓 연결/해제
+ * 후 값이 달라진다. 드로우 직후 보정하면 사용자가 보는 값이 항상 같다.
+ * 값이 같으면 대입하지 않으므로 비용은 비교뿐이다. */
 function ensureFixedTextareaDrawHook(node) {
   if (node._goriFixedTextareaHooked) return;
   node._goriFixedTextareaHooked = true;
@@ -755,7 +842,10 @@ function ensureLlmDrawHook(node) {
   };
 }
 
-/** model 위젯 줄에 표시등을 캔버스로 그린다 (node 로컬 좌표) */
+/** LLM 표시줄에 표시등을 캔버스로 그린다 (node 로컬 좌표).
+ * 표시줄은 **ai_llm_setup 헤더**다 (2026-10-17 — 섹션 접기 도입): model 줄은
+ * 접히면 안 보이는데 표시등은 접혀 있어도 계속 와야 한다(실행 중 여부 표시).
+ * 헤더가 아직 없거나 자리가 없으면 model 줄로 대체한다(설치 직후 1프레임). */
 function drawLlmLight(node, ctx) {
   const state = node._goriLlmState;
   if (!state) return;
@@ -765,7 +855,10 @@ function drawLlmLight(node, ctx) {
     node._goriLlmState = null;
     return;
   }
-  const w = (node.widgets || []).find((x) => x && x.name === "model");
+  const hw = findLlmHeaderWidget(node);
+  const w = (hw && typeof hw.y === "number")
+    ? hw
+    : (node.widgets || []).find((x) => x && x.name === "model");
   if (!w || typeof w.y !== "number") return;
   let alpha = 1;
   if (spec.blink) {
@@ -846,6 +939,708 @@ app.api?.addEventListener?.("gori_llm_status", (event) => {
 // 새 실행이 시작되면 모든 표시등을 초기화 (직전 실행의 잔광 제거)
 app.api?.addEventListener?.("execution_start", clearAllLlmLights);
 
+/* ---------------------------------------------------------------------------
+ * ai_llm_setup 섹션 헤더 + LLM 설정 접기 (2026-10-17)
+ *
+ * provider~vision_detail 6개 LLM 위젯이 motion2 아래부터 시작해 노드 중간을
+ * 채운다. 규칙(auto)만 쓰는 사용자는 이 6칸을 볼 필요가 없어서, "AI LLM 설정"
+ * 헤더 한 줄을 클릭하면 6칸이 접히고 노드 높이가 함께 줄어든다. 클릭하면 다시
+ * 펼쳐진다.
+ *
+ * **기본 상태 = 접힘** (2026-10-18 사용자 지시 — 노드를 꺼낼 때 접힌 채로
+ * 나온다). 저장된 값이 있으면 그것을 따르고, 없으면 새 노드는 접힘·로드는
+ * 펼침이다 (로드 경로는 크기를 안 건드리므로, 이 기능 이전에 저장된 펼친
+ * 크기에 접힘을 씌우면 하단에 빈 공간이 남는다 — resolveLlmFolded 참조).
+ *
+ * 헤더는 JS 전용 위젯(serialize:false)이라 워크플로 저장물에 **자체가 남지
+ * 않는다** — widgets_values 는 23개 그대로이고, 실행 프롬프트(graphToPrompt)
+ * 에도 들어가지 않는다(프롬프트는 options.serialize:false 를 본다 — INPUT_TYPES
+ * 에 없는 이름이 프롬프트에 섞이면 서버 검증이 죽으므로 두 곳 모두 막는다).
+ * 복원은 위치 기반이라 serialize:false 를 건너뛰므로 기존 워크플로의 값
+ * 매핑은 어긋나지 않는다(번호 매핑은 건드리지 않는다 — F16 과 같은 규칙).
+ *
+ * 접힘 상태는 node.properties 에 남는다(node.properties 임의 키 생존 실측
+ * 2026-10-17 — configure 가 키를 전부 복사한다). 접기 높이 차이도 properties
+ * 에 남는다(gori_llm_fold_px) — 로드 직후엔 위젯 y 가 아직 없어서 배치를 못
+ * 잰다(첫 arrange 전에 숨겨야 늘어남 보정이 없다 — 아래 applyLlmFoldFromProperties).
+ *
+ * 높이 계산(Why 배치 기준인가): 프런트엔드 _arrangeWidgets 는 위젯 1칸 =
+ * computeSize+4 이고, DOM 위젯(extra_negative)은 남는 공간을 나눠 갖는다.
+ * computeSize() 차이는 이 분배를 반영하지 않아 셀 때마다 어긋난다(파일 위
+ * shrinkNewNode 주석의 "예산과 실제 배치의 괴리" 와 같은 종류). 그래서 접는
+ * 순간의 **실제 y 좌표 차이**(pf_steps.y - provider.y)를 잰다 — 두 위젯이
+ * 그룹을 앞뒤로 감싸고 있어 차이가 곧 그룹의 배치 높이가 된다. 접힌 뒤에는
+ * 숨긴 위젯의 y 가 멈춰 있으므로 properties 에 남은 px 를 쓴다(socket 추가로
+ * 전체 y 가 밀려도 px 는 그대로라 정확하다).
+ * ------------------------------------------------------------------------- */
+const LLM_HEADER_NAME = "ai_llm_setup";
+const LLM_HEADER_LABEL = "AI LLM 설정";
+/** 접기 대상 6개. llm_hint 는 **빼야 한다** — 이미 hidden:True 인 위젯이라
+ * 이 목록에 넣으면 펼칠 때 hidden=false 를 되돌려 UI 에 되살아난다(API·스크립트
+ * 전용 위젯이 화면에 나온다). */
+const LLM_FOLD_WIDGETS = [
+  "provider", "model", "api_key", "custom_base_url",
+  "extra_negative", "vision_detail",
+];
+const LLM_FOLD_PROP = "gori_llm_setup_folded";
+const LLM_FOLD_PX_PROP = "gori_llm_fold_px";
+
+function findLlmHeaderWidget(node) {
+  try {
+    return (node?.widgets || []).find((w) => w && w.name === LLM_HEADER_NAME);
+  } catch (_) {
+    return undefined;
+  }
+}
+
+/** 접기 대상 위젯만 모은다 (순서는 LLM_FOLD_WIDGETS — 레이아웃 순서와 같음). */
+function llmFoldGroupWidgets(node) {
+  try {
+    const ws = node?.widgets || [];
+    return LLM_FOLD_WIDGETS
+      .map((name) => ws.find((w) => w && w.name === name))
+      .filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+
+/** 접기 높이(px) = 그룹의 실제 배치 높이.
+ * 1순위 y 좌표 차이 — 같은 arrange 결과에서 나온 값이라 배치와 정확히 일치.
+ * 2순위 computedHeight 합 — 마지막 arrange 가 심어 둔 값(숨긴 위젯에도 남는다).
+ * 3순위 computeSize+4 합 — 둘 다 없을 때의 근사치 (배치 간격과 같은 24px).
+ * 측정 불가면 0 — 접기/펼치기에서 크기 보정만 생략된다(위젯 숨김/표시는 정상). */
+function measureLlmFoldFootprint(node) {
+  try {
+    const ws = node?.widgets || [];
+    const first = ws.find((w) => w && w.name === "provider");
+    const after = ws.find((w) => w && w.name === "pf_steps");
+    if (first && after &&
+        typeof first.y === "number" && typeof after.y === "number") {
+      const d = after.y - first.y;
+      if (d > 0) return d;
+    }
+    let sum = 0;
+    for (const w of llmFoldGroupWidgets(node)) {
+      if (typeof w.computedHeight === "number" && w.computedHeight > 0) {
+        sum += w.computedHeight;
+      } else if (typeof w.computeSize === "function") {
+        const h = w.computeSize(node?.size?.[0] || 300);
+        sum += (Array.isArray(h) && typeof h[1] === "number" ? h[1] : 20) + 4;
+      } else {
+        sum += 24; // NODE_WIDGET_HEIGHT(20) + 배치 간격(4)
+      }
+    }
+    return sum > 0 ? sum : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+/** LLM 섹션 접기/펼치기 (헤더 클릭). hidden 토글 + 노드 높이 보정 + 기록.
+ * 접힘폭은 토글 **전에** 잰다(접힌 뒤 y 가 멈춰 있고, 펼칠 땐 properties px). */
+function setLlmSectionFolded(node, folded) {
+  try {
+    if (!node) return false;
+    const group = llmFoldGroupWidgets(node);
+    if (!group.length) return false;
+    const props = node.properties || (node.properties = {});
+    const allHidden = group.every((w) => w.hidden === true);
+    if (folded === allHidden && folded === !!props[LLM_FOLD_PROP]) return false;
+    let px = 0;
+    if (folded) {
+      px = measureLlmFoldFootprint(node);
+      if (px > 0) props[LLM_FOLD_PX_PROP] = px;
+    } else {
+      px = Number(props[LLM_FOLD_PX_PROP]) || 0;
+      if (!(px > 0)) px = measureLlmFoldFootprint(node);
+    }
+    for (const w of group) w.hidden = folded;
+    props[LLM_FOLD_PROP] = folded;
+    // 왜(Why) 같은 흐름인가: 숨김과 리사이즈 사이에 arrange 가 끼면
+    // _arrangeWidgets 가 topic 흡수/자동 증가로 노드를 되돌린다. setDirty 는
+    // 다음 프레임에 arrange 를 돌게 할 뿐이라 여기서는 동기으로 맞춘다.
+    if (px > 0 && isSizeLike(node.size)) {
+      const h = folded ? node.size[1] - px : node.size[1] + px;
+      node.setSize([node.size[0], Math.max(60, h)]);
+    }
+    setCanvasDirty();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function toggleLlmSectionFolded(node) {
+  try {
+    const group = llmFoldGroupWidgets(node);
+    const cur = group.length > 0 && group.every((w) => w.hidden === true);
+    return setLlmSectionFolded(node, !cur);
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 유효 접힘 상태 해석. 저장된 값(properties)이 있으면 그것을 따른다. 없으면
+ * **새 노드는 접힘** — 꺼낼 때 AI LLM 설정이 접힌 채로 나온다(2026-10-18 지시).
+ * 로드된 노드는 펼침: 이 기능 이전 저장물의 노드 크기는 펼친 크기이고 로드
+ * 경로는 크기를 안 건드리므로, 속성이 없다고 접으면 하단에 빈 공간이 남는다. */
+function resolveLlmFolded(node) {
+  try {
+    const props = node?.properties;
+    if (props && Object.prototype.hasOwnProperty.call(props, LLM_FOLD_PROP)) {
+      return !!props[LLM_FOLD_PROP];
+    }
+    return !node?._goriLoaded;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 접힘 상태를 적용한다 — **hidden 만, 크기 무관.**
+ * 왜(Why) 크기를 안 만지나: 접힌 채 저장된 노드의 크기는 이미 접힌 크기이고
+ * (토글할 때 setLlmSectionFolded 가 맞춰 둔다), 새 노드의 높이는 뒤이어
+ * shrinkNewNode 가 접힌 그룹을 반영해 줄여 준다.
+ * 왜(Why) 동기으로(in onConfigure) 부르나: 늦게(디바운스 afterLifecycle)
+ * 숨기면 첫 arrange 가 펼친 채로 노드를 자동 증가시켰다가 50ms 뒤 다시
+ * 줄여서 하단에 공백이 남는다. configure 직후 onConfigure 는 첫 arrange
+ * **전**이라 이 순서가 보장된다.
+ * 새 노드 기본 접힘은 properties 에 기록한다 — 기록하지 않으면 저장 후
+ * 재로드에서 속성이 없어 다시 펼쳐진다(헤더 화살표도 어긋난다). 접기폭
+ * (gori_llm_fold_px)도 **접기 전에** 재서 함께 남긴다 — 접힌 뒤엔 잴 수 없다. */
+function applyLlmFoldFromProperties(node) {
+  try {
+    const group = llmFoldGroupWidgets(node);
+    if (!group.length) return false;
+    const props = node.properties || (node.properties = {});
+    const folded = resolveLlmFolded(node);
+    if (folded === true) {
+      // 접기폭도 함께 남긴다 (**접기 전에** 잰다). 안 남기면 펼칠 때가
+      // 문제다 — 접힌 뒤엔 숨긴 위젯 y 가 멈추고 보이는 위젯은 위로 밀려
+      // y 차이가 무너진다(실측: 차이 0). 그러면 computedHeight 합으로
+      // 떨어져 배치 간격(+4/칸)이 빠진 값이 나온다.
+      if (!Object.prototype.hasOwnProperty.call(props, LLM_FOLD_PX_PROP)) {
+        const px = measureLlmFoldFootprint(node);
+        if (px > 0) props[LLM_FOLD_PX_PROP] = px;
+      }
+      if (!Object.prototype.hasOwnProperty.call(props, LLM_FOLD_PROP)) {
+        props[LLM_FOLD_PROP] = true;
+      }
+    }
+    let changed = false;
+    for (const w of group) {
+      if (!!w.hidden !== folded) {
+        w.hidden = folded;
+        changed = true;
+      }
+    }
+    if (changed) setCanvasDirty();
+    return changed;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 헤더를 motion2 바로 뒤에 넣는다 (1회 · JS 전용 · 저장되지 않는다).
+ * motion2 다음(provider 앞)이므로 기존 위젯들의 상대 순서는 그대로다. */
+function installLlmSetupHeader(node) {
+  try {
+    const widgets = node?.widgets;
+    if (!Array.isArray(widgets)) return false;
+    if (findLlmHeaderWidget(node)) return false;
+    const idx = widgets.findIndex((w) => w && w.name === "motion2");
+    if (idx < 0) return false;
+    const hw = {
+      type: "gori_llm_header",
+      name: LLM_HEADER_NAME,
+      value: "",
+      // 저장(serialize)과 실행(graphToPrompt) 두 경로를 각각 막는다 —
+      // 코어의 두 검사가 다른 키(widget.serialize / options.serialize)를 본다
+      // (1.53.10 번들 실측). 한쪽만 막으면 한쪽으로 새어 나간다.
+      serialize: false,
+      options: { serialize: false },
+      computeSize(width) {
+        return [width, 20];
+      },
+      draw(ctx, n, width, y, H) {
+        this.y = y;
+        this.last_y = y;
+        drawLlmSetupHeader(ctx, n, width, y, H);
+      },
+      mouse(event, pos, n) {
+        const t = event?.type;
+        if (t === "pointerdown" || t === "mousedown") {
+          toggleLlmSectionFolded(n);
+          return true;
+        }
+        return false;
+      },
+    };
+    widgets.splice(idx + 1, 0, hw);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 헤더 한 줄: 가운데 라벨 + 좌우 구분선 + 접힘 화살표 (노드 로컬 좌표). */
+function drawLlmSetupHeader(ctx, node, width, y, H) {
+  try {
+    const folded = resolveLlmFolded(node);
+    const label = LLM_HEADER_LABEL;
+    const cy = y + H / 2;
+    ctx.save();
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#cfe8ff";
+    let tw = 72;
+    if (typeof ctx.measureText === "function") {
+      try {
+        tw = ctx.measureText(label).width || tw;
+      } catch (_) {
+        /* 측정 실패 시 근사 폭 유지 */
+      }
+    }
+    ctx.fillText(label, width / 2, cy);
+    // 구분선 — 가운데 라벨과 오른쪽 화살표를 피해 그린다.
+    // 왼쪽 시작(22)은 LLM 표시등(cx=10, r=4)이 앉을 자리를 비운다.
+    ctx.strokeStyle = "#555";
+    ctx.lineWidth = 1;
+    const lx0 = 22;
+    const lx1 = width / 2 - tw / 2 - 8;
+    const rx0 = width / 2 + tw / 2 + 8;
+    const rx1 = width - 24;
+    ctx.beginPath();
+    if (lx1 > lx0) {
+      ctx.moveTo(lx0, cy);
+      ctx.lineTo(lx1, cy);
+    }
+    if (rx1 > rx0) {
+      ctx.moveTo(rx0, cy);
+      ctx.lineTo(rx1, cy);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "#999";
+    ctx.textAlign = "right";
+    ctx.fillText(folded ? "▶" : "▼", width - 8, cy);
+    ctx.restore();
+  } catch (_) {
+    /* 드로우 실패는 무시 — 다음 프레임에 다시 시도한다 */
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 기능 드롭다운 -> 다중 선택 토글 팝업 (2026-10-16)                    */
+/* ------------------------------------------------------------------ */
+/* 왜(Why) 이 구조인가 (사용자 요구): 드롭다운을 클릭하면 각 항목 옆에
+ * 토글이 있고, 항목 글자를 눌러도 선택되지 않는다 — 토글만 선택을 바꾼다.
+ * 여러 개를 켠 뒤 캔버스를 클릭하면 닫히고, 위젯 표시가 '자동 (auto)' 에서
+ * '수동 (n개)' 로 바뀐다. 값은 콤마 구분 문자열로 저장하며 백엔드
+ * (cam_tables.split_multi)가 각 값의 조항을 모두 생성한다.
+ * 팝업은 캔버스가 아니라 HTML 오버레이로 만든다 — 줌·팬 변환과 무관하게
+ * 클릭 처리가 단순하고, 체크박스라 다중 선택이 자연스럽다. */
+
+const MULTI_WIDGET_NAMES = [
+  "shot", "lens", "angle", "composition", "lighting",
+  "grade", "motion", "speed", "amplitude", "motion2",
+];
+const MULTI_AUTO_LABEL = "자동 (auto)";
+
+function splitMultiValue(v) {
+  return String(v ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s && s !== MULTI_AUTO_LABEL);
+}
+
+function joinMultiValue(values, selected) {
+  const ordered = values.filter((v) => v !== MULTI_AUTO_LABEL && selected.has(v));
+  return ordered.length ? ordered.join(",") : MULTI_AUTO_LABEL;
+}
+
+/** 위젯 칸에 보일 텍스트. 선택이 있으면 '수동 (n개)', 없으면 '자동 (auto)'. */
+function multiDisplayText(v) {
+  const sel = splitMultiValue(v);
+  return sel.length ? `수동 (${sel.length}개)` : MULTI_AUTO_LABEL;
+}
+
+let multiPopupEl = null;
+let multiPopupState = null;
+let multiPopupOpenedAt = 0;
+/** 팝업을 연 순간의 캔버스 줌 배율 — 내용 배율의 기준 (연 순간 = 1배). */
+let multiPopupOpenScale = 1;
+/** 마지막으로 적용한 내용 배율 (같으면 다시 적용하지 않는다). */
+let multiPopupAppliedScale = 1;
+/** 안 깎인 자연 크기 (세로 캡 판정의 입력 — 내용 배율이 바뀔 때 다시 잰다). */
+let multiPopupNaturalW = 0;
+let multiPopupNaturalH = 0;
+/** 마지막으로 적용한 화면 좌표 (같으면 DOM 에 다시 쓰지 않는다). */
+let multiPopupLastLeft = NaN;
+let multiPopupLastTop = NaN;
+/** 캔버스 변환 추적 루프 핸들 (열려 있는 동안만 돈다; closeMultiPopup 이 취소). */
+let multiPopupRaf = 0;
+
+/** 팝업 내부 요소 크기를 배율 s 에 맞춰 다시 적용한다.
+ * s = 캔버스 줌 배율(연 순간 대비) — 노드와 같이 캔버스와 함께 커지고
+ * 작아진다 (사용자 지시 2026-10-17). */
+function applyMultiPopupScale(el, s) {
+  if (!el) return;
+  const scale = typeof s === "number" && s > 0 ? s : 1;
+  el.style.fontSize = (12 * scale).toFixed(1) + "px";
+  const cbPx = Math.max(10, Math.round(13 * scale));
+  const rowPad = Math.round(2 * scale) + "px " + Math.round(6 * scale) + "px";
+  const headPad = Math.round(3 * scale) + "px " + Math.round(6 * scale) + "px";
+  for (const cb of el.querySelectorAll("input[type=checkbox]")) {
+    cb.style.width = cbPx + "px";
+    cb.style.height = cbPx + "px";
+  }
+  for (const r of el.querySelectorAll(".gori-multi-row")) r.style.padding = rowPad;
+  for (const h of el.querySelectorAll(".gori-multi-head")) h.style.padding = headPad;
+}
+
+/** 팝업 내용 배율 = 캔버스 줌 비율 (연 순간 대비). 순수 함수 — 테스트 가능.
+ * 왜(Why) 상대 배율인가: 팝업은 연 순간 읽을 수 있어야 하고(1배 = 기준 크기),
+ * 그 뒤 캔버스 줌에 노드처럼 같이 반응해야 한다 (사용자 지시 2026-10-17 —
+ * "노드에 마우스 올리고 휠 쓰면 캔버스하고 같이 움직인다"). */
+function popupContentScale(openScale, nowScale) {
+  const base = typeof openScale === "number" && openScale > 0 ? openScale : 1;
+  const now = typeof nowScale === "number" && nowScale > 0 ? nowScale : base;
+  return now / base;
+}
+
+/** 팝업의 화면 좌표를 계산한다 (순수 함수 — 테스트 가능).
+ *
+ * 앵커 = 클릭한 위젯의 **오른쪽 상단** (노드 오른쪽 끝, 위젯 상단).
+ *
+ * 왜(Why) 이 변환식인가: LiteGraph 의 DragAndScale 규약은
+ * `screen = (graph + offset) * scale` 이다. `graph * scale + offset` 로
+ * 계산하면 그래프를 이동·확대한 상태에서 팝업이 엉뚱한 곳에 뜬다.
+ * convertOffsetToCanvas 가 있으면 그 함수를 그대로 쓴다 (규약의 원본).
+ */
+function computePopupScreenPos(node, widget, ds, rect) {
+  const nodeW = isSizeLike(node?.size) ? node.size[0] : 0;
+  const wy = typeof widget?.last_y === "number" ? widget.last_y : 0;
+  const gx = (node?.pos?.[0] || 0) + nodeW; // 그래프 좌표: 노드 오른쪽 끝
+  const gy = (node?.pos?.[1] || 0) + wy;    // 그래프 좌표: 위젯 상단
+  let x, y;
+  if (ds && typeof ds.convertOffsetToCanvas === "function") {
+    const p = ds.convertOffsetToCanvas([gx, gy]);
+    x = p[0];
+    y = p[1];
+  } else {
+    const scale = typeof ds?.scale === "number" ? ds.scale : 1;
+    x = (gx + (ds?.offset?.[0] || 0)) * scale;
+    y = (gy + (ds?.offset?.[1] || 0)) * scale;
+  }
+  return [(rect?.left || 0) + x, (rect?.top || 0) + y];
+}
+
+/** 팝업이 최소한 보여야 하는 높이(px) — 이보다 낮게 깎이면 위로 올려서라도 보여준다. */
+const POPUP_MIN_VISIBLE_PX = 120;
+
+/** 팝업 상자를 화면 안에 맞춘다 (순수 함수 — 테스트 가능).
+ * 가로: 넘치면 안쪽으로 민다 (기존 동작).
+ * 세로: 넘치면 **위로 밀지 않고** 높이만 깎는다(maxH). 왜(Why) 위로 밀면
+ * 안 되나 (2026-10-17 사용자 보고 — motion2 팝업이 speed 줄에 뜸): 위로 미는
+ * 옛 폭(화면 높이에서 팝업 높이를 뺀 값)은 클릭한 위젯 위치와 무관한 상수라,
+ * 긴 팝업일수록 클릭한 줄에서 멀리 떨어진 엉뚱한 줄에 붙어 보인다. 위쪽은
+ * 클릭한 줄에 고정하고 높이만 깎으면 나머지 항목은 내부 스크롤(스크롤바·휠)
+ * 로 본다. 줄이 화면 바닥에 너무 가까워 최소 높이조차 안 들어가면 그때만
+ * 위로 올린다. */
+function fitPopupBox(sx, sy, w, h, vw, vh) {
+  let left = Math.max(0, sx);
+  let top = Math.max(0, sy);
+  let maxH = h;
+  if (vw && left + w > vw) left = Math.max(0, vw - w - 4);
+  if (vh && top + h > vh) {
+    maxH = Math.max(POPUP_MIN_VISIBLE_PX, vh - top - 8);
+    if (top + maxH > vh) top = Math.max(0, vh - maxH - 4);
+  }
+  return { left, top, maxH };
+}
+
+function closeMultiPopup() {
+  if (multiPopupRaf) {
+    try {
+      cancelAnimationFrame(multiPopupRaf);
+    } catch (_) {
+      /* rAF 가 없는 환경에서는 무시 */
+    }
+    multiPopupRaf = 0;
+  }
+  if (multiPopupEl && multiPopupEl.parentNode) {
+    multiPopupEl.parentNode.removeChild(multiPopupEl);
+  }
+  multiPopupEl = null;
+  multiPopupState = null;
+}
+
+/** 팝업이 열려 있는 동안 매 프레임 캔버스 변환(이동·줌)에 팝업을 다시 붙인다.
+ * 위치: 앵커(노드 오른쪽 끝 + 클릭한 줄)를 매번 다시 계산 — 캔버스를 이동·
+ * 확대하면 노드와 같이 움직인다. 내용 크기는 캔버스 줌 배율(연 순간 대비)을
+ * 따라간다 (사용자 지시 2026-10-17). 값이 바뀐 것만 DOM 에 쓴다.
+ * 취소는 closeMultiPopup. */
+function multiPopupTick() {
+  multiPopupRaf = 0;
+  const menu = multiPopupEl;
+  const st = multiPopupState;
+  if (!menu || !st) return;
+  try {
+    const canvas = app?.canvas;
+    const ds = canvas?.ds;
+    const rect = canvas?.canvas?.getBoundingClientRect?.();
+    if (ds && rect) {
+      const s = popupContentScale(multiPopupOpenScale, ds.scale);
+      if (Math.abs(s - multiPopupAppliedScale) > 0.001) {
+        multiPopupAppliedScale = s;
+        applyMultiPopupScale(menu, s);
+        const keep = menu.style.maxHeight;
+        menu.style.maxHeight = "none";
+        multiPopupNaturalW = menu.offsetWidth || 0;
+        multiPopupNaturalH = menu.offsetHeight || 0;
+        menu.style.maxHeight = keep;
+      }
+      const [sx, sy] = computePopupScreenPos(st.node, st.widget, ds, rect);
+      const vw = globalThis.innerWidth || 0;
+      const vh = globalThis.innerHeight || 0;
+      const box = fitPopupBox(sx, sy, multiPopupNaturalW, multiPopupNaturalH, vw, vh);
+      const left = Math.round(box.left);
+      const top = Math.round(box.top);
+      if (left !== multiPopupLastLeft) {
+        menu.style.left = left + "px";
+        multiPopupLastLeft = left;
+      }
+      if (top !== multiPopupLastTop) {
+        menu.style.top = top + "px";
+        multiPopupLastTop = top;
+      }
+      const mh = box.maxH < multiPopupNaturalH ? box.maxH + "px" : "";
+      if (menu.style.maxHeight !== mh) menu.style.maxHeight = mh;
+    }
+  } catch (_) {
+    /* 프레임 실패는 무시 — 다음 프레임이 다시 시도한다 */
+  }
+  multiPopupRaf = requestAnimationFrame(multiPopupTick);
+}
+
+/** 팝업 밖 클릭이면 닫는다. 여는 클릭 자체를 닫기로 오인하지 않도록
+ * 열린 직후 200ms 는 무시한다 (같은 클릭이 캡처 단계에 먼저 도달한다). */
+function ensureMultiPopupCloseHook() {
+  if (typeof document === "undefined" || document._goriMultiClose) return;
+  document._goriMultiClose = true;
+  document.addEventListener("pointerdown", (e) => {
+    if (!multiPopupEl) return;
+    if (Date.now() - multiPopupOpenedAt < 200) return;
+    if (multiPopupEl.contains(e.target)) return;
+    closeMultiPopup();
+  }, true);
+}
+
+function commitMultiValue(node, widget, values, selected) {
+  widget.value = joinMultiValue(values, selected);
+  try {
+    widget.callback?.(widget.value, app.canvas, node, [0, 0], null);
+  } catch (_) {
+    /* 콜백 실패는 값 반영만 못 한다 — 조용히 무시 */
+  }
+  app.canvas?.setDirty?.(true, true);
+}
+
+function openMultiPopup(node, widget) {
+  closeMultiPopup();
+  ensureMultiPopupCloseHook();
+  const values = Array.isArray(widget.options?.values)
+    ? widget.options.values : [];
+  if (!values.length) return;
+  const selected = new Set(splitMultiValue(widget.value));
+  const menu = document.createElement("div");
+  menu.className = "gori-multi-popup";
+  menu.style.cssText = [
+    "position:fixed", "z-index:100000", "background:#232323",
+    "border:1px solid #666", "border-radius:4px", "padding:4px",
+    "color:#e0e0e0", "font-size:12px", "line-height:1.5",
+    "min-width:150px", "max-height:70vh", "overflow:auto",
+    "box-shadow:0 4px 12px rgba(0,0,0,.5)", "user-select:none",
+  ].join(";");
+
+  // 헤더 = 위젯 이름. 어떤 기능을 설정하는지 알아야 한다 (사용자 요구).
+  // '자동 (auto)' 는 노드 본체 위젯이 값으로 표시하므로 팝업에서는 두지 않는다.
+  const head = document.createElement("div");
+  head.className = "gori-multi-head";
+  head.textContent = String(widget.name || "");
+  head.style.cssText = [
+    "padding:3px 6px", "margin-bottom:2px", "font-weight:bold",
+    "color:#cfe8ff", "border-bottom:1px solid #444", "cursor:default",
+  ].join(";");
+  menu.appendChild(head);
+
+  // 항목: '자동 (auto)' 은 제외한다 (헤더가 그 자리를 대신한다).
+  values.filter((v) => v !== MULTI_AUTO_LABEL).forEach((v) => {
+    const row = document.createElement("div");
+    row.className = "gori-multi-row";
+    row.style.cssText =
+      "display:flex;align-items:center;gap:6px;padding:2px 6px;";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = selected.has(v);
+    cb.style.cssText = "margin:0;cursor:pointer;";
+    const lb = document.createElement("span");
+    lb.textContent = v;
+    lb.style.cssText = "cursor:default;";
+    cb.addEventListener("change", () => {
+      if (cb.checked) selected.add(v);
+      else selected.delete(v);
+      commitMultiValue(node, widget, values, selected);
+    });
+    row.appendChild(cb);
+    row.appendChild(lb);
+    menu.appendChild(row);
+  });
+
+  document.body.appendChild(menu);
+  multiPopupEl = menu;
+  multiPopupState = { node, widget };
+  multiPopupOpenedAt = Date.now();
+  multiPopupOpenScale = 1; // 연 순간 = 내용 배율 1 (아래 위치 계산에서 갱신)
+  multiPopupAppliedScale = 1;
+  applyMultiPopupScale(menu, 1);
+
+  // 휠은 캔버스로 넘긴다 (사용자 지시 2026-10-17): 팝업만 따로 커지던 옛
+  // 동작을 제거. 노드 위 휠과 완전히 같다 — 프런트의 processMouseWheel 이
+  // 설정(기본: 캔버스 이동, Ctrl·트랙패드: 줌)을 그대로 처리한다.
+  // 단 팝업이 세로로 깎여 스크롤이 필요하면 세로 휠은 목록 스크롤로 쓰고
+  // (프런트의 textarea 휠 처리와 같은 패턴), Ctrl·가로 휠·제스처는 캔버스.
+  menu.addEventListener("wheel", (e) => {
+    e.stopPropagation();
+    const canvas = app?.canvas;
+    const scrollable = menu.scrollHeight > menu.clientHeight + 1;
+    const gesture = !!canvas?.pointer?.isTrackpadGesture?.(e);
+    const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    if (e.ctrlKey || gesture || horizontal || !scrollable) {
+      canvas?.processMouseWheel?.(e);
+    }
+  }, { passive: false });
+
+  // 위치: 클릭한 위젯의 **오른쪽**에 붙인다 (사용자 예시 이미지 3장).
+  // 노드 오른쪽 끝에서 시작하고, 세로는 위젯 상단에 맞춘다.
+  try {
+    const canvas = app.canvas;
+    const dom = canvas?.canvas;
+    const rect = dom?.getBoundingClientRect?.();
+    const ds = canvas?.ds;
+    if (rect && ds) {
+      multiPopupOpenScale = typeof ds.scale === "number" && ds.scale > 0 ? ds.scale : 1;
+      const [sx, sy] = computePopupScreenPos(node, widget, ds, rect);
+      const vw = globalThis.innerWidth || 0;
+      const vh = globalThis.innerHeight || 0;
+      const w = menu.offsetWidth || 0;
+      const h = menu.offsetHeight || 0;
+      multiPopupNaturalW = w;
+      multiPopupNaturalH = h;
+      const box = fitPopupBox(sx, sy, w, h, vw, vh);
+      // 세로가 깎였으면 상자 높이를 제한한다 — 나머지 항목은 내부 스크롤로
+      // 본다. 위로 미는 옛 폭(화면 높이에서 팝업 높이를 뺀 값)은 클릭한 줄과
+      // 무관한 상수라 긴 팝업이 엉뚱한 줄에 떠 보였다 (motion2 사고 —
+      // fitPopupBox 참조).
+      if (box.maxH < h) menu.style.maxHeight = box.maxH + "px";
+      menu.style.left = Math.round(box.left) + "px";
+      menu.style.top = Math.round(box.top) + "px";
+      multiPopupLastLeft = Math.round(box.left);
+      multiPopupLastTop = Math.round(box.top);
+    }
+  } catch (_) {
+    /* 위치 계산 실패해도 팝업은 뜬다 (좌상단) */
+  }
+
+  // 캔버스 변환(이동·줌) 추적 시작 — 노드와 같이 움직인다 (2026-10-17).
+  multiPopupRaf = requestAnimationFrame(multiPopupTick);
+}
+
+/** 기능 위젯 하나를 다중 선택 위젯으로 교체한다. */
+function installMultiSelectWidget(node, name) {
+  const widgets = node?.widgets;
+  if (!Array.isArray(widgets)) return false;
+  const idx = widgets.findIndex((w) => w && w.name === name);
+  if (idx < 0) return false;
+  const old = widgets[idx];
+  if (old._goriMulti) return false; // 이미 설치됨
+  const values = Array.isArray(old.options?.values)
+    ? old.options.values.slice() : [];
+  // '자동 (auto)' 는 항상 맨 앞에 있어야 한다 — 배경 라벨이자 해제 상태다.
+  // 왜(Why) 방어하나: 콤보 values 를 못 읽는 환경에서 특정 기능에 '자동' 이
+  // 빠져 보인다는 지적이 있었다. 없으면 여기서 채운다.
+  if (!values.includes(MULTI_AUTO_LABEL)) values.unshift(MULTI_AUTO_LABEL);
+  // 원본 draw 를 보존한다 — ComfyUI 기본 그리기가 **이름**까지 그려 준다.
+  // 직접 그리면 이름이 사라져 어떤 기능인지 알 수 없다 (사용자 지적).
+  const origDraw = typeof old.draw === "function" ? old.draw : null;
+  const mw = {
+    _goriMulti: true,
+    type: "gori_multi",
+    name,
+    value: old.value,
+    options: Object.assign({}, old.options, { values }),
+    y: old.y,
+    last_y: typeof old.last_y === "number" ? old.last_y : old.y,
+    computeSize(width) { return [width, 20]; },
+    draw(ctx, n, width, y, H) {
+      this.last_y = y;
+      this.y = y;
+      const realValue = this.value;
+      const display = multiDisplayText(realValue);
+      // ComfyUI 기본 draw 를 재사용해 **이름**까지 그대로 나오게 한다.
+      // 표시용 텍스트를 잠시 value 로 넣어 그린 뒤 즉시 되돌린다.
+      if (origDraw) {
+        this.value = display;
+        try {
+          origDraw.call(this, ctx, n, width, y, H);
+        } finally {
+          this.value = realValue;
+        }
+        return;
+      }
+      // 기본 draw 가 없는 환경 대비 — 이름 + 값 + 화살표를 직접 그린다.
+      ctx.save();
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "#999";
+      ctx.textAlign = "left";
+      ctx.fillText(String(this.name || ""), 15, y + H / 2);
+      ctx.fillStyle = "#ddd";
+      ctx.textAlign = "right";
+      ctx.fillText(display, width - 20, y + H / 2);
+      ctx.fillStyle = "#999";
+      ctx.fillText("▼", width - 8, y + H / 2);
+      ctx.restore();
+    },
+    mouse(event, pos, n) {
+      const t = event?.type;
+      if (t === "pointerdown" || t === "mousedown") {
+        if (multiPopupState && multiPopupState.widget === this) {
+          closeMultiPopup();
+        } else {
+          openMultiPopup(n, this);
+        }
+        return true;
+      }
+      return false;
+    },
+  };
+  widgets[idx] = mw;
+  return true;
+}
+
+/** 노드의 기능 위젯 전부를 다중 선택으로 교체. */
+function installMultiSelectWidgets(node) {
+  let n = 0;
+  for (const name of MULTI_WIDGET_NAMES) {
+    try {
+      if (installMultiSelectWidget(node, name)) n += 1;
+    } catch (_) {
+      /* 한 위젯 실패가 나머지를 막지 않게 한다 */
+    }
+  }
+  return n;
+}
+
 app.registerExtension({
   name: EXT_ID,
   setup() {
@@ -859,6 +1654,47 @@ app.registerExtension({
     } catch (_) {
       /* 무시 */
     }
+    // Preset sync: poll preset widget and populate other widgets when all auto.
+    try {
+      const _goriPresetFields = ['shot','lens','angle','composition','lighting','grade','motion','speed','amplitude','motion2'];
+      const _goriAllAuto = (node) => _goriPresetFields.every((f) => {
+        const w = (node.widgets || []).find((x) => x && x.name === f);
+        return !w || w.value === '자동 (auto)' || w.value === 'auto' || w.value === '';
+      });
+      setInterval(() => {
+        try {
+          const nodes = app.graph?._nodes || [];
+          for (const node of nodes) {
+            if (node?.type !== 'GoRi_CameraDirectorEncodeSkills') continue;
+            const pw = (node.widgets || []).find((w) => w && w.name === 'preset');
+            if (!pw) continue;
+            const cur = pw.value;
+            if (!cur || typeof CAMERA_PRESETS === 'undefined') continue;
+            if (cur === '\uc790\ub3d9 (auto)' || cur === 'auto') {
+              if (node._goriLastPreset === cur) continue;
+              for (const f of _goriPresetFields) {
+                const w = (node.widgets || []).find((x) => x && x.name === f);
+                if (w) w.value = '\uc790\ub3d9 (auto)';
+              }
+              node._goriLastPreset = cur;
+              try { app.canvas?.setDirty?.(true, true); } catch (_) {}
+              continue;
+            }
+            if (!CAMERA_PRESETS[cur]) continue;
+            const _first = (node._goriLastPreset === undefined);
+            if (node._goriLastPreset === cur) continue;
+            if (_first && !_goriAllAuto(node)) { node._goriLastPreset = cur; continue; }
+            const p = CAMERA_PRESETS[cur];
+            for (const f of _goriPresetFields) {
+              const w = (node.widgets || []).find((x) => x && x.name === f);
+              if (w && p[f] != null) w.value = p[f];
+            }
+            node._goriLastPreset = cur;
+            try { app.canvas?.setDirty?.(true, true); } catch (_) {}
+          }
+        } catch (_) {}
+      }, 400);
+    } catch (_) {}
   },
   beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData?.name !== "GoRi_CameraDirectorEncodeSkills") return;
@@ -914,6 +1750,27 @@ app.registerExtension({
         attachTopicScroll(node);
       } catch (_) {
         /* 휠 스크롤 훅 실패는 조용히 무시 */
+      }
+      try {
+        // 기능 드롭다운을 다중 선택 토글로 교체 (2026-10-16)
+        installMultiSelectWidgets(node);
+      } catch (_) {
+        /* 다중 선택 위젯 설치 실패는 조용히 무시 — 기본 드롭다운으로 동작 */
+      }
+      try {
+        // ai_llm_setup 헤더 삽입 — motion2 아래, JS 전용(serialize:false)
+        installLlmSetupHeader(node);
+      } catch (_) {
+        /* 헤더 설치 실패는 조용히 무시 — LLM 6칸이 그대로 노출된다 */
+      }
+      try {
+        // 접힘 상태 적용 (hidden 만 — 크기는 저장된 값을 존중한다). 새 노드는
+        // 여기서 기본 접힘으로 들어간다. 로드 경로에서는 onConfigure 에서 이미
+        // 동기으로 처리됐다 — 여기는 새로고침·확장 재로드 등 이후 시점의
+        // 안전망(멱등).
+        applyLlmFoldFromProperties(node);
+      } catch (_) {
+        /* 접힘 적용 실패는 조용히 무시 */
       }
       try {
         applyFixedTextareaHeight(node);
@@ -974,6 +1831,16 @@ app.registerExtension({
           // configure는 createNode 직후 동기 호출되므로, 아래 setTimeout
           // 시점엔 이 플래그가 이미 설정되어 있다.
           this._goriLoaded = true;
+          // 접힘 상태는 **여기서 동기으로** 적용한다 (디바운스를 타지 않는다):
+          // 늦게 숨기면 첫 arrange 가 펼친 채로 노드를 자동 증가시켰다가
+          // 50ms 뒤 다시 줄여 하단 공백이 남는다(applyLlmFoldFromProperties
+          // 주석 참조). configure 는 widgets 완성·properties 복원 뒤에
+          // onConfigure 를 부르므로 이 시점에 hidden 토글이 안전하다.
+          try {
+            applyLlmFoldFromProperties(this);
+          } catch (_) {
+            /* 접힘 적용 실패는 조용히 무시 */
+          }
         }
         scheduleLifecycle(this);
         return result;
@@ -982,6 +1849,27 @@ app.registerExtension({
 
     patchLifecycle("onNodeCreated");
     patchLifecycle("onConfigure");
+
+    // 노드 제거 시 점멸 타이머 정리 (2026-10-19 감사, M1).
+    // 왜(Why) 필요한가: updateBlinkTimer 는 applyLlmLight 에서만 불린다. busy
+    // 노드를 캔버스에서 지우면 anyNodeBlinking() 이 false 가 되지만 재호출이
+    // 없어 60ms 인터벌이 다음 execution_start(clearAllLlmLights) 까지 계속
+    // 캔버스를 dirty 로 다시 그린다. onRemoved 에서 한 번 점검하면 즉시 멈춘다.
+    // patchLifecycle(디바운스+afterLifecycle)은 제거된 노드에 무거운 로직을
+    // 태우므로 쓰지 않고, 가벼운 훅을 따로 단다.
+    if (!nodeType.prototype._goriPatched_onRemoved) {
+      nodeType.prototype._goriPatched_onRemoved = true;
+      const origRemoved = nodeType.prototype.onRemoved;
+      nodeType.prototype.onRemoved = function (...args) {
+        const result = origRemoved?.apply(this, args);
+        try {
+          updateBlinkTimer();
+        } catch (_) {
+          /* 타이머 정리 실패는 조용히 무시 — 다음 실행에서 정리된다 */
+        }
+        return result;
+      };
+    }
 
     IMAGE_TEMPLATE = template;
 
@@ -1032,11 +1920,24 @@ app.registerExtension({
 export {
   imageNumber, countImageSockets, lastLinkedImageNumber, lastImageSocketIndex,
   isDraggingLink, updateVisibility, restoreAll, topicElement, shrinkNewNode,
-  applyFixedTextareaHeight, textareaOneLineHeight,
+  applyFixedTextareaHeight, textareaFixedHeight, topicWidgetHeight,
   ensureFixedTextareaDrawHook, FIXED_TEXTAREA_LINES,
   findApiKeyWidget, maskApiKeyWidget, clearApiKeyWidget, apiKeyWidgetIndex,
   hookSerializeBlankApiKey, hookApiKeyPayloadGuard,
   blankApiKeyInWorkflowData, hookGraphSerializeBlankApiKey,
   drawLlmLight, applyLlmLight, anyNodeBlinking, updateBlinkTimer,
   scheduleVisibilityUpdate, VISIBILITY_DEBOUNCE_MS,
+  splitMultiValue, joinMultiValue, multiDisplayText,
+  installMultiSelectWidget, installMultiSelectWidgets,
+  computePopupScreenPos, fitPopupBox, POPUP_MIN_VISIBLE_PX, popupContentScale,
+  MULTI_WIDGET_NAMES, MULTI_AUTO_LABEL,
+  findLlmHeaderWidget, llmFoldGroupWidgets, measureLlmFoldFootprint,
+  setLlmSectionFolded, toggleLlmSectionFolded, applyLlmFoldFromProperties,
+  resolveLlmFolded, installLlmSetupHeader, drawLlmSetupHeader,
+  LLM_HEADER_NAME, LLM_HEADER_LABEL, LLM_FOLD_WIDGETS,
+  LLM_FOLD_PROP, LLM_FOLD_PX_PROP,
 };
+
+
+// ===== Preset data (mirror of presets.json) =====
+const CAMERA_PRESETS = {"시네마틱 인물 (cinematic portrait)": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "제품 히어로 (product hero)": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "CF 버티컬 (vertical ad)": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "다큐 핸드헬드 (doc handheld)": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "드라마틱 롱샷 (dramatic long shot)": {"shot": "원경 (WS)", "lens": "24mm 광각 (wide)", "angle": "로우앵글 (low angle)", "composition": "리딩라인 (leading lines)", "lighting": "로우키 (low key)", "grade": "시네마틱 필름 (cinematic)", "motion": "돌리 인 (dolly in)", "speed": "느림 (slow)", "amplitude": "강하게 (dramatic)", "motion2": "없음 (none)"}};

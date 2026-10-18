@@ -32,7 +32,7 @@ from __future__ import annotations
 # 관리 단위일 뿐이다. 키퍼만 고쳤는데 팩 버전을 올리면 카메라도 바뀐 것처럼
 # 보인다. 각 노드는 자기 변경에만 버전을 올린다. 새 노드를 만들면 첫날부터
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
-__version__ = "1.9.34"
+__version__ = "1.9.36"
 
 # 해부학 스탠다드 규격 (2026-10-05). 판정기의 "정상 목표" 데이터다.
 # 왜(Why) 상대→절대 폴백인가: ComfyUI 는 이 폴더를 패키지로 임포트하고,
@@ -40,15 +40,11 @@ __version__ = "1.9.34"
 try:
     from .anatomy_standard import (
         SPEC_VERSION as _ANATOMY_SPEC_VERSION,
-        check_body_physics as _check_body_physics,
-        summarize_checks as _summarize_checks,
         correct_order_violations as _correct_order_violations,
     )
 except ImportError:
     from anatomy_standard import (
         SPEC_VERSION as _ANATOMY_SPEC_VERSION,
-        check_body_physics as _check_body_physics,
-        summarize_checks as _summarize_checks,
         correct_order_violations as _correct_order_violations,
     )
 
@@ -62,7 +58,6 @@ try:
         foot_comps as _foot_comps,
         unclaimed_feet as _unclaimed_feet,
         FOOT_CORRIDOR_MARGIN_DIV as _FOOT_CORRIDOR_MARGIN_DIV,
-        FOOT_TIP_Y_BAND as _FOOT_TIP_Y_BAND,
     )
 except ImportError:
     from anatomy_parts import (
@@ -74,7 +69,6 @@ except ImportError:
         foot_comps as _foot_comps,
         unclaimed_feet as _unclaimed_feet,
         FOOT_CORRIDOR_MARGIN_DIV as _FOOT_CORRIDOR_MARGIN_DIV,
-        FOOT_TIP_Y_BAND as _FOOT_TIP_Y_BAND,
     )
 
 # 손 물리 정합성 검증기 (옵션 A 확장, 2026-10-12).
@@ -82,12 +76,10 @@ except ImportError:
 try:
     from .kp_hand_phys import (
         hand_physical_score as _hand_physical_score,
-        score_one_hand as _score_one_hand,
     )
 except ImportError:
     from kp_hand_phys import (
         hand_physical_score as _hand_physical_score,
-        score_one_hand as _score_one_hand,
     )
 
 # 손 미세 당김 (hand_pull, 옵션 A 확장, 2026-10-12).
@@ -110,14 +102,12 @@ except ImportError:
 # 살짝 위치/형태를 바꿔 분리한다. 손 물리(옵션 A)와 같은 0~100 점수 + 95% 합격 선.
 try:
     from .kp_body_object import (
-        body_object_score as _body_object_score,
-        body_object_pull_pass as _body_object_pull_pass,
+        _thin_structure_mask as _thin_structure_mask,
         _bind_helpers as _bind_body_helpers,
     )
 except ImportError:
     from kp_body_object import (
-        body_object_score as _body_object_score,
-        body_object_pull_pass as _body_object_pull_pass,
+        _thin_structure_mask as _thin_structure_mask,
         _bind_helpers as _bind_body_helpers,
     )
 
@@ -128,12 +118,14 @@ try:
     from .kp_physic import (
         physic_score as _physic_score,
         physic_pull_pass as _physic_pull_pass,
+        physic_pull_last_error as _physic_pull_last_error,
         _bind_helpers as _bind_physic_helpers,
     )
 except ImportError:
     from kp_physic import (
         physic_score as _physic_score,
         physic_pull_pass as _physic_pull_pass,
+        physic_pull_last_error as _physic_pull_last_error,
         _bind_helpers as _bind_physic_helpers,
     )
 
@@ -343,6 +335,30 @@ def _hand_reestimate_hands(u8, prev_hands):
         return h if h else prev_hands
     except Exception:
         return prev_hands
+
+
+def _src_pose_class(src_img):
+    """참조 IMAGE → 포즈 클래스 (sitting/standing/lying) 또는 None.
+
+    비싸다 (mediapipe 1회) — 호출부는 포즈 지시가 있을 때만 부른다.
+    실패·판정 불가는 전부 None (기존 동작 유지).
+    """
+    try:
+        import numpy as _np
+        a = (src_img.detach().cpu().numpy()
+             if hasattr(src_img, "detach") else _np.asarray(src_img))
+        if a.ndim == 4:
+            a = a[0]
+        if a.ndim != 3 or a.shape[2] not in (3, 4):
+            return None
+        if a.dtype != _np.uint8:
+            a = (_np.clip(a.astype(_np.float64), 0.0, 1.0)
+                 * 255.0).astype(_np.uint8)
+        u8 = _np.ascontiguousarray(a[:, :, :3])
+        return _ref_pose_class(
+            _pose_landmarks_from_tasks(u8, with_visibility=True))
+    except Exception:
+        return None
 
 
 # kp_hand_repair 에 위 헬퍼들을 주입한다 (모듈 로드 시 1회).
@@ -1394,6 +1410,7 @@ def _appearance_box_from_landmarks(landmarks, w, h, region="lower"):
         if n < 25:
             return None
 
+        # 랜드마크 → (x, y). tuple/list/dict/객체 형식을 모두 받는다
         def _xy(lm):
             try:
                 if isinstance(lm, (tuple, list)):
@@ -1412,6 +1429,7 @@ def _appearance_box_from_landmarks(landmarks, w, h, region="lower"):
             except (TypeError, ValueError):
                 return (None, None)
 
+        # 값들 중 None/NaN 이 하나도 없으면 True
         def _ok(*vals):
             for _v in vals:
                 if _v is None or _v != _v:
@@ -1881,6 +1899,131 @@ def _apply_region_strength(base_strength, matched, sampled,
 # ck.PART_REGIONS 접근 계약은 kp_judge 재수출로 유지한다.
 
 
+# ---------------------------------------------------------------------------
+# 사지 중첩-병합 탐지 + 국소 복원 (2026-10-14, 사용자 지시 2번)
+#
+# 문제: 생성 결과에서 좌우 사지(다리·팔)가 하나의 덩어리로 합쳐져 "살이
+# 파고든 것"처럼 보인다(무릎 과도 겹침 등). 기존 keeper 는 이걸 파손으로
+# 못 잡고 verdict=intact 로 지나쳤다. 원본은 분리돼 있는데 결과가 붕괴하면
+# 병합으로 본다 — 원본 대비(reference-vs-result) 좌표 비교가 핵심.
+# ---------------------------------------------------------------------------
+
+_MERGE_RATIO_FLOOR = 0.5    # 결과 분리비가 원본의 50% 이하 → 병합 의심
+_LIMB_MERGE_MIN_SEP = 0.05  # 원본 분리 거리 하한(정규화) — 그 미만이면
+                            # 애초에 붙어 있던 자세로 봐 오탐을 막는다.
+_LIMB_MERGE_STRENGTH = 0.35  # 병합 부위 추가 당김 강도. 전역 eff(구도 차이로
+                             # 깎일 수 있음)와 무관 — 병합만 국소적으로 원본
+                             # 구조로 끌어와 분리한다.
+
+
+def _limb_merge_signal(pm):
+    """_part_detail_map 결과 -> {"leg": 0~1, "arm": 0~1} 병합 심각도.
+
+    pm["original"]["pts"]: 원본 landmark (x, y, vis) — 신뢰 기준.
+    pm["sampled"]["xy"]:  결과물 landmark 좌표 — 병합의 대상.
+    좌우 동급 관절 쌍(무릎+발목, 팔꿈치+손목)의 분리 거리를 원본·결과에서
+    각각 잰 뒤 비(ratio = 결과/원본)를 본다. 비가 작을수록 붕괴(병합).
+    가시성 부족 또는 원본 분리가 미미하면 해당 사지는 0(판단 보류).
+    순수 함수(검출 없음) — numpy 만 쓴다.
+    """
+    out = {"leg": 0.0, "arm": 0.0}
+    try:
+        import numpy as _np
+        o = (pm or {}).get("original")
+        s = (pm or {}).get("sampled")
+        if not o or not s:
+            return out
+        opts = o.get("pts")
+        sxy = s.get("xy")
+        if not opts or not sxy:
+            return out
+
+        # i번째 랜드마크 → (x, y, v) 또는 None — v 가 없으면 1.0
+        def _pt(lst, i):
+            if i >= len(lst):
+                return None
+            p = lst[i]
+            if p is None:
+                return None
+            try:
+                return (float(p[0]), float(p[1]),
+                        float(p[2]) if len(p) > 2 else 1.0)
+            except (TypeError, ValueError, IndexError):
+                return None
+
+        # 두 점 거리 — 하나라도 None 이면 None
+        def _sep(a, b):
+            if a is None or b is None:
+                return None
+            return _np.hypot(a[0] - b[0], a[1] - b[1])
+
+        for limb, (li, ri, lj, rj) in (
+            ("leg", (25, 26, 27, 28)),
+            ("arm", (13, 14, 15, 16)),
+        ):
+            oa, ob = _pt(opts, li), _pt(opts, ri)
+            sa, sb = _pt(sxy, li), _pt(sxy, ri)
+            if None in (oa, ob, sa, sb):
+                continue
+            # 원본·결과 모두 해당 관절이 보여야 판단 가능(결과는 검출됐으므로
+            # vis 를 1.0 으로 본다 — xy 에는 vis 가 없다).
+            if min(oa[2], ob[2]) < _JUDGE_VIS_MIN:
+                continue
+            # 근위(li/ri)·원위(lj/rj) 두 수준 모두 비(ratio=결과/원본)를 잰 뒤
+            # **최솟값**을 본다 — 어느 한 관절이라도 붕괴하면 병합으로 본다
+            # (무릎만 붕괴해도 다리가 합쳐진 것). 원본 분리가 미미한 수준은
+            # 애초에 붙어 있던 자세로 봐 오탐을 막는다.
+            oa2, ob2 = _pt(opts, lj), _pt(opts, rj)
+            sa2, sb2 = _pt(sxy, lj), _pt(sxy, rj)
+            _pairs = [(oa, ob, sa, sb)]
+            if None not in (oa2, ob2, sa2, sb2):
+                _pairs.append((oa2, ob2, sa2, sb2))
+            _ratios = []
+            for (_ooa, _oob, _ssa, _ssb) in _pairs:
+                _so = _sep(_ooa, _oob)
+                _ss = _sep(_ssa, _ssb)
+                if _so is None or _ss is None or _so < _LIMB_MERGE_MIN_SEP:
+                    continue
+                _ratios.append(_ss / _so)
+            if not _ratios:
+                continue  # 원본부터 붙어 있음 → 오탐 방지
+            ratio = min(_ratios)
+            if ratio >= _MERGE_RATIO_FLOOR:
+                continue  # 충분히 분리돼 있음
+            sev = float(_np.clip((_MERGE_RATIO_FLOOR - ratio)
+                                 / _MERGE_RATIO_FLOOR, 0.0, 1.0))
+            out[limb] = max(out[limb], sev)
+    except Exception:
+        pass
+    return out
+
+
+def _mask_to_latent(np_mask, sampled):
+    """(H, W) 0~1 numpy 마스크 -> sampled 해상도 (1, 1, lh, lw) 텐서.
+
+    당김 블렌드는 latent 공간에서 일어나므로, 픽셀 해상도 보호 마스크를
+    같은 해상도로 맞춰 곱한다. 실패 시 None(보호 없이 진행).
+    """
+    try:
+        import torch as _t
+        import torch.nn.functional as _f
+        import numpy as _np
+        m = _np.asarray(np_mask, _np.float32)
+        if m.ndim == 3:
+            m = m[:, :, 0]
+        m = _t.from_numpy(m[None, None]).to(
+            device=sampled.device, dtype=sampled.dtype)
+        _, _, lh, lw = sampled.shape
+        m = _f.interpolate(m, size=(lh, lw), mode="bilinear",
+                           align_corners=False)
+        m = _f.avg_pool2d(m, kernel_size=3, stride=1, padding=1)
+        return m.clamp(0.0, 1.0)
+    except Exception:
+        return None
+
+
+
+
 # 복원 우선 부위 — 뉘게되기 쉽고(디테일 손실), 원본 픽셀이 신뢰할 만한 부위
 DETAIL_CRITICAL = ("hand_left", "hand_right", "leg_left", "leg_right",
                    "face")
@@ -1907,6 +2050,7 @@ def _probe_detail_direction(vae, sampled, orig_ref, out):
     if _os.environ.get("GORI_PROBE_PHYSICS", "0") != "1":
         return
     try:
+        # latent 디코드 → 에지맵 밀도 평균. RGB numpy 를 내는 _decode_latent_rgb 경로만 쓴다
         def _dens(lat):
             # 왜(Why) `_decode_latent_rgb` 인가 (2026-10-01): `_decode_capped`
             # 는 **torch 텐서 (1,C,H,W)** 를 돌려준다. `_edge_map_from_rgb` 는
@@ -2290,6 +2434,7 @@ def _render_skeleton_image(xy, h, w, device):
         dr = ImageDraw.Draw(img)
         lw = max(2, int(h) // 256)
 
+        # 정규화 좌표 i번째 → 픽셀 좌표 (폭/높이 곱) 또는 None
         def _px(i):
             if i >= len(xy):
                 return None
@@ -3085,6 +3230,7 @@ def _log_sheet_analysis(info: dict, ref_name: str) -> None:
                    % (type(_le).__name__, str(_le)[:80]))
 
 
+# Windows(cp949 등) 콘솔 인코딩 오류에도 죽지 않는 로그
 def _log(msg: str) -> None:
     try:
         print(msg, flush=True)
@@ -3131,6 +3277,7 @@ class GoRiConsistencyKeeper:
                    "신원·구도 틀어짐을 줄이는 2차 패스 노드. "
                    "Decode 전에 연결한다.")
 
+    # 키퍼 노드 입력 정의 — 강도 3종 + 참조 이미지 + trust/repair 플래그
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -3231,6 +3378,7 @@ class GoRiConsistencyKeeper:
             },
         }
 
+    # 키퍼 실행 본체 — 강도 3종으로 샘플 latent 를 보정해 LATENT 로 반환
     def run(self, sampled_latent, strength_sampler=1.0,
             strength_camera=0.2, strength_original=0.2,
             original_latent=None, camera_latent=None, vae=None,
@@ -3377,6 +3525,29 @@ class GoRiConsistencyKeeper:
         _bg_mask = None
         if _mask is not None:
             _bg_mask = (1.0 - _mask).clamp(0.0, 1.0)
+        # 얇은 비신체 구조 보호 마스크 (2026-10-14, 사용자 지시 3번). 가구
+        # 다리·전선 같은 얇은 구조가 당김 블렌드로 번지는 것을 막는다. 결과물
+        # RGB 에서 추출해 latent 해상도로 맞춘다.
+        # 게이트: `_mask is not None` 인 사람 검출 경로에서만 계산한다 — 그때는
+        # 인체 마스크가 이미 `sampled` 를 디코딩해 `_dcache` 에 넣었으므로 이
+        # 디코드는 캐시 적중(비용 0)이다. 사람 없는 경로에서 억지로 디코딩하면
+        # R56 디코드 예산(무인물 경로 1회)을 깨므로 명시적으로 건너뛴다. 사용자
+        # 불만(가구 다리·전선 번짐)은 사람이 있는 장면에서 튀어나왔으므로, 보호가
+        # 필요한 경로(사람+배경)는 `_mask` 가 있을 때다. 실패 시 보호 없이 진행
+        # (보수적: 기존 동작과 동일).
+        _thin_mask = None
+        if vae is not None and not _multi and _mask is not None:
+            try:
+                _ts_arr = _decode_latent_rgb(vae, sampled, cache=_dcache)
+                if _ts_arr is not None:
+                    import numpy as _np_t
+                    _ts_u8 = (_np_t.clip(_ts_arr, 0.0, 1.0)
+                              * 255.0).astype(_np_t.uint8)
+                    _tm = _thin_structure_mask(_ts_u8)
+                    if _tm is not None:
+                        _thin_mask = _mask_to_latent(_tm, sampled)
+            except Exception:
+                _thin_mask = None
         # 왜(Why) 이 로그가 필요한가 (2026-09-30 실측): 마스크가 없으면 당김이
         # **전역**으로 퍼져 배경까지 끌려간다. 그런데 마스크 유무가 로그로 안
         # 알려지면 "영향 없음"과 "전역 당김"을 구별할 수 없다 — 실제로 vae 를
@@ -3531,6 +3702,15 @@ class GoRiConsistencyKeeper:
         if _intent.get("scene_change"):
             _log("[GoRi Consistency Keeper] 프롬프트가 장면·배경 변경을 지시 "
                  "— 배경 당김을 하지 않습니다 (변경된 배경은 의도입니다)")
+        # 포즈 의도 판정 (2026-10-13, 1단계). 루프 앞에서 한 번만 읽는다 —
+        # 규칙 매칭이라 비용 0. 참조 분류(비싼 mediapipe)는 루프 안에서
+        # 지시가 있을 때만, 소스별로 한 번씩 한다.
+        _pose_desc = _pose_intent(camera_prompt)
+        if _pose_desc.get("specified"):
+            _log("[GoRi Consistency Keeper] 프롬프트가 포즈를 지시 (%s) — "
+                 "참조와 다르면 몸통·사지 당김을 생략합니다 "
+                 "(얼굴·손 미세·개수는 유지)" % (_pose_desc.get("pose")
+                                                 or "판정 불가"))
         for _entry in _global_refs:
             # 4번째 원소 = 정합에 쓸 참조 원본 이미지 (2026-10-13). 3-튜플로
             # 들어온 항목도 받는다 — 생산자가 하나뿐이라도 방어한다.
@@ -3555,6 +3735,17 @@ class GoRiConsistencyKeeper:
                     _log(f"[GoRi Consistency Keeper] {name} 배치·채널 "
                          "불일치 — 건너뜀")
                 continue
+            # 포즈 어긋남 판정 (2026-10-13, 소스별). 지시가 있을 때만 참조
+            # 포즈를 분류한다 (비싼 mediapipe 1회). 둘 다 판정되고 다르면
+            # 몸통·사지를 참조 위치로 당기지 않는다 (아래 얼굴 마스크 분기).
+            # 손은 자기기준 보정·개수는 그대로 둔다.
+            _pose_div = False
+            _ref_pose = None
+            if _pose_desc.get("specified") and _pose_desc.get("pose"):
+                _ref_pose = _src_pose_class(_src_img)
+                if (_ref_pose is not None
+                        and _ref_pose != _pose_desc["pose"]):
+                    _pose_div = True
             drift = _drift_mse(sampled, matched)
             # 정규화 값도 함께 재고 **둘 다** 로그한다.
             # 왜(Why) _mse 를 넘기나 (2026-10-07 감사): 같은 쌍의
@@ -3584,6 +3775,7 @@ class GoRiConsistencyKeeper:
             # 바꾼다: 신원(얼굴)은 여전히 참조가 옳은 기준이고, 몸은 이제
             # 참조가 틀린 기준이기 때문이다. 게이트가 닫히면 기존대로 간다.
             _blend_mask = _mask
+            _face_n = None
             if _face_mask is not None:
                 _face_n = _drift_norm_masked(sampled, matched, _face_mask)
                 if _face_gate_open(_face_n, _masked_n,
@@ -3627,6 +3819,28 @@ class GoRiConsistencyKeeper:
                                     drift_n = _n_reg
                         except Exception:
                             pass
+            # 포즈 의도 게이트 (2026-10-14 수정). 2026-10-13 버전은
+            # elif _pose_div: 를 if _src_img is not None: 아래에 뒀는데
+            # _pose_div 자체가 _src_pose_class(_src_img) 가 None 이 아닐
+            # 때만 성립하므로(_src_img is not None 전제) 그 분기는 영원히
+            # 실행되지 않았다 - 데드코드였다. 얼굴 게이트가 닫힌 경우
+            # (face_n 이 무릎을 넘어 얼굴만 당기지 못할 때) 독립적으로
+            # 사람 당김을 얼굴로 좁힌다. 얼굴 게이트가 이미 열려 얼굴만
+            # 당기고 있으면(참조 얼굴 정합 drift_n 포함) 재적용하지 않는다.
+            if _pose_div and _blend_mask is _mask:
+                if _face_mask is not None:
+                    _blend_mask = _face_mask
+                    drift_n = _face_n
+                else:
+                    # 얼굴 마스크가 없으면 사람 당김 자체를 생략한다 -
+                    # 얼굴도 없는 상태에서 몸통·사지만 참조 위치로 끌면
+                    # 지시한 포즈가 뭉개진다.
+                    _blend_mask = None
+                _log(f"[GoRi Consistency Keeper] {name} 포즈 어긋남 "
+                     f"(지시 {_pose_desc.get('pose')} vs 참조 "
+                     f"{_ref_pose}) — 얼굴 영역만 당깁니다 "
+                     f"(몸통·사지를 참조 위치로 끌면 지시한 포즈가 "
+                     f"뭉개집니다)")
             eff = strength
             if drift is not None:
                 _ns = "n/a" if drift_n is None else f"{drift_n:.4f}"
@@ -3712,11 +3926,28 @@ class GoRiConsistencyKeeper:
             #    로 줄었다(커버리지 19%). → region 은 **추가분**으로 돌려주고
             #    전역 블렌드에 더한다. eff==0 이면 계산 자체를 건너뛴다
             #    (0*(inf-nan) 은 nan → 감쇠가 출력을 망가뜨림).
+            # 얇은 비신체 구조 보호 (2026-10-14, 3번). 참조가 결과물과
+            # 어긋나면(drift_n 이 무릎을 넘거나 포즈가 어긋나면) 당김
+            # 블렌드가 얇은 구조(가구 다리·전선)를 번지게 하므로, 그때만
+            # 보호 마스크로 당김을 줄인다. 정렬된 참조에서는 당김이 오히려
+            # 번짐을 고치므로 보호하지 않는다(결과물 own HF 는 선명도 복원이
+            # 살린다). 이 배수는 eff 와 무관하게 정의한다 — 아래 배경 블렌드
+            # (name!="original" 도 포함)가 같은 _protect 를 쓰고, original 당김이
+            # 자동 감쇠로 eff=0 이 돼도 배경 블렌드는 따로 돈다. eff==0 경로에서
+            # _protect 가 정의 안 돼 터지는 UnboundLocalError 를 막는다
+            # (2026-10-14 실기: original 정규화 1.5178 로 당김 0.20→0.00).
+            _protect = 1.0
+            if _thin_mask is not None:
+                _misaligned = ((drift_n is not None
+                                and drift_n > _DRIFT_NORM_KNEE)
+                               or _pose_div)
+                if _misaligned:
+                    _protect = (1.0 - _thin_mask)
             if eff:
                 if _blend_mask is not None:
-                    out = out + eff * _blend_mask * (matched - sampled)
+                    out = out + eff * _blend_mask * _protect * (matched - sampled)
                 else:
-                    out = out + eff * (matched - sampled)
+                    out = out + eff * _protect * (matched - sampled)
             # 배경·사물 당김 (2026-10-12 설계 확장 — 사용자 지시). 사람이 있는
             # 장면에서 사람 밖 영역(차량·배경·소품)도 원본 DNA 로 당긴다.
             # 사람이 없으면(마스크 None) 위 전역 블렌드가 이미 배경까지
@@ -3744,6 +3975,18 @@ class GoRiConsistencyKeeper:
                 except Exception:
                     _bg_tile = None
                 _bg_tile_s = ("%.4f" % _bg_tile) if _bg_tile is not None else "n/a"
+                # 무릎 안 타일 비율 관측 (2026-10-16, 동작 변경 없음): 타일별
+                # 게이트의 재료다. **닫힌 분기에서도 남긴다** — R130 은 타일최대를
+                # 열린 분기에만 남겨, 정작 문제인 닫힌 실행의 자료가 비어 있었다.
+                # 임계는 아직 박지 않는다: bg_gate_calib.py 실측에서 정상 동일
+                # 장면의 타일최대(0.70~1.02)가 합성 고스트(0.45)를 넘어 타일
+                # 신호가 정상/이상을 가르지 못했다. 분포가 모이면 그때 판단한다.
+                try:
+                    _bg_frac = _drift_tile_below_frac(
+                        sampled, matched, _bg_mask, _DRIFT_NORM_KNEE)
+                except Exception:
+                    _bg_frac = None
+                _bg_frac_s = ("%.2f" % _bg_frac) if _bg_frac is not None else "n/a"
                 if _bg_gate_open(_bg_n, _intent.get("scene_change", False)):
                     _bg_eff = strength
                     if (mismatch is not None
@@ -3755,16 +3998,18 @@ class GoRiConsistencyKeeper:
                         _log(f"[GoRi Consistency Keeper] ⚠ {name} 배경 당김이 "
                              f"물리 상한을 넘었습니다 {_old_bg:.2f}→{_bg_eff:.2f}")
                     if _bg_eff:
-                        out = out + _bg_eff * _bg_mask * (matched - sampled)
+                        out = out + _bg_eff * _bg_mask * _protect * (matched - sampled)
                         _log(f"[GoRi Consistency Keeper] {name} 배경·사물 당김 "
                              f"(정규화 {_bg_n:.4f} <= "
                              f"{_DRIFT_NORM_KNEE:.2f}, 타일최대 {_bg_tile_s}, "
+                             f"무릎내 타일 {_bg_frac_s}, "
                              f"세기 {_bg_eff:.2f}) — "
                              f"사람 밖 영역을 원본 DNA 로 당깁니다")
                 elif _bg_n is not None:
                     _log(f"[GoRi Consistency Keeper] {name} 배경이 참조와 크게 "
                          f"다름 (정규화 {_bg_n:.4f} > "
-                         f"{_DRIFT_NORM_KNEE:.2f}) — 배경 당김 생략. "
+                         f"{_DRIFT_NORM_KNEE:.2f}, 타일최대 {_bg_tile_s}, "
+                         f"무릎내 타일 {_bg_frac_s}) — 배경 당김 생략. "
                          f"의도된 장면 변경일 수 있습니다 "
                          f"(2026-10-12 실측: 다른 장면 참조 배경 1.49)")
             # 부위별 상향은 전역 결과에 **더하는 추가분**이다.
@@ -3848,6 +4093,43 @@ class GoRiConsistencyKeeper:
                         _log("[GoRi Consistency Keeper] 판정 게이트 "
                              f"(verdict={_verdict_name}{_hand_txt}) — 차단 부위 "
                              f"{_blocked if _blocked else '없음'}")
+                if _pose_div:
+                    # 포즈가 어긋나면 몸통·사지 부위 상향을 건너뛴다 — 뭉갠
+                    # 앉은 팔을 기대앉은 참조 팔로 당기면 지시한 포즈가
+                    # 뭉개진다. 얼굴만 남긴다 (얼굴 판정이 막았으면 그것도
+                    # 그대로 따른다). 손 미세·개수·골격 판정은 별도 경로라
+                    # 그대로 둔다.
+                    _face_allow = 1.0
+                    if isinstance(_allow, dict):
+                        try:
+                            _face_allow = float(_allow.get("face", 1.0))
+                        except Exception:
+                            _face_allow = 1.0
+                    _allow = {"hand_left": 0.0, "hand_right": 0.0,
+                              "leg_left": 0.0, "leg_right": 0.0,
+                              "face": _face_allow}
+                    _log("[GoRi Consistency Keeper] 포즈 어긋남 — 부위별 "
+                         "복원을 얼굴만으로 제한합니다 (몸통·사지 상향 생략)")
+                # 사지 중첩-병합 보정 (2026-10-14, 사용자 지시 2번). 원본은
+                # 분리됐는데 결과가 붕괴(겹침 과다)하면 병합으로 보고, 병합
+                # 부위를 당김에서 풀어 원본 구조로 분리 복원한다. 포즈 어긋남
+                # (_pose_div)이 몸통·사지를 막아도 병합 복원은 예외로 푼다 —
+                # 병합은 자세가 아니라 결과물 붕괴이므로 원본 당김이 정답이다.
+                _merge = _limb_merge_signal(_pm)
+                _leg_merge = _merge.get("leg", 0.0) > 0.5
+                _arm_merge = _merge.get("arm", 0.0) > 0.5
+                if _leg_merge or _arm_merge:
+                    if _allow is None:
+                        _allow = {}
+                    for _lm, _rg in (("leg", ("leg_left", "leg_right")),
+                                     ("arm", ("arm_left", "arm_right"))):
+                        if _merge.get(_lm, 0.0) > 0.5:
+                            for _r in _rg:
+                                _allow[_r] = 1.0
+                    _log("[GoRi Consistency Keeper] 사지 중첩-병합 탐지 "
+                         f"— 다리={_merge['leg']:.2f} 팔={_merge['arm']:.2f} "
+                         f"(원본 분리 / 결과 붕괴) → 병합 부위를 원본으로 "
+                         f"국소 당김합니다")
                 _darr, _regions = detail_boost(_pm, _pm, eff, allow=_allow)
                 if _darr is not None:
                     try:
@@ -3864,6 +4146,37 @@ class GoRiConsistencyKeeper:
                         # 한참 알 수 없었다.
                         _log(f"[GoRi Consistency Keeper] ⚠ 부위별 복원 실패 "
                              f"({type(e).__name__}: {e}) — 전역 당김만 적용")
+                # 병합 부위 국소 추가 당김 (전역 eff 와 무관). 구도 차이로 eff 가
+                # 깎여도 병합은 결과물 좌표 기준으로 원본(matched) 구조를 직접
+                # 당겨 분리한다 — detail_boost 가 eff*boost 로는 못 끌어올 정도로
+                # 깊게 붕괴한 병합을 보완한다. base_strength=0 으로 전달해
+                # eff 감쇠를 우회하고, 병합 부위만 _LIMB_MERGE_STRENGTH 로 당긴다.
+                if (_leg_merge or _arm_merge) and matched is not None \
+                        and _mask is not None:
+                    try:
+                        import numpy as _np_m
+                        _mvec = _np_m.zeros(33, dtype=_np_m.float32)
+                        for _lm, _idxs in (
+                            ("leg", PART_REGIONS["leg_left"]
+                             + PART_REGIONS["leg_right"]),
+                            ("arm", PART_REGIONS["arm_left"]
+                             + PART_REGIONS["arm_right"]),
+                        ):
+                            if _merge.get(_lm, 0.0) > 0.5:
+                                for _i in _idxs:
+                                    if 0 <= _i < 33:
+                                        _mvec[_i] = _LIMB_MERGE_STRENGTH
+                        if float(_mvec.max()) > 0.0:
+                            _madd = _apply_region_strength(
+                                0.0, matched, sampled, _mvec, _pm, _mask)
+                            if _madd is not None:
+                                out = out + _madd
+                                _log(f"[GoRi Consistency Keeper] 병합 부위 국소 "
+                                     f"당김 (강도 {_LIMB_MERGE_STRENGTH}) — "
+                                     f"붕괴한 사지를 원본 구조로 분리 복원")
+                    except Exception as _me:
+                        _log(f"[GoRi Consistency Keeper] ⚠ 병합 부위 당김 실패 "
+                             f"({type(_me).__name__}: {_me}) — 부위별 복원만 적용")
         _probe_detail_direction(vae, sampled, _orig_ref, out)
         # 슬롯 9/10 외형 참조 당김. 기존 보정이 끝난 뒤 박스 안만 당긴다.
         # 왜(Why) 마스터 게인 앞인가: 다른 당김과 같은 배율을 타야 한다.
@@ -4021,7 +4334,6 @@ class GoRiConsistencyKeeper:
                                                 % (_slot_ap3, _rgn_ap))
                                     if _box_ap is None:
                                         continue
-                                    import torch as _t_ap
                                     _am = _appearance_soft_mask(
                                         _box_ap, _pw, _ph, _lw, _lh,
                                         device=out.device, dtype=out.dtype)
@@ -4173,8 +4485,7 @@ class GoRiConsistencyKeeper:
                         _h_hands = _hand_landmarks_robust(_h_u8, _h_pose)
                         if _h_hands:
                             _h_sc = _hand_physical_score(
-                                _h_hands, image=_h_u8,
-                                w=_h_u8.shape[1], h=_h_u8.shape[0])
+                                _h_hands, image=_h_u8)
                             _hand_score = _h_sc["score"]
                             if _h_sc["passed"]:
                                 _log(f"[GoRi Consistency Keeper] 손 물리 정합성 "
@@ -4239,7 +4550,11 @@ class GoRiConsistencyKeeper:
             # 깼다. 사람 마스크가 있을 때만 본다.
             try:
                 import numpy as _np_b
-                _ph_rgb = _decode_latent_rgb(vae, sampled, cache=_dcache)
+                # 검출·판정 대상은 수리 대상과 같은 out 이다 — sampled 는
+                # 골격 당김(4136줄) 전 상태라 다른 이미지다. 손 블록이
+                # 2026-10-13 에 같은 이유로 sampled -> out 으로 고쳤다
+                # (2026-10-16 오딧: 물리 블록만 남아 있었다).
+                _ph_rgb = _decode_latent_rgb(vae, out, cache=_dcache)
                 if _ph_rgb is not None:
                     _ph_u8 = (_np_b.clip(_ph_rgb, 0, 1) * 255).astype(
                         _np_b.uint8)
@@ -4268,8 +4583,18 @@ class GoRiConsistencyKeeper:
                                      f"미도달 (최종={_ph_last}/100) — "
                                      f"오류 기록 후 생성을 계속합니다")
                         else:
+                            # 종료 사유를 남긴다 — 손 블록(4526줄)과 같은 규율.
+                            # 예전엔 이유 없이 "건너뜀" 만 찍혀 디코드 실패인지
+                            # 개선 실패인지 구분할 수 없었다 (2026-10-16 오딧).
+                            _ph_why = ""
+                            try:
+                                _ph_why = (_physic_pull_last_error()
+                                           or "no_improvement")
+                            except Exception:
+                                _ph_why = "no_improvement"
                             _log("[GoRi Consistency Keeper] 물리 접촉 미세 "
-                                 "당김 건너뜀 (당김 불가 또는 이미 최선)")
+                                 "당김 건너뜀 (당김 불가 또는 이미 최선 — "
+                                 "사유=%s)" % _ph_why)
                 else:
                     _log("[GoRi Consistency Keeper] ⚠ 물리 접촉 검증 건너뜀 "
                          "(latent 디코드 실패)")

@@ -43,7 +43,16 @@ _FINGER_CHAINS = [
 _TARGET_REL = (0.95, 0.30, 0.0, 0.30, 0.95)
 _CORRECT_FRAC = 0.6  # 보정 비율 (2026-10-13 실측: 0.15 는 합격선 미달)
 
+# best-keep 정제 상수 (2026-10-14 실측: 8회 전부 동점 66.7 + sep 0.013
+# 정체인데도 나중 상태를 채택해 손이 번진 채 보관됐다 — 기하는 그대로고
+# 누적 워핑 + VAE 왕복의 뭉갬만 쌓인 경우다).
+_SEP_EPS = 1e-9  # sep 진전 판정 엡실론 (정규화 좌표 부동소수 잡음 차단)
+_STUCK_MAX = 2  # 연속 무진전 허용 횟수 (초과하면 중단하고 가장 이른 동점 유지)
+_SHARP_TOL = 0.20  # 동점 채택 시 허용 선명도 하락폭 (단일 0.20 블렌드의
+  # 얼굴 라플라시안 -24% 실측(선명도 복원 주석) 기준 — 한 번 분량까지만 허용)
 
+
+# 각도를 -pi~pi 범위로 접는다 (2pi 배수 제거)
 def _norm_angle(a):
     while a > math.pi:
         a -= 2.0 * math.pi
@@ -158,6 +167,60 @@ def _warp_hands_tps(u8, src_pts, dst_pts, mask):
     return _np.clip(warped, 0, 255).astype(_np.uint8)
 
 
+def _hands_sep_min(sc):
+    """점수 dict → 손 전체의 끝점 최소 분리 (연속 진전 지표).
+
+    per_hand[].sep_min 중 수치인 것의 최솟값. 없으면 None.
+    점수(33.3 단위)는 뭉갬 안에서 움직이지 않지만 sep 은 연속이라
+    동점 안의 기하 진전을 잴 수 있다."""
+    try:
+        _seps = [h.get("sep_min") for h in (sc.get("per_hand") or [])]
+        _seps = [float(s) for s in _seps if s is not None]
+        return min(_seps) if _seps else None
+    except Exception:
+        return None
+
+
+def _hand_sharpness_u8(u8, hands):
+    """손 영역 라플라시안 분산 (선명도 지표).
+
+    워핑 + VAE 왕복이 깎는 고주파를 잰다. 전 손 bbox 합집합에서 계산 —
+    반복 간 상대 비교용이라 절대값 규격은 없다. 못 재면 None.
+    """
+    import numpy as _np
+    try:
+        arr = _np.asarray(u8)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            return None
+        H, W = int(arr.shape[0]), int(arr.shape[1])
+        _xs, _ys = [], []
+        for hand in (hands or []):
+            for q in (hand or []):
+                if q is None:
+                    continue
+                _xs.append(float(q[0]) * W)
+                _ys.append(float(q[1]) * H)
+        if not _xs:
+            return None
+        x0 = max(0, int(min(_xs)) - 4)
+        x1 = min(W, int(max(_xs)) + 4)
+        y0 = max(0, int(min(_ys)) - 4)
+        y1 = min(H, int(max(_ys)) + 4)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        crop = arr[y0:y1, x0:x1].astype(_np.float64)
+        g = (0.299 * crop[:, :, 0] + 0.587 * crop[:, :, 1]
+             + 0.114 * crop[:, :, 2])
+        lap = (_np.roll(g, 1, 0) + _np.roll(g, -1, 0)
+               + _np.roll(g, 1, 1) + _np.roll(g, -1, 1) - 4.0 * g)
+        lap = lap[2:-2, 2:-2]
+        if lap.size == 0:
+            return None
+        return float(lap.var())
+    except Exception:
+        return None
+
+
 def hand_pull_pass(vae, sampled, hands, strength=0.15, cache=None,
                    max_iter=3):
     """손 물리 위반을 줄이는 방향으로 sampled 를 미세 당긴다.
@@ -169,6 +232,12 @@ def hand_pull_pass(vae, sampled, hands, strength=0.15, cache=None,
       생성"). 점수는 3단계(33.3 단위)라 동점 안에도 기하 진행(sep 증가)이
       들어있다 — 픽셀 루프 실측에서 동점 구간에도 sep 이 0.009→0.017 로
       늘었다. 먼저가 아니라 나중을 쓰는 이유다.
+      2026-10-14 정제: 동점 채택은 sep 진전 + 선명도 유지가 있을 때만 한다.
+      sep 도 정체된 동점을 끝까지 채택하면 기하는 그대로고 누적 워핑 +
+      VAE 왕복의 뭉갬만 쌓인다 (13:42 실측: 8회 전부 66.7 + sep 0.013
+      정체 → 손이 번진 채 채택). 연속 2회 무진전이면 중단하고 가장 이른
+      동점 상태(=가장 덜 뭉개진 것)를 쓴다 — 전부 그 상태면 입력 그대로 +
+      iter 0 + 사유 stuck_no_progress.
       어떤 워프도 입력과 동점 이상이 못 되면(전부 악화) 입력 그대로 +
       iter_done==0 을 돌려준다 — 악화 상태는 절대 채택하지 않는다.
     best_score: 반환 이미지의 손 물리 점수 (워프 전 점수를 반환 이미지의
@@ -190,13 +259,10 @@ def hand_pull_pass(vae, sampled, hands, strength=0.15, cache=None,
     except ImportError:
         from kp_math import _match_spatial as _match_spatial
     try:
-        rgb = None
-        if cache is not None and ("hand_rgb", id(sampled)) in cache:
-            rgb = cache[("hand_rgb", id(sampled))]
-        if rgb is None:
-            rgb = _decode_latent_rgb_safe(vae, sampled)
-            if cache is not None:
-                cache[("hand_rgb", id(sampled))] = rgb
+        # 캐시 키를 id() 로 만들지 않는다 (2026-10-16 오딧): CPython 은 GC 뒤
+        # 주소를 재사용하므로(실측 50회 중 35회) 이전 실행 픽셀이 조용히
+        # 반환될 수 있다 — kp_vae 가 이미 내용 해시 키로 캐시한다.
+        rgb = _decode_latent_rgb_safe(vae, sampled, cache=cache)
         if rgb is None:
             _LAST_ERROR = "decode_failed"
             return sampled, None, 0
@@ -205,6 +271,9 @@ def hand_pull_pass(vae, sampled, hands, strength=0.15, cache=None,
         out = sampled
         best_out = None
         best_score = None
+        best_sep = None
+        best_sharp = None
+        stuck = 0
         iter_done = 0
         for it in range(max_iter):
             # 현재 상태 점수. out 과 u8 은 항상 같은 상태다 — 점수가 반환
@@ -212,14 +281,43 @@ def hand_pull_pass(vae, sampled, hands, strength=0.15, cache=None,
             # 예전엔 워프 **전** 점수를 last_score 로 돌려 마지막 워프 결과의
             # 점수로 보고했고, best-keep 이 없어 악화 결과가 그대로 채택됐다
             # (실측: 66.7 -> 33.3 로 10회 워프가 악화만 함).
-            sc = _score(hands, image=u8, w=W, h=H)
-            # 동점은 나중이 이긴다 (>=): 최고 점수 상태 중 가장 당김이 많이
-            # 적용된 것을 채택한다 (2026-10-13 사용자 지시 — 미달이어도 최고점
-            # 채택, 건너뜀 금지). 전부 악화면 best_out 이 입력 그대로라 아래
-            # 분기에서 입력 반환 + iter 0 이 된다.
-            if best_score is None or sc["score"] >= best_score:
+            sc = _score(hands, image=u8)
+            _sep = _hands_sep_min(sc)
+            _sharp = _hand_sharpness_u8(u8, hands)
+            if best_score is None:
                 best_score = sc["score"]
                 best_out = out
+                best_sep = _sep
+                best_sharp = _sharp
+            elif sc["score"] > best_score:
+                best_score = sc["score"]
+                best_out = out
+                best_sep = _sep
+                best_sharp = _sharp
+                stuck = 0
+            elif (sc["score"] == best_score and _sep is not None
+                    and best_sep is not None
+                    and _sep > best_sep + _SEP_EPS
+                    and (_sharp is None or best_sharp is None
+                         or _sharp >= best_sharp * (1.0 - _SHARP_TOL))):
+                # 동점은 나중이 이긴다 — 단 sep 진전 + 선명도 유지가 있을
+                # 때만 (2026-10-14 정제). sep 도 정체된 동점을 끝까지
+                # 채택하면 기하는 그대로고 누적 워핑의 뭉갬만 쌓인다
+                # (13:42 실측). 측정이 안 되는 쪽(sep/sharp None)은
+                # 막지 않는다 — 잴 수 없다는 이유로 기하 진전을 버리면
+                # 2026-10-13 지시(최고점 채택)를 어긴다.
+                best_out = out
+                best_sep = _sep
+                best_sharp = _sharp
+                stuck = 0
+            else:
+                # 점수도 sep 도 안 움직임 — 워프는 뭉갬만 더한다. 연속
+                # 무진전이 _STUCK_MAX 에 닿으면 중단하고 가장 이른 동점
+                # 상태를 쓴다 (이미 best_out 에 있다).
+                stuck += 1
+                if stuck >= _STUCK_MAX:
+                    _LAST_ERROR = "stuck_no_progress"
+                    break
             if sc["passed"]:
                 _LAST_ERROR = None
                 break
@@ -266,8 +364,9 @@ def hand_pull_pass(vae, sampled, hands, strength=0.15, cache=None,
             H, W = u8.shape[:2]
             hands = _reestimate_hands(u8, hands)  # 검출 재시도 (위치 이동 반영)
             iter_done = it + 1
-        # best_out 이 입력 자신이면 어떤 워프도 동점 이상이 못 됐다는 뜻
-        # (전부 악화 — 악화 중단이 먼저 끊었거나 max_iter 를 다 썼다).
+        # best_out 이 입력 자신이면 채택할 진전이 없었다는 뜻 (전부 악화 —
+        # 악화 중단이 먼저 끊었거나 max_iter 를 다 썼거나, 동점이지만 sep
+        # 정체로 stuck 중단됐다).
         # 그때만 입력 그대로 + iter 0 을 돌려준다. 호출자는 iter_done==0 으로
         # "채택할 게 없음" 을 알 수 있다.
         if best_out is None or best_out is sampled:

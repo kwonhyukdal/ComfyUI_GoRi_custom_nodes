@@ -2,242 +2,192 @@
 
 > 🌐 [한국어 버전](README.md)
 >
-> ☕ If this helped, buy me a coffee: [Donate via PayPal](https://paypal.me/GoRi57788)
+> ☕ If this helped, buy me a coffee: [Support on PayPal](https://paypal.me/GoRi57788)
 
-Pulls KSampler output latents toward original/camera reference latents to
-reduce identity/composition drift. **Does not redraw**
-(no re-encode, no resampling).
+A second-pass node that **gently pulls the sampler's result toward the original
+and camera references**, reducing identity and composition drift. **It does not
+redraw** — no re-encoding and no resampling, only a latent pull.
 
-## Wiring
-
-```text
-LoadImage → VAE Encode ── camera_latent ──→ ┐
-(GoRi) Camera Director Skills ── reference_latent_out ── camera_latent ──→ (GoRi) Consistency Keeper ── latent_out ──→ VAE Decode → SaveImage
-KSampler ── LATENT ── sampled_latent ──→ ┘
-Same VAE ── vae ──→ ┘ (body mask, optional. Global pull without it)
-Camera Director ── prompt_out ── camera_prompt ──→ ┘ (outfit change / scene change instructions, optional)
+```
+Node name    (GoRi) Consistency Keeper
+Menu         GoRi / Refine
+Output       latent_out (LATENT)
 ```
 
-`original_image` (`image_1`, optional) sets the original reference from an
-image instead of a latent. Qwen Edit's latent output is an all-zero
-empty canvas, so this is the accurate source there (takes priority).
+---
 
-## Reference image slots (`image_1`–`image_10`, optional)
+## 1. Wiring
+
+```text
+KSampler ─────────────────── sampled_latent ─→ (GoRi) Consistency Keeper ─→ VAE Decode → SaveImage
+Camera Director ── reference_latent_out ────→ camera_latent
+Same original photo ────────────────────────→ image_1
+Same VAE ───────────────────────────────────→ vae            (optional)
+Camera Director ── prompt_out ──────────────→ camera_prompt  (optional)
+```
+
+- **`sampled_latent`** is the KSampler output. Place the keeper before Decode.
+- **`camera_latent`** takes the camera node's `reference_latent_out` directly.
+- **`image_1`** takes the **same original photo** you gave the camera node. The
+  original reference is encoded from this image, which avoids using an empty
+  latent as the reference.
+- **`vae`** restricts the pull to the person area. Without it the whole frame is pulled.
+- **`camera_prompt`** takes `prompt_out`. The keeper then reads instructions such
+  as "change the outfit" or "change the background" and skips those areas.
+
+---
+
+## 2. Reference slots (`image_1` to `image_10`)
 
 Connect the **same images under the same numbers** as on the camera node.
-A new socket appears each time you link one (`image_1` linked → `image_2`
-shows up, and so on).
+Different numbers mean the keeper pulls toward a different person. A new socket
+appears each time you link one.
 
 | Slot | Role |
 |---|---|
-| `image_1` | Main subject (identity reference) |
-| `image_2`–`image_8` | Helper references — join the global DNA pull |
-| `image_9` | Appearance reference (upper-body box) |
-| `image_10` | Appearance reference (lower-body box) |
+| `image_1` | Main subject. Identity reference |
+| `image_2` to `image_8` | Helper references. Pulled together from several originals |
+| `image_9` to `image_10` | Appearance references. 9 pulls the upper body (shoulders), 10 pulls the lower body (hips) separately |
 
-Connect the Camera Director's `prompt_out` to `camera_prompt`. Instructions
-like "change the outfit" or "change the background" are then honoured
-(outfit change → face-focused pull, scene change → background pull skipped).
-Left empty, the node does the default whole-body pull.
+---
 
-## Widgets
+## 3. Widgets
 
 | Widget | Default | Description |
 |---|---|---|
-| `strength_sampler` | 1.0 | Master gain on the whole correction. 1.0 = unchanged behaviour, 0.0 = pass-through (output = input), 0.5 = half applied. Negative inverts the correction |
-| `strength_camera` | 0.2 | Direction pull (camera reference, -1.0–1.0) |
-| `strength_original` | 0.2 | Original identity pull (-1.0–1.0) |
-| `trust_gate` | False | Judgment gate. On: per-part detail restoration (the region boost) is applied only to body parts judged trustworthy in the original (pose + hand check) — damaged parts are blocked from the boost, impossible judgment keeps existing behaviour with a reason log. The base pull strength itself is unaffected by the gate. Off: existing behaviour |
-| `repair_enable` | False | Verdict-driven repair pull (opt-in). On: body parts the physics judgment flags as damaged are pulled back through skeleton correction (Off: existing behaviour) |
+| `strength_sampler` | 1.0 | Overall correction. 1.0 = as before, 0.0 = pass through (output = input), 0.5 = half |
+| `strength_camera` | 0.2 | How hard to pull toward the camera reference |
+| `strength_original` | 0.2 | How hard to pull toward the original |
+| `trust_gate` | off | When on, the pose and hand verdict decides **which regions may be restored** |
+| `repair_enable` | off | When on, regions judged damaged are pulled toward a corrected skeleton |
 
-Negatives are **anti-reference** (push resemblance away). Large drift
-auto-damps the pull ("fuse without deforming" — console notice).
-Diverging light flow (Retinex-style low-frequency check) damps further.
+- Negative values pull **away** from a reference. Use them only deliberately.
+- `trust_gate` and `repair_enable` are **opt-in**. Left off, only the basic pull runs.
+- When `image_1` (the original) is connected, `strength_camera` is **not used for
+  the pull** — the camera reference is for comparison only, because the original
+  is the reference. Only without `image_1` does the camera reference take the
+  original's place, and then this value applies.
 
-## Body-masked pull (optional)
+---
 
-Wiring `vae` pulls the human region selectively (MediaPipe pose segmentation
-mask — without it a one-time notice is logged and the global pull runs, no
-settings). Background stays put,
-whole body covered. Finger counts themselves can't be fixed (detailer territory).
+## 4. Recommended settings
 
-0 skips that reference. Missing reference latents or batch/channel mismatches
-are skipped with a console note. Different spatial sizes are matched with
-bicubic resize.
+```
+strength_sampler   1.0   (leave the default)
+strength_camera    0.2
+strength_original  0.2
+```
 
-## Tuning guide
+**0.2 is effectively the ceiling for both strengths.** Values above 0.2 behave
+the same as 0.2 and print a console note each run. Start at 0.2 and **lower it in
+0.05-0.1 steps** while watching the result.
 
-> ### ⭐ Recommended: `camera` 0.2 / `original` 0.2 (physical ceiling)
->
-> The node caps each reference pull at a **measured physical ceiling of 0.20** —
-> beyond it the result gets mushier than the original (correspondence-point
-> measurement, 2026-09-28). When auto-damping is not active, any widget value
-> above 0.20 **behaves identically to 0.20** and a "pull exceeded the physical
-> ceiling" warning is logged on every run it is capped. Note: if the drift
-> auto-damping (Widgets section) engages first and brings the effective pull to
-> 0.20 or below, it passes without the ceiling warning.
-> The formerly recommended 0.33 was effectively capped at 0.20 too. Start at
-> 0.2 / 0.2 and only adjust downward from the table — raising is capped at 0.20.
-
-| Value | When |
+| Symptom | Adjustment |
 |---|---|
-| **0.2 / 0.2** | **Starting point — the ceiling. Any value above 0.2 behaves the same.** |
-| 0.15–0.2 | Pasted-on or flat look (over-pull) |
-| 0 / unconnected | Only one reference is in use |
+| Face differs from the original | Check `strength_original`. If still short, the per-region restore handles it |
+| Composition and lighting follow the sampler | Check `strength_camera` |
+| Stiff, flat look | Lower both to about 0.15 |
+| Two people merging into one | Lower both to about 0.15 |
+| Using only one reference | Set the unused side to 0 |
 
-| Symptom | Adjust |
+Change one value at a time; raising both together overshoots. The operation is
+cheap, so VRAM and speed are barely affected.
+
+---
+
+## 5. What it handles on its own
+
+There is nothing to configure. It acts only where it is needed.
+
+### Pulling only the person
+
+With `vae` connected it selects the person and leaves the background alone. If
+it cannot find a person it falls back to a global pull and says so once in the
+console.
+
+### Restoring smeared regions
+
+It finds regions that came out softer than the original (hands, legs, face) and
+pulls only those harder. If the original has no detail there, it leaves them alone.
+
+### Tidying hands
+
+Fused or overlapping fingers are pulled a few times **in the direction that
+straightens them**. If nothing improves, the best state is kept. It cannot
+create a missing finger — only relax what is bunched.
+
+### Choosing a view from a character sheet
+
+If the original reference is a character sheet (several angles in one image), it
+picks the **single panel** that best matches the result as the identity source.
+Averaging the whole sheet blends several faces. If no view matches well, the
+pull strength is halved.
+
+---
+
+## 6. Batch input
+
+When `sampled_latent` holds two or more images, **only the global pull** runs.
+The body mask, per-region restore and character-sheet selection are single-image
+features and turn off automatically, with a console note. Strength values still
+apply.
+
+To get per-region correction on a batch, run the images one at a time.
+
+---
+
+## 7. Ghosting (double image)
+
+If faces or bodies appear doubled, the reference and the result have **different
+compositions**. Blending latents only works when the composition matches.
+
+1. Match the reference image to the result's composition and pose (most reliable).
+2. Lower the strengths to 0.1-0.15.
+3. If the console warns that the composition differs a lot, do one of the above.
+
+The background is pulled along with the subject, so a mismatched background (for
+example a chair in a different place) can leave a translucent double. The fix is
+the same: match the composition. Telling the keeper about a scene change through
+`camera_prompt` skips the background pull automatically.
+
+---
+
+## 8. Troubleshooting
+
+**`인체 마스크 없음 — 전역 당김으로 진행합니다` (no body mask, using a global pull) keeps appearing**
+
+The mask could not be built. This line repeats every run, but the **root cause is
+printed only once**. Scroll up a little to find it.
+
+| Console line | Meaning |
 |---|---|
-| Face differs from original | `original` up to the ceiling (0.2). If still not enough, the **automatic per-part restoration** (section below) handles it |
-| Composition/lighting off | `camera` up to the ceiling (0.2) |
-| Pasted-on / flat look | Lower both to 0.15–0.2 (over-pull) |
-| Two people merging into one | Lower both to 0.15–0.2 |
-| Single reference only | Set the unused side to 0 or leave unconnected |
+| `인체 마스크·부위별 강도·프레이밍 판정이 꺼져 있다` | `mediapipe` is missing or the model files cannot be read |
+| `person mask failed` | Error while computing the mask. Check the message after it |
+| `pose inference failed` | Error during pose inference. Check the message after it |
+| `pose input 변환 실패` | Error converting the image. Check the message after it |
 
-Adjust one at a time in 0.05–0.1 steps (raising both high overcooks). Negligible
-compute — no VRAM/speed worry.
+If no root-cause line appears, the image had no detectable person (product photo,
+very distant figure) or `vae` is not connected. With a batch input, the mask
+turning off is expected.
 
-## Automatic per-part detail restoration (no setting needed)
+**The face drifts between runs**
 
-If the sampler output is mushier than the reference in a given part (hands,
-legs, face), the node finds it from pixels and raises `original` strength for
-that part only. Console example:
+Check that `image_1` holds the **original** photo. Feeding the previous output
+back in makes a copy of a copy, and every generation drifts a little more.
 
-```
-[GoRi Consistency Keeper] per-part restore boost (hand_left(89%), leg_left(72%))
-— pulling the parts where the reference is intact but the result degraded
-```
+---
 
-The "exactly five fingers" wording Camera Director puts in the prompt is not a
-constraint diffusion can enforce. This node is the pixel-level catch for when
-that wording fails.
+## 9. Limits
 
-Limit: a region is left alone when the reference itself has no detail there
-(if the source cannot be trusted, restoring from it is just as wrong). It needs
-MediaPipe for landmarks; without it the node logs a one-time notice and falls
-back to its existing behaviour.
+- This node preserves consistency. Damage that has to be **redrawn**, such as six
+  fingers, is out of scope (that is a detailer's job).
+- Without `mediapipe`, the body mask, per-region restore and pose verdict turn
+  off. Everything else (global pull, lighting-flow comparison, character-sheet
+  panel detection) keeps working, and the reason is logged once.
 
-## Automatic hand-shape correction (no setting needed)
+---
 
-Clumped or overlapping fingers are pulled up to 10 times toward a spread
-shape. The target is a 95-point score; even below it, the best attempt is
-applied. Console example:
+## 10. License
 
-```
-[GoRi Consistency Keeper] ⚠ hand physics violation (score=33.3/100 < 95): ['stuck fingertips', 'overlap 1-2']
-[GoRi Consistency Keeper] hand micro-pull applied (7 passes, final score=100.0/100)
-```
-
-Limit: it cannot **create** fingers (only unclump them). Below 95 after
-10 passes, the best state is applied with a "below target" warning.
-
-## Character sheet reference detection (no setting needed)
-
-The node checks from pixels whether the `original` reference is a **character
-sheet** (several views laid out in a row: front, back, close-up head, ...) and
-picks the **single view** that best matches the sampled result. Console:
-
-```
-[GoRi Consistency Keeper] 6 panels detected in the original reference — looks like a character sheet
-[GoRi Consistency Keeper]   best matching view: panel 3 (similarity 0.81)
-[GoRi Consistency Keeper]   framing similarity 0.72 — pixels correspond, this view can be the identity source
-```
-
-- Camera Director sees the sheet as one blob, so per-view identity differences
-  cannot be controlled from the prompt. This handles only that part.
-- A false positive is worse than a miss (views would be averaged into several
-  identities), so a sheet is only accepted with 4+ panels of even spacing.
-  Irregular photos are not treated as sheets.
-- When a sheet is detected, the best-matching panel replaces the original
-  reference (stage A); if framing fails the gate, `strength_original` is
-  halved (stage B).
-- Without `mediapipe` the framing check counts as failed — the panel is not
-  used as identity source and (B) `strength_original` is halved.
-
-## Operating systems (Windows / macOS / Linux)
-
-All three are supported and verified in CI (ubuntu/windows/macos × Python
-3.10/3.12). `torch` and `numpy` are already in the ComfyUI environment.
-`mediapipe` is an optional dependency — without it those features switch off
-and the reason is logged to the console once.
-
-This node only works on latent tensors and **reads** the bundled pose/hand
-`.task` model files — it never writes files, so OS path differences do not
-affect it.
-
-- **macOS Apple Silicon (M1/M2/M3)**: there is no mediapipe wheel, so the
-  person mask switches off automatically. Per-part edge comparison, lighting
-  flow and character sheet panel detection use only torch/numpy and keep
-  working.
-- CUDA, MPS (Mac) and CPU all run without exceptions.
-
-## Pose/hand detection models (mediapipe)
-
-`mediapipe` is an optional dependency. The node uses the three `.task`
-model files bundled in the node folder (`pose_landmarker_lite.task`,
-`hand_landmarker.task`, `face_landmarker.task`) by default; you can
-point to other model files with the `GORI_POSE_MODEL`,
-`GORI_HAND_MODEL` and `GORI_FACE_MODEL` environment variables.
-
-One development-only diagnostic exists: setting `GORI_PROBE_PHYSICS=1`
-enables extra logs that measure the physical direction of the pull — it
-adds 3 extra VAE decodes per run (3x cost), so leave it off normally.
-
-If the model files or mediapipe are missing, the person mask and the
-pose/hand features stay off and only the global pull keeps working — the
-reason is logged to the console **once** (not repeated on every run).
-
-## Batch input
-
-With a batch of two or more images in `sampled_latent`, **only the global
-pull** is applied. The person mask, per-part restoration and character sheet
-analysis are single-image features and switch off automatically; the console
-says so. Strength values still apply as given.
-
-To process a batch, split the images and run one at a time, or lower the
-strengths and rely on the global pull alone.
-
-## Ghosting (double exposure) fix
-
-Overlapping faces/bodies mean the reference and output poses differ.
-Latent blending only holds for matched poses:
-
-1. Match the reference image pose to the output (most reliable)
-2. Lower strengths to 0.1–0.15
-3. A console "poses differ greatly" warning means do one of the above
-
-The background (outside the person) is pulled toward the reference too.
-If its composition differs (e.g. furniture in another spot), the offset
-object can print through translucently — step 1 (match the composition)
-is the answer. A scene-change instruction via `camera_prompt` skips the
-background pull automatically.
-
-## Troubleshooting
-
-**If every run logs `인체 마스크 없음 — 전역 당김으로 진행합니다` (person
-mask missing — global pull):** the mask was not built. That line repeats on
-every run, but the **root cause is logged once per process** on a separate
-line (the repeating line does not point at it). Scroll up in the console and
-look for one of these:
-
-| Root-cause line (logged once) | Meaning |
-|---|---|
-| `인체 마스크·부위별 강도·프레이밍 판정이 꺼져 있다 ...` | mediapipe missing or the `.task` model files cannot be read — check the pose/hand model section above and the `GORI_POSE_MODEL` path |
-| `⚠ person mask failed in _person_mask_from_rgb` | exception in the mask geometry — check the exception name/message that follows |
-| `⚠ pose inference failed in ...` | exception while running pose inference — check the exception that follows |
-| `pose input 변환 실패 ...` | exception converting the latent into a detector input — check the exception that follows |
-
-If none of these lines appear, no person was detected (product shots,
-distant figures) or the mask-side VAE decode failed. If it persists on
-person images, check the `vae` connection. With batch input the mask
-feature is off by design (see Batch input above).
-
-## Limits
-
-- Consistency pull only. Won't redraw broken fingers and the like
-  (that's detailer territory).
-- Verify: `python tests/test_node.py`
-
-## License
-
-MIT. Methodology refs: PuLID paper (Apache 2.0), built-in LatentBlend.
-No copied code — original implementation.
+MIT. Method references: the PuLID paper (Apache 2.0) and the built-in
+LatentBlend. Implemented directly, with no copied code.

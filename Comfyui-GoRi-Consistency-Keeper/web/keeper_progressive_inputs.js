@@ -197,8 +197,16 @@ function updateVisibility(node) {
       }
     }
 
+    // 소켓 감산은 **새 노드에만** 한다 (2026-10-18 라이브 실측).
+    // 왜(Why) 로드된 노드를 빼는가: 노드 정의에는 image_2~10 이 항상 있으므로
+    // 워크플로를 열 때도 그 9개가 먼저 만들어졌다가 여기서 빠진다. 그 감산을
+    // 로드에도 적용하면 저장해 둔 사용자 크기가 매번 (빠진 수 × 20px) 만큼
+    // 줄어든다 — 실측: 저장 500 -> 로드 후 320(9×20=180 감산). 저장된 크기는
+    // 이미 소켓이 정리된 상태를 반영하므로 감산할 대상이 없다. 새 노드는 정의상
+    // 부풀려진 크기를 되돌려야 하므로 그대로 감산한다(뒤이어 shrinkNewNode 가
+    // 내용 높이로 확정한다).
     const removed = countBefore - count;
-    if (removed > 0 && Array.isArray(node.size)) {
+    if (removed > 0 && !node._goriKeeperLoaded && isSizeLike(node.size)) {
       node.setSize([node.size[0], node.size[1] - removed * SLOT_HEIGHT]);
     }
     // 새 노드면 소켓이 바뀐 만큼 높이를 **최소치까지** 다시 조인다.
@@ -206,9 +214,36 @@ function updateVisibility(node) {
     // 반영한다. DOM 위젯이 아직 안 붙었을 때 computeSize 가 과대하면 아래쪽에
     // 빈 여백이 남는다 — 생성 직후 한 번 더 재계산해 그 여백을 없앤다.
     // 로드된 노드(_goriKeeperLoaded)는 사용자가 저장한 배치를 존중해 건드리지 않는다.
-    if (!node._goriKeeperLoaded) {
-      shrinkNewNode(node);
-    }
+      if (!node._goriKeeperLoaded) {
+        shrinkNewNode(node);
+      } else if (!node._goriKeeperLoadRepaired) {
+        // 로드된 노드는 사용자가 저장한 배치를 기본으로 존중하지만,
+        // 과거 버전/타이밍 때문에 저장된 크기가 내용 하단보다 크게 남은 경우
+        // (예: 예산 꼬리 8px, 소켓 감산 전 크기) 한 번만 정리한다.
+        // 왜(Why) 한 번만: 사용자가 의도적으로 키운 크기는 이후 건드리지 않는다.
+        node._goriKeeperLoadRepaired = true;
+        const repair = () => {
+          try {
+            if (!isSizeLike(node.size)) return;
+            const fit = Math.round(widgetContentBottom(node));
+            if (fit <= 0) {
+              // 위젯이 아직 안 붙었으면 재시도
+              if (typeof requestAnimationFrame === "function") requestAnimationFrame(repair);
+              else setTimeout(repair, 100);
+              return;
+            }
+            const min = (typeof node.computeSize === "function") ? node.computeSize() : null;
+            const minH = isSizeLike(min) ? Math.round(min[1]) : fit;
+            const h = fit > 0 ? fit : Math.max(1, minH);
+            if (node.size[1] > h + 7) {
+              node.setSize([node.size[0], h]);
+            }
+          } catch (_) { /* 조용히 무시 */ }
+        };
+        repair();
+        if (typeof requestAnimationFrame === "function") requestAnimationFrame(repair);
+        setTimeout(repair, 300);
+      }
     // Record the key only when settled. When removal is deferred mid-drag
     // (or the tail lookup fails), the key stays stale so the next trigger
     // re-runs instead of early-returning on "nothing changed" and leaving
@@ -270,19 +305,69 @@ function setCanvasDirty() {
   }
 }
 
-/** 새 노드의 높이를 **최소치에 맞춘다** (폭은 유지).
+/** 사이즈처럼 생긴 값인가 — plain array 와 typed array 흉내 객체를 모두 받는다.
+ * 왜(Why) Array.isArray 로는 안 되나 (2026-10-18 라이브 실측): 프런트엔드
+ * 1.53.10 의 node.size 게터는 **Float64Array 흉내 객체**를 돌려준다.
+ * Array.isArray 는 false 이고 ArrayBuffer.isView 까지 false 다(진짜 뷰가 아니라
+ * 프로토타입만 흉내낸다). 그래서 길이와 두 숫자만 보고 판단한다. 이 검사가
+ * 없던 동안에는 새 노드의 높이 보정 두 곳(updateVisibility 감산·shrinkNewNode)
+ * 이 통째로 반환돼 아래 188px 가 빈 여백으로 남았다(실측 free=188, gap=188).
+ * 카메라 모듈도 같은 이유로 같은 함수를 쓴다. */
+function isSizeLike(v) {
+  return !!v && typeof v.length === "number" && v.length >= 2
+    && typeof v[0] === "number" && typeof v[1] === "number";
+}
+
+/** 마지막으로 **보이는** 위젯의 하단(y + 높이). 배치 전이면 0.
+ * 프런트엔드는 매 draw 마다 위젯 y 와 computedHeight 를 다시 심는다
+ * (_arrangeWidgets: computedHeight = computeSize + 4). 그래서 이 값이 곧
+ * "내용이 실제로 차지하는 높이"이고, 노드 높이와 무관하게 안정적이다 —
+ * 크기를 줄인 뒤 다시 재도 같은 값이 나온다(멱등의 근거). */
+function widgetContentBottom(node) {
+  let bottom = 0;
+  for (const w of node?.widgets ?? []) {
+    if (!w || w.hidden) continue;
+    if (typeof w.y !== "number") continue;
+    let h = 0;
+    if (typeof w.computedHeight === "number" && w.computedHeight > 0) {
+      h = w.computedHeight; // _arrangeWidgets 가 심은 배치 높이
+    } else if (typeof w.computeSize === "function") {
+      // 아직 배치 전: 캔버스 위젯 규약(computeSize + 위아래 4)으로 근사한다
+      const c = w.computeSize(isSizeLike(node.size) ? node.size[0] : 0);
+      if (isSizeLike(c)) h = c[1] + 4;
+    }
+    if (h <= 0) continue;
+    const b = w.y + h;
+    if (b > bottom) bottom = b;
+  }
+  return bottom;
+}
+
+/** 새 노드의 높이를 **내용 높이에 정확히** 맞춘다 (폭은 유지).
  * 왜(Why) 필요한가 (2026-10-11 실측 · 2026-10-12 사용자 지시): 노드를 오자마자
  * 꺼내면 이미지 소켓 image_2~10 이 정의대로 9개나 있어서 아래가 크게 빈 여백으로
  * 보인다. 위 updateVisibility 의 감산만으로는 소켓 수만 반영돼 최소치에 못
  * 미치거나(위젯이 아직 DOM 에 안 붙었을 때) 반대로 너무 짧아진다 — 그래서
- * computeSize() 의 최소치로 **올리고 내려** 정확히 맞춘다. 로드(워크플로 열기)가
- * 끼어들면 즉시 중단해서 저장된 배치에 손대지 않는다. */
+ * 두 값을 함께 본다. 로드(워크플로 열기)가 끼어들면 즉시 중단해서 저장된 배치에
+ * 손대지 않는다.
+ *
+ * 왜(Why) computeSize() 최소치가 아니라 **내용 하단**인가 (2026-10-18 라이브 실측):
+ * computeSize() 는 프런트엔드의 예산이라 실제 배치보다 꼬리 8px 만큼 크다
+ * (실측 min=234 vs 내용 하단=226). 처음에는 "남은 여백(freeWidgetSpace)을
+ * 없앤다" 로 짰는데, 이미 맞춰진 뒤에는 free 가 0 이라 그 보정이 건너뛰어지고
+ * 예산 234 로 **되돌아가 8px 를 다시 붙였다** (실측 타임라인: t=103ms 226 ->
+ * t=413ms 234). 300ms 재시도 패스가 그 되돌림을 일으켰다. 그래서 기준을
+ * "여백" 이 아니라 **보이는 위젯의 하단**으로 삼는다 — 이 값은 크기와 무관해
+ * 몇 번을 다시 재도 226 이므로 되돌림이 원천적으로 없다.
+ * 배치 전(위젯 y 없음)에는 잴 수 없으므로 예산(computeSize 최소치)으로만
+ * 맞춘다 — 그 상태에서도 run 은 정상이다(측정은 다음 draw 뒤에 다시 온다). */
 function shrinkNewNode(node) {
   if (typeof node?.computeSize !== "function") return;
-  if (!Array.isArray(node.size)) return;
+  if (!isSizeLike(node.size)) return;
   const min = node.computeSize();
-  if (!Array.isArray(min)) return;
-  const h = Math.max(1, Math.round(min[1]));
+  if (!isSizeLike(min)) return;
+  const fit = Math.round(widgetContentBottom(node));
+  const h = fit > 0 ? fit : Math.max(1, Math.round(min[1]));
   if (node.size[1] !== h) {
     node.setSize([Math.max(node.size[0], min[0]), h]);
   }
@@ -391,5 +476,5 @@ export {
   imageNumber, countImageSockets, lastLinkedImageNumber, lastImageSocketIndex,
   isDraggingLink, updateVisibility, restoreAll,
   scheduleVisibilityUpdate, VISIBILITY_DEBOUNCE_MS,
-  shrinkNewNode, isMainLinked, MAIN_IMAGE,
+  shrinkNewNode, isSizeLike, widgetContentBottom, isMainLinked, MAIN_IMAGE,
 };

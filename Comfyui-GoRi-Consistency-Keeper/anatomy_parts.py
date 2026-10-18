@@ -124,6 +124,7 @@ def read_parts(pose_pts, hand_groups, face_group=None):
     판정(위반)이 아니라 **판독**이 반환값이다 — 위반 판정은 keeper 가
     검증 가능한 것만 한다.
     """
+    # 포즈 i번째 → (x, y, 가시성) 또는 None (범위/NaN 방어)
     def _pp(i):
         if pose_pts is None or i >= len(pose_pts):
             return None

@@ -14,7 +14,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"MAX_REFERENCE_IMAGES", "VISION_DETAIL", "VISION_DETAIL_DEFAULT", "vision_detail_px", "build_identity_anchor", "build_single_person_anchor", "build_duo_person_anchor", "reference_guard", "build_secondary_role_anchor"
+"MAX_REFERENCE_IMAGES", "VISION_DETAIL", "VISION_DETAIL_DEFAULT", "vision_detail_px", "build_identity_anchor", "build_single_person_anchor", "build_duo_person_anchor", "reference_guard", "build_secondary_role_anchor", "auto_reference_roles_positive"
 ]
 
 
@@ -160,6 +160,61 @@ def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> 
         anchor += (" Use reference image(s) " + ", ".join(str(s) for s in objects)
                    + " only as props/objects, never as people.")
     return anchor
+
+
+def auto_reference_roles_positive(kinds, image_labels=None) -> str:
+    """자동 분류된 역할을 positive 문장으로. 토픽이 슬롯을 지목했으면 호출하지 않는다.
+
+    왜(Why) 조건문인가: 픽셀만으로 옷과 사물을 가를 수 없다(실측). '아이템'은
+    단색 배경 위 물건이라는 뜻이므로, 입을지 놓을지는 모델이 이미지를 보고
+    정하게 한다. 대신 **단색 배경**만 아이템으로 인정해, 포즈 참조의 옷이
+    딸려 오던 예전 회귀(2026-09-28)와는 경로가 겹치지 않는다.
+    """
+    if not kinds:
+        return ""
+    try:
+        labels = [int(l) for l in (image_labels or sorted(kinds))]
+    except (TypeError, ValueError):
+        return ""
+    persons = [l for l in labels if kinds.get(l) == "person"]
+    main = persons[0] if persons else None
+    parts = []
+    for l in labels:
+        r = kinds.get(l)
+        if r == "outfit" and main:
+            parts.append(
+                f"dress the person from reference image {main} in the garment "
+                f"shown in reference image {l}, keeping its exact colour, cut, "
+                "material and pattern; the garment must be worn on the body, "
+                "not held or placed beside it")
+        elif r == "outfit":
+            parts.append(
+                f"use the garment in reference image {l} exactly as shown, "
+                "keeping its colour, cut, material and pattern")
+        elif r == "object":
+            parts.append(
+                f"include the object from reference image {l} with its exact "
+                "silhouette, material and colour, placed naturally in the scene")
+        elif r == "item" and main:
+            parts.append(
+                f"reference image {l} is an isolated item: if it is a garment, "
+                f"put it on the person from reference image {main} with its exact "
+                "colour, cut and material; if it is an object or product, keep "
+                "its exact shape, material and colour and place it in the scene")
+        elif r == "item":
+            parts.append(
+                f"reference image {l} is an isolated item: keep its exact shape, "
+                "material and colour")
+        elif r == "background":
+            parts.append(
+                f"use the environment of reference image {l} as the background, "
+                "with its lighting and colour palette; do not include its people "
+                "or foreground objects as the subject")
+        elif r == "style":
+            parts.append(
+                f"borrow only the mood, colour palette and lighting of "
+                f"reference image {l}")
+    return ". ".join(parts)
 
 
 def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str:

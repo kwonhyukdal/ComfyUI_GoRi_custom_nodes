@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 __all__ = [
-"_match_spatial", "_drift_mse", "_drift_norm", "_drift_norm_masked", "_drift_tile_max", "_lowpass_latent", "_hf_restore_pass", "_get_samples", "_with_samples", "_damp_norm", "_damp_factor", "_content_change_gate", "_FACE_GATE_PERSON_FLOOR", "_prompt_intent", "_face_gate_open", "_bg_gate_open", "_lighting_mismatch", "_light_damp_factor", "_as_rgb_hwc", "_even_rgb", "_edge_mag_from_rgb", "_edge_map_from_rgb", "_local_edge", "_noise_floor", "_DRIFT_NORM_KNEE", "_PHYS_CEILING", "_DRIFT_NORM_ZERO", "_DECODE_MAX_PIXELS", "_DECODE_RETRY_PIXELS"
+"_match_spatial", "_drift_mse", "_drift_norm", "_drift_norm_masked", "_drift_tile_max", "_drift_tile_below_frac", "_lowpass_latent", "_hf_restore_pass", "_get_samples", "_with_samples", "_damp_norm", "_damp_factor", "_content_change_gate", "_FACE_GATE_PERSON_FLOOR", "_prompt_intent", "_pose_intent", "_ref_pose_class", "_face_gate_open", "_bg_gate_open", "_lighting_mismatch", "_light_damp_factor", "_as_rgb_hwc", "_even_rgb", "_edge_mag_from_rgb", "_edge_map_from_rgb", "_local_edge", "_noise_floor", "_DRIFT_NORM_KNEE", "_PHYS_CEILING", "_DRIFT_NORM_ZERO", "_DECODE_MAX_PIXELS", "_DECODE_RETRY_PIXELS"
 ]
 
 _ONCE_SEEN = set()
@@ -214,6 +214,57 @@ def _drift_tile_max(sampled, matched, mask, tiles=8) -> float | None:
                 if v is not None and (best is None or v > best):
                     best = v
         return best
+    except Exception:
+        return None
+
+
+def _drift_tile_below_frac(sampled, matched, mask, knee, tiles=8) -> float | None:
+    """마스크 영역 타일 중 정규화 불일치가 knee 이하인 타일의 비율.
+    비교 불가 타일(커버리지 1% 미만·계산 실패)은 분모에서 뺀다.
+    유효 타일이 없으면 None.
+
+    왜(Why, 2026-10-16): 배경 게이트는 **전체 평균 하나**로 열고 닫는다. 그래서
+    장면의 일부(밝은 벽 등)만 크게 어긋나도 정렬된 영역(가구)까지 함께 빠진다
+    — 사용자가 본 "의자 등받이 터프팅 소실 + 색 변형"의 경로다(정규화
+    0.9397/1.1881/0.8137 이 모두 무릎 0.50 초과라 세 참조 전부 생략).
+
+    이 값이 그 대안(타일별 게이트)의 **재료**다. 그런데 지금 임계를 박으면 안
+    된다 — bg_gate_calib.py 실측에서 정상 동일 장면의 타일최대(0.70~1.02)가
+    합성 고스트(0.45)를 넘어, 타일 신호가 정상/이상을 가르지 못했다. 그래서
+    **동작 변경 없이 관측만** 한다: 게이트가 닫힌 실행에서도 이 비율을 남겨
+    분포를 모은다. R130 이 타일최대를 **열린 분기에만** 남겨 닫힌 분기의
+    자료가 비어 있던 구멍을 이 함수가 메운다.
+    """
+    try:
+        if mask is None:
+            return None
+        m = mask.to(device=sampled.device, dtype=sampled.dtype)
+        h = int(sampled.shape[-2])
+        w = int(sampled.shape[-1])
+        if h <= 0 or w <= 0 or tiles < 1:
+            return None
+        total = 0
+        below = 0
+        for i in range(tiles):
+            for j in range(tiles):
+                tm = m[..., i * h // tiles:(i + 1) * h // tiles,
+                       j * w // tiles:(j + 1) * w // tiles]
+                if float(tm.mean()) < 0.01:
+                    continue
+                v = _drift_norm_masked(
+                    sampled[..., i * h // tiles:(i + 1) * h // tiles,
+                            j * w // tiles:(j + 1) * w // tiles],
+                    matched[..., i * h // tiles:(i + 1) * h // tiles,
+                            j * w // tiles:(j + 1) * w // tiles],
+                    tm)
+                if v is None:
+                    continue
+                total += 1
+                if v <= knee:
+                    below += 1
+        if total <= 0:
+            return None
+        return below / float(total)
     except Exception:
         return None
 
@@ -553,6 +604,190 @@ def _prompt_intent(prompt) -> dict:
         return {"outfit_change": outfit, "scene_change": scene}
     except Exception:
         return {"outfit_change": False, "scene_change": False}
+
+
+# 포즈 상태 동사 → 클래스. (2026-10-13, 포즈 의도 게이트용).
+# 왜(Why) 짧은 영어 동사를 빼나: 부분 문자열 매칭이라 "heels"/"wheels" 와
+# 같은 충돌이 난다 — "sit" ⊂ "visit"/"site", "stand" ⊂ "standard"/
+# "understand", "lie" ⊂ "believe", "walk" ⊂ "sidewalk", "lying" ⊂
+# "flying". 그래서 경계가 분명한 긴 형태만 둔다 (아래 정규식 \b).
+# 한국어는 음절이라 짧아도 충돌이 없다 ("앉"·"눕"·"꿇"·"뛰"·"걷"·"춤" 은
+# 해당 동사 계열에만 나온다). 단 "서" 는 흔한 음절이라 구 단위로만 둔다
+# ("서울"·"서서히" 오판 방지). "달리" 도 부사(다르게)와 겹쳐 뺐다.
+_POSE_SIT_KO = ("앉", "착석")
+_POSE_SIT_EN = (r"sitting", r"seated", r"sit\s+down", r"sit\s+on",
+                r"sits\s+on")
+_POSE_STAND_KO = ("서 있", "서있", "서 있는", "선 채", "선채", "일어서")
+_POSE_STAND_EN = (r"standing", r"stand\s+up", r"stands")
+_POSE_LIE_KO = ("눕", "누워", "누운", "엎드")
+_POSE_LIE_EN = (r"lying\s+down", r"lied", r"lay\s+down", r"laying\s+down",
+                r"prone")
+_POSE_KNEEL_KO = ("무릎 꿇", "무릎꿇", "꿇어", "꿇고", "꿇는", "꿇은")
+_POSE_KNEEL_EN = (r"kneeling", r"kneel\s+down", r"kneels", r"crouching",
+                  r"squatting")
+# 동작 동사는 직립 계열로 친다 (뛰는·걷는·춤추는 자세는 서 있는 몸이다).
+_POSE_MOTION_KO = ("뛰다", "뛰어", "뛰는", "달리기", "달리는", "걷기",
+                   "걷는", "걸어서", "춤추")
+_POSE_MOTION_EN = (r"running", r"runs", r"walking", r"walks", r"dancing",
+                   r"dances")
+
+
+def _pose_intent(text) -> dict:
+    """프롬프트에서 포즈 지시를 읽는다.
+
+    반환: {"specified": bool, "pose": "sitting"|"standing"|"lying"|
+    "kneeling"|None}. 클래스가 둘 이상 잡히면 모호하므로 pose 는 None
+    (지시 자체는 있었으므로 specified 는 True) — 판단 근거가 없으면
+    기존 동작(게이트 미발동)으로 떨어진다.
+    """
+    try:
+        import re as _re
+        if not text or not isinstance(text, str):
+            return {"specified": False, "pose": None}
+        found = set()
+        for _w in _POSE_SIT_KO:
+            if _w in text:
+                found.add("sitting")
+                break
+        for _w in _POSE_STAND_KO:
+            if _w in text:
+                found.add("standing")
+                break
+        for _w in _POSE_LIE_KO:
+            if _w in text:
+                found.add("lying")
+                break
+        for _w in _POSE_KNEEL_KO:
+            if _w in text:
+                found.add("kneeling")
+                break
+        for _w in _POSE_MOTION_KO:
+            if _w in text:
+                found.add("standing")
+                break
+        low = text.lower()
+        # 2026-10-16 오딧: 예전엔 합친 목록을 훑다 첫 매치에서 break 해서
+        # 영어 복수 클래스가 단일 클래스로 오판됐다 — "a standing man next
+        # to a seated man" 이 sitting 으로 나왔다(실측). KO 와 같이
+        # 클래스별로 모아 모호성(pose=None)을 감지한다.
+        for _cls, _words in (("sitting", _POSE_SIT_EN),
+                             ("standing", _POSE_STAND_EN + _POSE_MOTION_EN),
+                             ("lying", _POSE_LIE_EN),
+                             ("kneeling", _POSE_KNEEL_EN)):
+            for _w in _words:
+                if _re.search(r"\b" + _w + r"\b", low):
+                    found.add(_cls)
+                    break
+        if not found:
+            return {"specified": False, "pose": None}
+        if len(found) > 1:
+            return {"specified": True, "pose": None}
+        return {"specified": True, "pose": next(iter(found))}
+    except Exception:
+        return {"specified": False, "pose": None}
+
+
+def _ref_pose_class(pts) -> "str | None":
+    """참조 이미지 33점 → 포즈 클래스. 판정 불가면 None.
+
+    클래스 3개: sitting(앉음) / standing(직립 — 기대앉음 포함) /
+    lying(누움). 기대앉음을 standing 에 넣는 이유: 직립 몸에 몸통만
+    기운 것으로, 앉음과 달리 다리 배치가 서 있는 쪽이다. 포즈 게이트는
+    "앉으라는데 서 있으면" 을 잡는 게 목적이라 이 구분으로 충분하다.
+
+    규칙 (2026-10-13 실측치 기반 — 로드/생성 쌍: 참조는 기대앉음이지만
+    다리는 펴져 있고(낙차비율 0.96), 생성은 무릎 굽힘 109/90·낙차비율
+    0.48/0.39. 2D 정면 투영이라 앉음은 "넙다리 짧아보임" 으로 잡는다):
+      lying    몸통 기울기 55도 이상
+      sitting  완성된 쪽 하나라도: 무릎 140도 미만 + 넙다리 낙차비율
+               ((무릎y-엉덩y)/넙다리길이) 0.55 미만 + 몸통 45도 미만
+      standing 넙다리 낙차비율 0.8 초과인 쪽이 하나라도 + 몸통 45도 미만
+               (무릎 각도 불필요 — 발목 잘림에도 판정. 기대앉음은 여기로
+               들어간다: 다리 배치가 서 있는 쪽이므로 앉음 지시와는 어긋남)
+    순서대로 판정하고 어느 것도 아니면 None (기존 동작 유지).
+    """
+    try:
+        import math as _math
+        if not pts or len(pts) < 33:
+            return None
+
+        # 포즈 i번째 → (x, y). 신뢰도 0.25 미만이거나 NaN 이면 None
+        def _xy(i):
+            p = pts[i]
+            if p is None or len(p) < 2:
+                return None
+            x, y = float(p[0]), float(p[1])
+            if x != x or y != y:
+                return None
+            if len(p) >= 3:
+                try:
+                    if float(p[2]) < 0.25:
+                        return None
+                except Exception:
+                    return None
+            return (x, y)
+
+        _need = (11, 12, 23, 24, 25, 26)
+        _p = {i: _xy(i) for i in _need}
+        if any(v is None for v in _p.values()):
+            return None
+        # 발목은 선택 (무릎 각도용). 잘린 사진에서도 넙다리 방향은 잰다.
+        _a27 = _xy(27)
+        _a28 = _xy(28)
+
+        # q 를 꼭짓점으로 하는 세 점 각 a-q-r (도) — 퇴화하면 None
+        def _ang(a, q, r):
+            if a is None or q is None or r is None:
+                return None
+            v1 = (a[0] - q[0], a[1] - q[1])
+            v2 = (r[0] - q[0], r[1] - q[1])
+            n1 = _math.hypot(*v1)
+            n2 = _math.hypot(*v2)
+            if n1 < 1e-9 or n2 < 1e-9:
+                return None
+            c = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
+            return _math.degrees(_math.acos(c))
+
+        _kl = _ang(_p[23], _p[25], _a27)
+        _kr = _ang(_p[24], _p[26], _a28)
+        # 무릎 각도는 앉음 판정에만 쓴다. 발목이 잘려 각도를 못 재도
+        # 넙다리 방향(standing 판정)은 잰다 — 여기서 None 으로 끊으면
+        # 잘린 사진이 전부 미판정이 된다.
+        _msh = ((_p[11][0] + _p[12][0]) / 2.0, (_p[11][1] + _p[12][1]) / 2.0)
+        _mhp = ((_p[23][0] + _p[24][0]) / 2.0, (_p[23][1] + _p[24][1]) / 2.0)
+        _dy = abs(_msh[1] - _mhp[1])
+        _dx = abs(_msh[0] - _mhp[0])
+        if _dx < 1e-9 and _dy < 1e-9:
+            return None
+        _tilt = _math.degrees(_math.atan2(_dx, _dy))
+        if _tilt >= 55.0:
+            return "lying"
+
+        # 고관절 → 무릎 벡터의 세로 성분 비율 (틸트 판정용)
+        def _thigh_ratio(hi, ki):
+            a = _p.get(hi)
+            b = _p.get(ki)
+            if a is None or b is None:
+                return None
+            ln = _math.hypot(b[0] - a[0], b[1] - a[1])
+            if ln < 1e-9:
+                return None
+            return (b[1] - a[1]) / ln
+
+        _rl = _thigh_ratio(23, 25)
+        _rr = _thigh_ratio(24, 26)
+        if _tilt < 45.0:
+            for _side, _ki, _r in ((23, _kl, _rl), (24, _kr, _rr)):
+                if _ki is None or _r is None:
+                    continue
+                if _ki < 140.0 and _r < 0.55:
+                    return "sitting"
+            if ((_rl is not None and _rl > 0.8)
+                    or (_rr is not None and _rr > 0.8)):
+                return "standing"
+        return None
+    except Exception:
+        return None
 
 
 def _face_gate_open(face_n, person_n, intent_outfit=False) -> bool:

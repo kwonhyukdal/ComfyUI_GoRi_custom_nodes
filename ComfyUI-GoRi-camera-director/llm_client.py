@@ -192,6 +192,7 @@ def extract_json(text: str) -> dict:
 # HTTP
 # ---------------------------------------------------------------------------
 
+# JSON POST 공통 전송 — 오류 메시지에 URL(키 포함)을 흘리지 않는다
 def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
     try:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -265,6 +266,7 @@ def _flatten_content(value) -> str:
     return ""
 
 
+# 제공자별 응답 dict 에서 본문 텍스트만 추출한다
 def _content_from(provider: str, raw: dict) -> str:
     provider = provider or ""
     try:
@@ -290,6 +292,7 @@ def _content_from(provider: str, raw: dict) -> str:
 # 이미지 (PIL → PNG base64). 비전 전달용. 실패 시 None (폰백은 규칙 티어가 담당)
 # ---------------------------------------------------------------------------
 
+# IMAGE 텐서 → 긴 변 max_side 이하로 줄인 PNG base64 (실패 시 None)
 def image_to_b64(image, max_side: int = 768):
     try:
         from PIL import Image as _Image
@@ -297,6 +300,13 @@ def image_to_b64(image, max_side: int = 768):
         import io as _io
 
         import torch as _t
+        # (H,W,C) 3차원 tensor 를 (1,H,W,C) 로 정규화한다 (2026-10-19).
+        # 왜(Why): image[0] 이 3차원에서는 (W,C) 가 되어 PIL 변환이 죽고,
+        # 호출부에서 슬롯이 failed_labels 로 조용히 빠졌다("연결은 됐는데
+        # 반영 안 됨"). 4차원이 정상이지만 배치 축을 채우면 같은 이미지가
+        # 통과한다.
+        if isinstance(image, _t.Tensor) and getattr(image, "ndim", 0) == 3:
+            image = image.unsqueeze(0)
         px = image[0] if isinstance(image, _t.Tensor) else image
         if hasattr(px, "detach"):
             px = px.detach().cpu()
@@ -326,6 +336,7 @@ def image_to_b64(image, max_side: int = 768):
 # 메인
 # ---------------------------------------------------------------------------
 
+# LLM 응답 캐시 키 — 이미지/텍스트를 sha1 로 접어 한 문자열로 만든다
 def _cache_key(provider: str, model: str, system: str, user: str,
                image_b64=None, image_sig=None, image_b64s=None) -> str:
     if image_b64s:
@@ -656,6 +667,7 @@ def cache_stats() -> tuple[int, int]:
         return len(_cache), _cache_hits
 
 
+# 캐시와 히트 카운터를 초기화한다 (테스트가 반복 호출)
 def clear_cache() -> None:
     # 왜(Why) `global` 이 필수인가: 없으면 아래 두 줄이 **함수 지역변수** 가 되어
     # 모듈 수준 카운터가 리셋되지 않는다. 테스트가 `clear_cache()` 를 수십 번

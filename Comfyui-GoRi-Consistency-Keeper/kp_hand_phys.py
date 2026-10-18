@@ -43,12 +43,14 @@ _TIP_MIN_SEP = 0.018   # 정규화 좌표 기준, 끝점간 최소 분리 (이�
 _BEND_FLIP_DEG = 150.0 # 마디 벡터 역전 판정 (두 마디가 이 각도 이상 역방향)
 
 
+# 두 점 사이 거리
 def _dist(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
 def _seg_intersect(p1, p2, p3, p4):
     """두 선분 교차 여부 (표준 CCW 테스트)."""
+    # 세 점 회전 방향(CCW) 부호 — 선분 교차 판정용
     def ccw(a, b, c):
         return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
     d1 = ccw(p3, p4, p1)
@@ -60,6 +62,7 @@ def _seg_intersect(p1, p2, p3, p4):
     return False
 
 
+# 두 벡터 사이 각(도) — 길이가 0 이면 None
 def _angle_between(v1, v2):
     dot = v1[0] * v2[0] + v1[1] * v2[1]
     n1 = math.hypot(*v1)
@@ -70,9 +73,14 @@ def _angle_between(v1, v2):
     return math.degrees(math.acos(c))
 
 
-def score_one_hand(pts, image=None, w=1.0, h=1.0):
+def score_one_hand(pts, image=None):
     """한 손의 21점(정규화) → 항목별 결과 dict.
-    image: uint8 HWC (손톱용, None 이면 nail=0.5 로 중립). w,h: 픽셀 변환용."""
+    image: uint8 HWC (손톱용, None 이면 nail=0.5 로 중립).
+
+    w/h 파라미터는 제거됐다 (2026-10-16 오딧): 손톱 샘플 좌표는
+    image.shape 로 환산하므로 픽셀 크기를 따로 받을 이유가 없었고,
+    호출부만 값을 넘기고 함수 안에서 쓰이지 않는 죽은 인자였다.
+    """
     res = {"count_ok": True, "cross": False, "backward": False,
            "nail": 0.0, "sep_min": None, "note": []}
     if not pts or len(pts) != 21:
@@ -166,7 +174,7 @@ def score_one_hand(pts, image=None, w=1.0, h=1.0):
     return res
 
 
-def hand_physical_score(hands, image=None, w=1.0, h=1.0):
+def hand_physical_score(hands, image=None):
     """전체 손 → 종합 점수 dict.
     반환: {score(0~100), per_hand[...], detected(n), passed(bool)}
 
@@ -186,7 +194,7 @@ def hand_physical_score(hands, image=None, w=1.0, h=1.0):
     per = []
     total = 0.0
     for hpts in hands:
-        r = score_one_hand(hpts, image=image, w=w, h=h)
+        r = score_one_hand(hpts, image=image)
         s = 0.0
         s += 33.34 if r["count_ok"] else 0.0
         s += 33.33 if not r["cross"] else 0.0

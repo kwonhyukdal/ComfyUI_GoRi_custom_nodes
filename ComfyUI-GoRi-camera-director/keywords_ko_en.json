@@ -1,5 +1,5 @@
 {
-  "_comment": "auto 티어용 최소 한/영 병기 사전. 위에서부터 대응하는 첫 항목을 채택한다. 값은 목록 A의 한글 라벨과 일치해야 한다. shot·lens 에는 프레이밍/광학 어휘만 넣는다 - 주제 서술어(얼굴·표정·인물·face 등)는 긴 프롬프트에서 오탐한다(2026-10-11 실측).",
+  "_comment": "auto 티어용 최소 한/영 병기 사전. 위에서부터 대응하는 첫 항목을 채택한다. 값은 목록 A의 한글 라벨과 일치해야 한다. shot·lens 에는 프레이밍/광학 어휘만 넣는다 - 주제 서술어(얼굴·표정·인물·face 등)는 긴 프롬프트에서 오탐한다(2026-10-11 실측). motion 은 목록 A 라벨 20종을 전부 덮는다(2026-10-19 확장) - 구체 무빙(팬·트럭·틸트·크레인·돌리·줌·랙포커스·홉팬·스테디캠)은 회전/이동 방향을 명시한 어휘만 넣고, '카메라가 오른쪽으로' 같이 팬·트럭을 못 가르는 광범위 어휘는 넣지 않는다.",
   "shot": [
     {"value": "극접 (ECU)", "keywords": ["클로즈업 극접", "extreme close"]},
     {"value": "근접 (CU)", "keywords": ["클로즈업", "closeup", "close-up", "headshot", "portrait"]},
@@ -17,7 +17,7 @@
   "angle": [
     {"value": "탑다운 (top-down)", "keywords": ["탑다운", "평면 배치", "flat lay", "overhead", "위에서 내려다"]},
     {"value": "개미눈 (worm's eye)", "keywords": ["개미 눈", "worm's eye", "땅에서 올려"]},
-    {"value": "하이앵글 (high angle)", "keywords": ["위에서 내려다", "아래를 내려다", "high angle", "birds-eye view"]},
+    {"value": "하이앵글 (high angle)", "keywords": ["하이앵글", "하이 앵글", "아래를 내려다", "high angle", "birds-eye view"]},
     {"value": "로우앵글 (low angle)", "keywords": ["웅장", "위용", "올려다보", "위대한", "heroic", "low angle", "towering"]}
   ],
   "lighting": [
@@ -29,14 +29,29 @@
     {"value": "하이키 (high key)", "keywords": ["화사한", "밝은", "high-key", "high key", "bright"]}
   ],
   "motion": [
+    {"value": "돌리 인 (dolly in)", "keywords": ["돌리 인", "카메라가 다가", "dolly in"]},
+    {"value": "돌리 아웃 (dolly out)", "keywords": ["돌리 아웃", "카메라가 물러", "dolly out"]},
+    {"value": "트럭 좌 (truck left)", "keywords": ["카메라가 왼쪽으로 이동", "왼쪽으로 이동", "truck left"]},
+    {"value": "트럭 우 (truck right)", "keywords": ["카메라가 오른쪽으로 이동", "오른쪽으로 이동", "truck right"]},
+    {"value": "팬 좌 (pan left)", "keywords": ["왼쪽으로 팬", "좌로 팬", "팬 좌", "pan left"]},
+    {"value": "팬 우 (pan right)", "keywords": ["오른쪽으로 팬", "우로 팬", "팬 우", "pan right"]},
+    {"value": "크레인 상 (crane up)", "keywords": ["크레인 상", "카메라가 떠오르", "위로 떠오르", "crane up"]},
+    {"value": "크레인 하 (crane down)", "keywords": ["크레인 하", "카메라가 내려앉", "아래로 내려앉", "crane down"]},
+    {"value": "틸트 상 (tilt up)", "keywords": ["위로 틸트", "카메라가 올라", "고개를 들어", "tilt up"]},
+    {"value": "틸트 하 (tilt down)", "keywords": ["아래로 틸트", "카메라가 내려", "고개를 내려", "tilt down"]},
+    {"value": "줌 인 (zoom in)", "keywords": ["줌 인", "줌인", "확대하며", "zoom in"]},
+    {"value": "랙포커스 (rack focus)", "keywords": ["랙포커스", "초점 이동", "핀트 이동", "rack focus", "focus pull"]},
+    {"value": "홉팬 (whip pan)", "keywords": ["휙 돌리", "빠른 팬", "whip pan", "fast pan"]},
+    {"value": "스테디캠 (steadicam)", "keywords": ["스테디캠", "부드럽게 활공", "steadicam", "gimbal glide"]},
     {"value": "슬로우 푸시인 (push-in)", "keywords": ["다가가", "천천히 다가", "가까이 접근", "approach", "push in", "closer slowly"]},
     {"value": "풀백 (pull-back)", "keywords": ["멀어지", "후퇴", "점점 멀", "pull back", "retreat", "zoom out", "fade away"]},
     {"value": "오빗 (orbit)", "keywords": ["주위를 도는", "둘러보며", "원을 그려", "orbit", "circling", "around the subject"]},
     {"value": "핸드헬드 (handheld)", "keywords": ["현장감", "기록film", "흔들리는 카메라", "documentary", "handheld", "verite"]},
-    {"value": "팔로우 (follow)", "keywords": ["따라가는", "뒤따라", "follow shot", "tracking the"]}
+    {"value": "팔로우 (follow)", "keywords": ["따라가는", "뒤따라", "follow shot", "tracking the"]},
+    {"value": "정지 (static)", "keywords": ["고정 카메라", "정지 카메라", "static camera", "locked off", "no movement"]}
   ],
   "speed": [
     {"value": "느림 (slow)", "keywords": ["천천히", "느릿", "slowly", "slow "]},
-    {"value": "빨름 (fast)", "keywords": ["빠르게", "재빨리", "fast", "quick"]}
+    {"value": "빠름 (fast)", "keywords": ["빠르게", "재빨리", "fast", "quick"]}
   ]
 }

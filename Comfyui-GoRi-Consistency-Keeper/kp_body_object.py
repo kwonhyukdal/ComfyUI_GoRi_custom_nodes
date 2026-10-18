@@ -32,6 +32,8 @@ _S_HI = 0.30          # 구조(사물) 판정 - 이 이상이면 "사물/표면"
 _CLEAR_LO = 16.0      # 경계 명암 대비 임계 - 이보다 낮으면 "융합(분리 안 됨)" 으로 본다
 _SHIFT_PX = 6.0       # 미세 당김 이동량(픽셀)
 _CORRECT_FRAC = 0.6   # 이동 비율(살짝)
+_THIN_HI = 0.25       # 얇은 구조 판정 - Canny 에지 임계(블러 후에도 살아남)
+_THIN_AREA_HI_FRAC = 0.02  # 이 비율(면적) 이상의 내부를 둘러싼 윤곽은 "큰 물체"
 
 
 def _structure_map(rgb):
@@ -44,6 +46,86 @@ def _structure_map(rgb):
     k = max(3.0, gray.shape[1] / 300.0)
     S = cv2.GaussianBlur(S, (0, 0), k)
     return S
+
+
+def _thin_structure_mask(rgb, exclude_person=True):
+    """uint8 RGB -> (H,W) 0~1 얇은 비신체 구조(가구 다리·전선 등) 보호 마스크.
+
+    왜(Why) 필요한가 (2026-10-14, 사용자 지시 3번): 당김 보정이 참조(원본)를
+    결과물에 블렌드할 때, 참조와 어긋난 **얇은 구조**(가구 다리·전선·손잡이)
+    가 블렌드되면 번짐(blur-like smear)이 생긴다. 이 마스크가 1인 픽셀은
+    당김에서 제외해 결과물 자신의 선명한 얇은 구조를 보존한다. 단, 참조가
+    결과물과 정렬돼 있는 경우(낮은 drift)는 당김이 오히려 번짐을 고치므로
+    보호는 호출부에서 drift 게이트와 함께 켠다(consistency_keeper.run).
+
+    탐지: Canny 에지(_structure_map) 중 **좁은 선**만 남긴다 —
+      · 강한 에지 (S > _THIN_HI)
+      · 침식 후에도 살아남는 실제 선(1~2픽셀 잡음 제거)
+      · 인체 영역 제외 (exclude_person, 런타임에 바인딩된 _person_mask_fn)
+    반환 마스크는 약하게 블러링(σ=1.5)해 경계를 부드럽게 한다.
+    실패/탐지 없음 → None.
+    """
+    if rgb is None:
+        return None
+    try:
+        H, W = rgb.shape[:2]
+        gray = rgb if rgb.ndim == 2 else cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        if gray.dtype != _np.uint8:
+            gray = _np.clip(gray, 0, 255).astype(_np.uint8)
+        # 얇은 선은 _structure_map 의 강한 블러(σ=3)에서 피크가 0.15 이하로
+        # 무너져 사라지므로, 보호 마스크는 **전용 가벼운 Canny**(낮은 임계 +
+        # σ=1 블러)로 직접 뽑는다. 큰 물체 윤곽과 얇은 선은 둘 다 좁은 고리라
+        # 윤곽만 봐선 구분이 안 되므로, 아래 "둘러싼 내부 면적" 검사로 나눈다.
+        _e = cv2.Canny(gray, 30, 100)
+        _e = (_e.astype(_np.float32) / 255.0)
+        _e = cv2.GaussianBlur(_e, (0, 0), 1.0)
+        edges = (_e > 0.15).astype(_np.uint8)
+        if exclude_person and _person_mask_fn is not None:
+            try:
+                P = _person_mask_fn(rgb)
+                if P is not None:
+                    Pa = _np.asarray(P, _np.float32)
+                    if Pa.ndim == 3:
+                        Pa = Pa[:, :, 0]
+                    if Pa.shape == (H, W):
+                        edges = edges & (_np.clip(Pa, 0.0, 1.0) < 0.3).astype(_np.uint8)
+            except Exception:
+                pass
+        if float(edges.sum()) < 5:
+            return None
+        # 큰 물체 윤곽 제거: 외부 배경을 홍수채우기(floodFill)로 표시하고,
+        # 외부에서 닿지 않는 둘러싸인 내부가 큰 connected component 만
+        # "큰 물체" 로 본다. 그 윤곽(edges)은 얇은 구조가 아니므로 지운다.
+        inv = (edges == 0).astype(_np.uint8)
+        if inv[0, 0] == 1:  # (0,0) 이 배경이어야 채우기 시작 가능
+            _fm = _np.zeros((H + 2, W + 2), _np.uint8)
+            # floodFill 은 src(inv) 에 외부 배경을 **새 값**으로 직접 채운다
+            # (mask 는 채우기 제한용). 새 값을 시드 값(1)과 같게 주면 아무
+            # 일도 일어나지 않아 inv 전체가 그대로 남고, ext 가 배경 전부가
+            # 되어 interior 가 빈 마스크가 된다 — 이 블록이 통째로 no-op
+            # 이었던 결함을 고친다 (2026-10-16 오딧: 큰 물체 윤곽이
+            # thin_mask 에 그대로 남아 보호 마스크가 윤곽까지 지켰다).
+            cv2.floodFill(inv, _fm, (0, 0), 2)
+            ext = inv == 2                         # 외부에서 닿는 배경
+            interior = (~ext) & (edges == 0)     # 둘러싸인 내부(물체 내부)
+            _nlab, _lab, _stats, _ = cv2.connectedComponentsWithStats(
+                interior.astype(_np.uint8), 8)
+            _area_hi = _THIN_AREA_HI_FRAC * float(H * W)
+            _big = _np.zeros_like(edges)
+            for _L in range(1, _nlab):
+                if _stats[_L, cv2.CC_STAT_AREA] > _area_hi:
+                    _big = _big | (_lab == _L)
+            # 큰 물체와 인접(침식)한 윤곽만 지운다 — 세부 윤곽은 살린다.
+            edges = edges & (~cv2.dilate(
+                _big, _np.ones((3, 3), _np.uint8), iterations=1)
+                .astype(_np.uint8))
+        if float(edges.sum()) < 5:
+            return None
+        thin = edges.astype(_np.float32)
+        thin = cv2.GaussianBlur(thin, (0, 0), 1.5)
+        return thin.astype(_np.float32)
+    except Exception:
+        return None
 
 
 def _centroid(mask):

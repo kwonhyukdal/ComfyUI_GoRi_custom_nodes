@@ -10,7 +10,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clause", "build_clauses", "image_metrics", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning"
+"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clause", "_motion_clauses", "split_multi", "normalize_multi_value", "grade_clauses", "build_clauses", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning"
 ]
 
 
@@ -23,7 +23,17 @@ KEYWORDS = _load("keywords_ko_en.json", {})
 AUTO = "자동 (auto)"
 
 
-CUSTOM = "직접 설정 (custom)"
+CUSTOM = AUTO  # deprecated alias (backward compat); use AUTO
+
+
+# 옛 라벨 → 지금 라벨. 저장된 워크플로가 조용히 "자동" 으로 떨어지지 않게 한다.
+# 2026-10-18: speed 의 "빨름 (fast)" 는 오타였다 (바른 표기 "빠름").
+# 2026-10-19: grade 의 "시네마틱 필릭" 도 오타였다 — 영문 조항이
+#             "cinematic film grade" 이므로 한글은 "필름" 이 맞다.
+_LABEL_ALIASES = {
+    "빨름 (fast)": "빠름 (fast)",
+    "시네마틱 필릭 (cinematic)": "시네마틱 필름 (cinematic)",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +156,7 @@ LIGHTING = {
 
 
 GRADE = {
-    "시네마틱 필릭 (cinematic)": "cinematic film grade, rich contrast, subtle grain",
+    "시네마틱 필름 (cinematic)": "cinematic film grade, rich contrast, subtle grain",
     "비비드 포스터 (vivid)": "vivid poster-grade color, deep blacks, punchy highlights",
     "절제된 프리미엄 (premium)": "restrained premium grade, muted tones",
     "틸-오렌지 (teal & orange)": "teal-and-orange color grade",
@@ -182,7 +192,7 @@ MOTION = {
 }
 
 
-SPEED = {"느림 (slow)": "slow", "보통 (normal)": "", "빨름 (fast)": "fast"}
+SPEED = {"느림 (slow)": "slow", "보통 (normal)": "", "빠름 (fast)": "fast"}
 
 
 AMPLITUDE = {"약간 (subtle)": "subtle", "보통 (normal)": "", "강하게 (dramatic)": "dramatic"}
@@ -206,8 +216,9 @@ _TABLES = {
 }
 
 
+# preset 위젯 목록 — 자동 + 프리셋 키들 + 직접 설정
 def preset_names() -> list:
-    return [AUTO] + list(PRESETS.keys()) + [CUSTOM]
+    return [AUTO] + list(PRESETS.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +237,11 @@ def image_metrics(image) -> dict:
     try:
         import torch as _t
         import numpy as _np
-        px = image[0] if isinstance(image, _t.Tensor) else image
+        # 3D 텐서(H,W,C)를 image[0] 으로 자르면 (W,C) 가 되어 채널이 사라진다 —
+        # 2026-10-16 오딧 실측: 3D torch 텐서 입력에서 메트릭 4개가 전부 비었다
+        # ({}). 배치 축이 있을 때(4D)만 첫 장을 꺼낸다.
+        px = (image[0] if isinstance(image, _t.Tensor) and image.ndim == 4
+              else image)
         px = px.detach().cpu() if hasattr(px, "detach") else px
         # 한 번만 float32 배열로 바꾼다. 예전엔 채널마다 asarray 를 따로
         # 불렀는데(3회) 같은 이미지를 세 번 변환했다. 4K 참조 이미지는
@@ -270,6 +285,98 @@ def image_metrics(image) -> dict:
     except Exception:
         return out
     return out
+
+
+# 참조 사물 대표색 이름표 (2026-10-16). 참조 이미지에서 읽은 색을 프롬프트
+# 단어로 바꾼다.
+# 왜(Why) 굵은 가족 단위인가: 모델은 hex/RGB 를 이해하지 못하고, 세분 팔레트는
+# 경계에서 오판한다 — 의자 참조 실측 크림 (197,191,177) 이 "beige"(거리 22)와
+# "light gray"(25) 사이였다. 실제 실패는 "크림이 흰색으로 표백됐다" 수준이라
+# 가족 단위로 충분하다.
+_OBJECT_COLOR_PALETTE = (
+    ("white",       246, 246, 246),
+    ("ivory",       236, 230, 212),
+    ("cream",       224, 210, 186),
+    ("beige",       205, 190, 165),
+    ("tan",         190, 160, 120),
+    ("brown",       130,  95,  62),
+    ("dark brown",   82,  58,  40),
+    ("light gray",  198, 198, 200),
+    ("gray",        150, 150, 152),
+    ("dark gray",    95,  95,  98),
+    ("black",        32,  32,  34),
+    ("red",         186,  52,  48),
+    ("pink",        228, 172, 180),
+    ("orange",      224, 138,  58),
+    ("yellow",      222, 202,  92),
+    ("olive",       128, 128,  72),
+    ("green",        80, 138,  80),
+    ("dark green",   46,  84,  56),
+    ("teal",         68, 138, 138),
+    ("blue",         70, 110, 188),
+    ("navy",         42,  56, 100),
+    ("purple",      118,  84, 158),
+    ("burgundy",    118,  40,  56),
+)
+
+
+def object_color_name(image) -> str:
+    """참조 1장 → 사물 대표색 이름. 실패 시 "" (노드는 계속 동작).
+
+    왜(Why) 이 규칙인가 (2026-10-16 실측): 의자 참조에서 밝기 150~225 ·
+    채도 <45 인 픽셀만 고르면 RGB(197,191,177) 이 나왔고, 같은 이미지에서 손으로
+    잰 의자 등받이 (202.7,197.3,183.3) 과 사실상 같다. 흰 벽(밝기>225)과 어두운
+    그림자(<150)가 함께 빠진다.
+
+    고른 픽셀이 8% 미만이면(어두운 사물 등) 중앙 60% 의 중앙값으로 폴백한다 —
+    임계가 안 맞아 "" 를 내면 방어가 조용히 사라진다. 그래도 못 읽으면 "" 다.
+    """
+    try:
+        import numpy as _np
+        arr = image
+        if getattr(arr, "ndim", 0) == 4:
+            arr = arr[0]
+        if hasattr(arr, "detach"):
+            arr = arr.detach().cpu()
+        arr = arr.numpy() if hasattr(arr, "numpy") else _np.asarray(arr)
+        arr = _np.asarray(arr, dtype=_np.float32)
+        if arr.ndim != 3 or arr.shape[-1] < 3:
+            return ""
+        arr = arr[..., :3]
+        # 입력이 0~1 텐서인지 0~255 배열인지 여기서 한 번만 정한다.
+        if float(arr.max()) <= 1.5:
+            arr = arr * 255.0
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        if h <= 0 or w <= 0:
+            return ""
+        # 64x64 블록 평균. PIL 을 쓰지 않는다 — 이 모듈은 numpy 만 쓴다.
+        gh, gw = min(64, h), min(64, w)
+        bh, bw = max(1, h // gh), max(1, w // gw)
+        small = arr[:gh * bh, :gw * bw].reshape(gh, bh, gw, bw, 3).mean(
+            axis=(1, 3))
+        flat = small.reshape(-1, 3)
+        if not _np.isfinite(flat).all():
+            return ""
+        bright = flat.mean(axis=1)
+        sat = flat.max(axis=1) - flat.min(axis=1)
+        m = (bright > 150.0) & (bright < 225.0) & (sat < 45.0)
+        if int(m.sum()) >= max(8, flat.shape[0] // 12):
+            col = flat[m].mean(axis=0)
+        else:
+            y0, y1 = int(gh * .2), max(int(gh * .8), int(gh * .2) + 1)
+            x0, x1 = int(gw * .2), max(int(gw * .8), int(gw * .2) + 1)
+            col = _np.median(small[y0:y1, x0:x1].reshape(-1, 3), axis=0)
+        r, g, b = (float(v) for v in col)
+        if not _np.isfinite([r, g, b]).all():
+            return ""
+        best, bd = "", None
+        for nm, pr, pg, pb in _OBJECT_COLOR_PALETTE:
+            d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2
+            if bd is None or d < bd:
+                best, bd = nm, d
+        return best
+    except Exception:
+        return ""
 
 
 def _reference_lighting_flow(image):
@@ -446,35 +553,102 @@ def resolve_rules_camera(topic: str, metrics: dict, fixed_cam, locked: set):
 # 조립 — 카메라 dict → 영문 조항 (혔스필드 하우스 블록 순서를 따름)
 # ---------------------------------------------------------------------------
 
-def _motion_clause(cam: dict, key: str) -> str:
-    """무빙 1개 분량의 영문 조항. 없음·빈값이면 "" (복합 무빙 공용)."""
-    label = cam.get(key, "")
-    text = MOTION.get(label, "")
-    if not text:
+def split_multi(val) -> list:
+    """위젯 값 -> 라벨 리스트. 드롭다운의 다중 선택(콤마 구분)을 지원한다.
+
+    '자동 (auto)'/빈값/None 은 [] (선택 없음). 단일 라벨은 [라벨].
+    왜(Why) 콤마인가: ComfyUI 위젯은 문자열 하나만 담는다. 드롭다운이 다중
+    선택을 내려면 한 문자열에 담아야 하므로 콤마로 구분한다.
+    """
+    if not val:
+        return []
+    return [v.strip() for v in str(val).split(",")
+            if v.strip() and v.strip() != AUTO]
+
+
+def normalize_multi_value(val, table) -> str:
+    """위젯 값이 전부 유효 라벨이면 정규화한 콤마 문자열, 아니면 "".
+
+    유효하지 않은 라벨이 하나라도 섞이면 그 기능 전체를 고정하지 않는다
+    (규칙/LLM 판정을 막지 않기 위해). 중복은 순서를 유지하며 제거한다.
+
+    옛 라벨은 _LABEL_ALIASES 로 먼저 바꾼다. 왜(Why): 라벨 오타를 고치면
+    그 값으로 저장된 워크플로가 조용히 "자동" 으로 떨어져 사용자가 고른
+    속도가 사라진다 (2026-10-18 speed 라벨 수정).
+    """
+    vals = split_multi(val)
+    if not vals:
         return ""
-    if label == "정지 (static)":
-        return text
-    bits = [AMPLITUDE.get(cam.get("amplitude"), ""),
-            SPEED.get(cam.get("speed"), ""), text]
-    return " ".join(b for b in bits if b) + " camera movement"
+    vals = [_LABEL_ALIASES.get(v, v) for v in vals]
+    if any(v not in table for v in vals):
+        return ""
+    seen, out = set(), []
+    for v in vals:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return ",".join(out)
 
 
+def _motion_clauses(cam: dict, key: str) -> list:
+    """무빙 슬롯의 영문 조항 목록. 다중 선택이면 각 값의 조항을 순서대로.
+
+    speed/amplitude 는 무빙과 조합되는 보조값이라 첫 값만 쓴다 (다중 선택해도
+    한 무빙에 붙는 수식은 하나여야 문장이 성립한다).
+    """
+    speed = (split_multi(cam.get("speed")) or [""])[0]
+    amp = (split_multi(cam.get("amplitude")) or [""])[0]
+    out = []
+    for label in split_multi(cam.get(key)):
+        text = MOTION.get(label, "")
+        if not text:
+            continue
+        if label == "정지 (static)":
+            out.append(text)
+            continue
+        bits = [AMPLITUDE.get(amp, ""), SPEED.get(speed, ""), text]
+        out.append(" ".join(b for b in bits if b) + " camera movement")
+    return out
+
+
+def _motion_clause(cam: dict, key: str) -> str:
+    """무빙 1개 분량의 영문 조항 (첫 값). 없음·빈값이면 "" (구 호출 호환)."""
+    clauses = _motion_clauses(cam, key)
+    return clauses[0] if clauses else ""
+
+
+def _label_clauses(cam: dict, key: str, table: dict) -> list:
+    """라벨 테이블 슬롯의 영문 조항 목록. 다중 선택이면 모두."""
+    return [table.get(v, "") for v in split_multi(cam.get(key))]
+
+
+# 카메라 dict → 영문 절 목록 (샷/렌즈/앵글/구도/조명/무브), 중복 문구 제거
 def build_clauses(cam: dict) -> list:
-    parts = [
-        SHOT.get(cam.get("shot"), ""),
-        LENS.get(cam.get("lens"), ""),
-        ANGLE.get(cam.get("angle"), ""),
-        COMPOSITION.get(cam.get("composition"), ""),
-        LIGHTING.get(cam.get("lighting"), ""),
-        _motion_clause(cam, "motion"),
-        _motion_clause(cam, "motion2"),
-    ]
-    # 동일 문구 중복 제거 (예: motion/motion2 둘 다 정지).
+    parts = []
+    parts.extend(_label_clauses(cam, "shot", SHOT))
+    parts.extend(_label_clauses(cam, "lens", LENS))
+    parts.extend(_label_clauses(cam, "angle", ANGLE))
+    parts.extend(_label_clauses(cam, "composition", COMPOSITION))
+    parts.extend(_label_clauses(cam, "lighting", LIGHTING))
+    parts.extend(_motion_clauses(cam, "motion"))
+    parts.extend(_motion_clauses(cam, "motion2"))
+    # 동일 문구 중복 제거 (예: motion/motion2 둘 다 정지, 다중 선택의 중복).
     out = []
     for p in parts:
         if p and p not in out:
             out.append(p)
     return out
+
+
+def grade_clauses(cam: dict) -> str:
+    """그레이드 조항 문자열. 다중 선택이면 콤마로 이어 붙인다.
+
+    왜(Why) build_clauses 와 분리하나: 그레이드는 조항 순서가 아니라 마지막
+    색맛 문장으로 따로 붙는 자리가 두 곳(assemble · build_camera_conditioning)
+    이라, 다중 지원을 한 함수에 모아 둔다.
+    """
+    return ", ".join(
+        g for g in (GRADE.get(v, "") for v in split_multi(cam.get("grade"))) if g)
 
 
 def build_camera_conditioning(cam: dict) -> str:
@@ -484,5 +658,5 @@ def build_camera_conditioning(cam: dict) -> str:
     quality guard text. The public conditioning path combines it with an
     upstream prompt string before a single final CLIP encode.
     """
-    parts = [", ".join(build_clauses(cam)), GRADE.get(cam.get("grade"), "")]
+    parts = [", ".join(build_clauses(cam)), grade_clauses(cam)]
     return ". ".join(part for part in parts if part) + "."

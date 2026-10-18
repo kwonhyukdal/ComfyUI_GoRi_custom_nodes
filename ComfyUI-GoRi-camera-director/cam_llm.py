@@ -43,8 +43,11 @@ PROVIDER_DEFAULT_MODELS = {
 }
 
 
+# ft: = 파인튜닝 모델 접두사, o1~o4 = OpenAI 추론 계열 (2026-10-16 오딧):
+# 실측에서 "o4-mini"·"ft:gpt-4o-mini:..." 가 접두사 불일치로 조용히
+# gpt-4o-mini 로 교체됐다 — 사용자가 고른 모델이 무시된다.
 _MODEL_PREFIX = {
-    "OpenAI": ("gpt", "o1", "o3", "chatgpt"),
+    "OpenAI": ("gpt", "o1", "o2", "o3", "o4", "chatgpt", "ft:"),
     "Anthropic": ("claude",),
     "Gemini": ("gemini-",),
 }
@@ -300,6 +303,7 @@ def _warn_scrub_unavailable(api_key, prompt, unique_id,
         pass
 
 
+# 같은 tag 의 메타데이터 scrub 실패 경고를 프로세스당 1회만 (로그 스팸 방지)
 def _scrub_warn_once(tag, reason) -> None:
     if tag in _SCRUB_WARNED:
         return
@@ -443,6 +447,7 @@ except Exception:
 # LLM tier — 시스템 프롬프트 (허용 라벨을 그대로 전달해 JSON 규격을 강제)
 # ---------------------------------------------------------------------------
 
+# LLM 시스템 프롬프트 — 허용 라벨 목록과 JSON 출력 규격을 담는다
 def llm_system() -> str:
     allowed = {k: list(v) for k, v in _TABLES.items()}
     allowed.setdefault("speed", list(SPEED))
@@ -455,7 +460,13 @@ def llm_system() -> str:
         ' "motion": "<label>", "motion2": "<label>", "speed": "<label>", "amplitude": "<label>"},'
         ' "negative": "<optional extra English negative phrases>",'
         ' "anatomy": "<ONLY if you see wrong limb counts in the attached image(s):'
-        ' e.g. three feet, extra hand, six fingers, missing leg. Otherwise OMIT this key>"}\n'
+        ' e.g. three feet, extra hand, six fingers, missing leg. Otherwise OMIT this key>",'
+        ' "references": [{"slot": <image number>, "role":'
+        ' "person|outfit|object|background|style|pose"}],'
+        ' "sheet_kind": "<ONLY when one of the attached images is a character'
+        ' sheet (one panel per view): "single" if every panel shows the SAME'
+        ' person, "multi" if the panels show DIFFERENT characters. Omit this key'
+        ' when no character sheet is attached>"}\n'
         "Rules:\n"
         "- Every camera value MUST be copied EXACTLY from the allowed labels below "
         "(or \"자동 (auto)\" when unsure).\n"
@@ -463,6 +474,15 @@ def llm_system() -> str:
         "inside the image (sign/caption), keep it verbatim in double quotes and add "
         "'on-image text' to negative only if the model cannot render it.\n"
         "- Keep the topic's intent; do not invent facts.\n"
+        "- references: one entry per attached image, using the slot number printed "
+        "in the user message. role = what the image is FOR: person (a human), "
+        "outfit (a garment to put on a person), object (prop/product/furniture), "
+        "background (environment), style (mood/palette/lighting only), pose (a "
+        "body pose to copy). Leave the list empty when unsure — never guess.\n"
+        "- sheet_kind: only when a character sheet is attached. Judge from the "
+        "faces, hair and outfits you actually see: same person repeated = "
+        "\"single\", different people = \"multi\". When unsure, omit the key — "
+        "a wrong guess flips a lineup into \"everyone is one person\".\n"
         "- Outfit handling (priority order):\n"
         "  1. If the topic or user directives EXPLICITLY request an outfit change "
         "and a clothing reference image is provided: describe the garment "
@@ -484,6 +504,7 @@ def llm_system() -> str:
     )
 
 
+# LLM 사용자 메시지 — topic 문장 + 사용자가 고정한 카메라 라벨(있으면)을 붙인다
 def llm_user(topic: str, forced_camera: dict | None) -> str:
     msg = f"Topic: {topic.strip() or '(no topic text — judge from the attached image(s))'}"
     if forced_camera:
@@ -522,7 +543,9 @@ def scene_camera_mismatch(scene: str, camera: dict) -> str | None:
     topic_shot_label과 동일 최장 일치 기준을 쓴다 — 경고 기준과 샷 확정 기준이
     어긋나면 "경고만 뜨고 모순은 그대로"가 되기 때문이다.
     """
-    other = _longest_shot_label(scene, exclude=camera.get("shot") or "")
+    # shot 이 다중 선택(콤마 구분)일 수 있다 — 첫 값을 기준으로 어긋남을 본다.
+    shot_val = (split_multi(camera.get("shot")) or [""])[0]
+    other = _longest_shot_label(scene, exclude=shot_val)
     if other:
         final_shot = camera.get("shot")
         return (f"장면 문장에 '{other}' 표현이 있는데 최종 shot은 "
