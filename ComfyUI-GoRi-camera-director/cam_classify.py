@@ -36,7 +36,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = ["KIND_PERSON", "KIND_ITEM", "KIND_UNKNOWN", "classify_reference",
-           "classify_references", "person_slots", "classifier_status",
+           "classify_references", "person_slots",
            "clear_classify_cache"]
 
 KIND_PERSON = "person"
@@ -122,15 +122,6 @@ def _landmarker():
             _note_once("classify_fail", "[Camera Director] " + _LOAD_NOTE)
             _LANDMARKER = None
         return _LANDMARKER
-
-
-def classifier_status() -> str:
-    """분류기 상태 문자열 (로그·테스트용)."""
-    if not _LOAD_TRIED:
-        return "unloaded"
-    if _LANDMARKER is None:
-        return _LOAD_NOTE or "off"
-    return "on"
 
 
 def _u8_rgb(image):

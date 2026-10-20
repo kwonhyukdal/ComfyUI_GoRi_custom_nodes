@@ -2,14 +2,13 @@
 
 > ☕ 도움이 됐다면 커피 한 잔: [PayPal로 후원하기](https://paypal.me/GoRi57788)
 
-GoRi 제작 ComfyUI 커스텀 노드 통합 배포 저장소입니다.
+GoRi 제작 ComfyUI 커스텀 노드 배포 저장소입니다.
 
 ## 포함된 노드
 
 | 노드 | 설명 | 설치 폴더 |
 |---|---|---|
-| [GoRi Camera Director](./GoRi-Camera-Director) | 주제(한글 OK) + 레퍼런스 이미지 → 카메라 연출이 포함된 영문 프롬프트·conditioning 출력 — **Qwen-Image 2.1 완전 지원**, KREA 2·MiniMax H3 프롬프트로도 활용 가능 | `GoRi-Camera-Director/` |
-| [GoRi Consistency Keeper](./GoRi-Consistency-Keeper) | 샘플러가 뽑은 latent를 원본·카메라 기준 latent 쪽으로 당겨 신원·구도 틀어짐을 줄이는 2차 패스 — 재인코딩·재샘플링 없음 | `GoRi-Consistency-Keeper/` |
+| [GoRi Camera Director](./ComfyUI-GoRi-camera-director) | 주제(한글 OK) + 레퍼런스 이미지 → 카메라 연출이 포함된 영문 프롬프트·conditioning 출력 — **Qwen-Image 2.1 완전 지원**, KREA 2·MiniMax H3 프롬프트로도 활용 가능 | `ComfyUI-GoRi-camera-director/` |
 
 ## 설치 방법
 
@@ -24,10 +23,10 @@ ComfyUI/custom_nodes/ComfyUI_GoRi_custom_nodes/
 
 원하는 노드 폴더만 골라 복사해도 각 폴더의 `__init__.py`가 직접 로드됩니다.
 ```
-ComfyUI/custom_nodes/GoRi-Consistency-Keeper/
+ComfyUI/custom_nodes/ComfyUI-GoRi-camera-director/
 ```
 
-설치 후 ComfyUI를 재시작합니다. 노드 검색에서 `(GoRi)` 접두어로 찾을 수 있습니다. 자세한 사용법은 각 노드 폴더의 README를 참고하세요.
+설치 후 ComfyUI를 재시작합니다. 노드 검색에서 `(GoRi)` 접두어로 찾을 수 있습니다. 자세한 사용법은 노드 폴더의 README를 참고하세요.
 
 > 방법 B로 단독 복사 시 통합 루트 로더는 사용되지 않습니다. 전체 복사(방법 A)와
 > 단독 복사(방법 B) 어느 쪽이든 두 방식은 서로 충돌하지 않습니다.
@@ -40,16 +39,14 @@ ComfyUI/custom_nodes/GoRi-Consistency-Keeper/
 |---|---|---|---|
 | ComfyUI 실행 | ✅ | ✅ | ✅ |
 | Camera Director | ✅ | ✅ | ✅ |
-| Consistency Keeper | ✅ | ✅ | ✅ |
 | API 키 `.env` 저장 | ✅ | ✅ (권한 600) | ✅ (권한 600) |
 
 - 외부 pip 패키지 없이 실행됩니다. `torch`·`numpy`·`PIL`은 ComfyUI가 이미
   가지고 있는 것만 사용합니다.
-- macOS Apple Silicon(M1/M2/M3)은 `mediapipe` 휠이 없어 **인체 마스크와
-  포즈 기반 기능이 자동으로 꺼집니다.** 나머지 기능(참조 이미지 픽셀 분석,
-  조명·공간 흐름, 부위별 에지 대조, 캐릭터 시트 패널 검출)은 전부
-  `torch`/`numpy`만 써서 **그대로 동작**합니다. 조용히 꺼질 뿐 실패하지
-  않습니다.
+- macOS Apple Silicon(M1/M2/M3)은 `mediapipe` 휠이 없어 **참조 자동 분류(포즈
+  기반)가 자동으로 꺼집니다.** 나머지 기능(참조 이미지 픽셀 분석, 조명·공간
+  흐름, 캐릭터 시트 패널 검출)은 전부 `torch`/`numpy`만 써서 **그대로
+  동작**합니다. 조용히 꺼질 뿐 실패하지 않습니다.
 - 경로 처리는 전부 `os.path` 기반이라 Windows 백슬래시와 macOS/Linux 슬래시
   모두에서 동일하게 동작합니다. 심볼릭 링크로 설치한 경우도 지원합니다.
 - GPU는 CUDA(NVIDIA)·MPS(Apple Silicon)·CPU 모두에서 실행됩니다.

@@ -40,6 +40,7 @@ ComfyUI already ships.
 Final model CLIP ─────────────────────────→ clip
 Qwen prompt rewriter ──── positive_prompt → prompt_in
 Reference photo ──────────────────────────→ image_1
+Pose map (DWPreprocessor, body only) ─────→ pose_image   (optional)
 Final model VAE ──────────────────────────→ vae          (optional)
 High-resolution latent node ──────────────→ latent_image (optional)
 Existing negative conditioning ───────────→ negative     (optional)
@@ -74,6 +75,12 @@ You do not need `prompt_in`; the node builds the prompt from `topic` itself.
 | `prompt_out` | STRING | Show Text, another prompt node | The exact English string used. Copy it into KREA 2 or similar |
 | `image_out` | IMAGE | I2V start frame, upscale | Passes the main reference image through. Empty when no image is connected |
 | `reference_latent_out` | LATENT | Consistency Keeper, VAE Decode | Latent of the main reference. Requires `vae` |
+
+> **A sheet image is also dropped from `image_out` and `reference_latent_out`.**
+> Even if a character sheet becomes the main reference, the outputs carry a
+> non-sheet reference instead. Passing the sheet through would make downstream
+> nodes (I2V, upscale, Keeper) draw a multi-panel sheet. If the sheet is the
+> only connected reference, both outputs are empty.
 
 Connecting `prompt_out` to the Consistency Keeper's `camera_prompt` tells the
 keeper about intent such as "change the outfit" or "change the background".
@@ -117,16 +124,18 @@ Choosing `자동 (auto)` clears them back to auto.
 | Preset | Feel |
 |---|---|
 | `자동 (auto)` | Rules or AI decide (default) |
-| `시네마틱 인물 (cinematic portrait)` | Neutral portrait baseline |
-| `제품 히어로 (product hero)` | Stable product baseline |
-| `CF 버티컬 (vertical ad)` | Vertical ad baseline |
-| `다큐 핸드헬드 (doc handheld)` | On-location baseline |
-| `드라마틱 롱샷 (dramatic long shot)` | Wide, low angle, low key, slow push-in |
+| `시네마틱 인물 (cinematic portrait)` | Standard portrait recipe — 85mm, medium close-up, Rembrandt light, cinematic grade |
+| `제품 히어로 (product hero)` | Sharp product shot — 100mm macro, centered, three-point studio |
+| `CF 버티컬 (vertical ad)` | Vertical ad — medium close-up, centered, vivid grade |
+| `다큐 핸드헬드 (doc handheld)` | Documentary look — 35mm, soft overcast, premium grade |
+| `드라마틱 롱샷 (dramatic long shot)` | Wide, low angle, low key, strong contrast |
 
-> **In the current version the first four presets (cinematic portrait, product
-> hero, vertical ad, doc handheld) hold the same values as the standard
-> defaults.** Choosing them changes little on screen — that is expected. Only
-> `dramatic long shot` differs. To change preset values, see section 10.
+> **All five presets are unique.** Choosing any of them visibly changes the output.
+> To customize preset values, see section 10.
+>
+> **Presets carry no camera movement (`motion`).** Movement only applies to video
+> pipelines, so selecting a preset leaves `motion` and `motion2` at `none`. To
+> direct movement, pick it in the `motion` field yourself.
 
 ### 4-3. automation — who picks the camera
 
@@ -148,10 +157,14 @@ automatically**. A run never fails because of this.
 | `composition` | Placement in frame | 8 (rule of thirds, centered, leading lines…) |
 | `lighting` | Quality of light | 10 (window light, golden hour, Rembrandt, low key…) |
 | `grade` | Color treatment | 8 (cinematic film, vivid, noir…) |
-| `motion` | Camera movement | 21 (push-in, pan, orbit, handheld…) |
+| `motion` | Camera movement (video only) | 21 (push-in, pan, orbit, handheld…) |
 | `speed` | Movement speed | slow / normal / fast |
 | `amplitude` | Movement strength | subtle / normal / dramatic |
-| `motion2` | A second movement | Same 21 as `motion` |
+| `motion2` | A second movement (video only) | Same 21 as `motion` |
+
+> On screen, `motion` and `motion2` show as **`motion (only video)`** — the name
+> carries an `(only video)` suffix. Movement only applies to video pipelines and
+> is ignored for still images.
 
 **Multiple selection** — click a dropdown and a list opens with a toggle on each
 row. Turn on several and **all** of those clauses go into the prompt. The widget
@@ -186,16 +199,15 @@ and leave neon on.
 ### 4-5. AI LLM settings (collapsed)
 
 A new node starts with a collapsed **`AI LLM 설정`** (AI LLM settings) row.
-Click it to expand six fields. The folded state is saved in the workflow, so it
+Click it to expand five fields. The folded state is saved in the workflow, so it
 stays the way you left it.
 
 | Field | Description |
 |---|---|
-| `provider` | OpenAI · Anthropic · Gemini · OpenRouter · Groq · DeepSeek · Mistral · Ollama · LM Studio · Custom |
+| `provider` | [OI] · Anthropic · Gemini · OpenRouter · Groq · DeepSeek · Mistral · Ollama · LM Studio · Custom |
 | `model` | Model name. Empty uses the provider default |
 | `api_key` | Key. If empty, `.env` and environment variables are checked |
-| `custom_base_url` | Only for `Custom (OpenAI compatible)` |
-| `extra_negative` | Extra text appended to the negative |
+| `custom_base_url` | Only for `Custom ([OI] compatible)` |
 | `vision_detail` | Image size sent to the LLM: `선명 (768)` / `균형 (512)` / `절약 (384)` |
 
 Running with `AI 판단 (llm)` makes the `model` field **blink green**. Local LLMs
@@ -262,6 +274,42 @@ label. That choice is then verified against pixels, so it only applies to slots
 where a person was actually detected (guards against false positives). If you
 write `image 2 is pose only` yourself, **your instruction always wins**.
 
+#### Pointing at a pose with a map image (`pose_image`)
+
+Connect a stick-figure map to the `pose_image` socket and the node reads that
+pose and adds it to the prompt. It reads three states: **sitting, standing and
+lying**.
+
+1. Add a pose extraction node such as `DWPreprocessor`.
+2. Turn **hand and face drawing off** so only the body is drawn.
+3. Connect the result (coloured skeleton on black) to `pose_image`.
+
+- A pose map is **not** a reference photo. It does not affect the reference
+  count, face or outfit judgment.
+- A map that also draws hands and face has overlapping dots and can be misread.
+  A body-only map is the most accurate. If the map cannot be read, nothing
+  happens and the topic description alone drives the pose.
+- You can still describe the pose in the topic. Both are used; neither erases
+  the other.
+- With nothing connected, the node behaves exactly as before.
+
+#### Changing the pose redraws the face
+
+When you ask for a pose (a topic word such as "sitting" or "walking", or a pose
+map), the model rebuilds the body and **redraws the face too**. The node then
+adds a face-lock phrase to the negative to steer it back to the reference
+person. It still will not be a perfect match.
+
+For shots where the face matters:
+
+- **Do not put pose wording in the topic.** If you only want to change the
+  background or props, leaving the topic empty is the safest choice.
+- **Use `중경 (MS)` or a closer shot** so the face gets enough pixels. `auto`
+  tends to frame the whole body and makes the face small.
+- If the face must be preserved, add a face-specific tool (a face detailer and
+  so on). The keeper only restores small drift within the same composition; it
+  cannot rebuild a face when the composition changes a lot.
+
 ### 5-3. Outfit replacement
 
 **The first number is the outfit source, the second is the person wearing it.**
@@ -275,6 +323,19 @@ apply image 2's outfit to image 1
 It understands outfit words such as outfit, clothes, dress, attire and uniform.
 A phrase like "the woman wearing the dress in image 2" is read as **a person**,
 not as an outfit source.
+
+**Describing a state is not the same as asking for a change.**
+
+| What you write | Interpretation |
+|---|---|
+| `the person in image 1 is wearing shoes` | State description → keep the reference shoes |
+| `wear black shoes` | Change request → switch to those shoes |
+| `change into white sneakers` | Change request (a colour or item means change) |
+| `put the outfit from image 2 on them` | Change request (a slot number means change) |
+
+In short, describing **what is happening** keeps the reference, while naming a
+**specific item, colour or material** — or telling it to `wear` / `put on` —
+switches to that outfit.
 
 ### 5-4. Two people
 
@@ -368,18 +429,29 @@ sheet: the same person from several angles gets "every view is the same person",
 a row of different characters gets "each panel is a different character". A topic
 word like `multiple characters` always wins over that judgment.
 
-> The sheet is sent **only to the LLM** (to read identity) and is removed from
-> the image model's reference latents. Qwen-Image follows the layout of a
-> reference image, so passing the sheet through would produce a multi-panel
-> output. This handling prevents that.
+> The sheet is sent **only to the LLM** (to read identity) and is dropped from
+> every path to the image model — not just the reference latents but also
+> `image_out` and `reference_latent_out` (the outputs feeding Keeper, I2V and
+> upscaling). Qwen-Image follows the layout of a reference image, so passing
+> the sheet through would produce a multi-panel output. This handling prevents
+> that.
 
 ### 5-7. Guards that attach automatically
 
 There is nothing to switch on. The node adds only what the situation needs.
 
 - **People**: finger and toe counts, limb separation, skin texture, face structure.
+- **Pose requests**: asking for a new pose makes the model redraw the face. A
+  face-lock phrase goes into the negative so it does not become someone else.
+- **Facing the camera**: wording such as `facing forward` or `looking at the
+  camera` keeps the head from turning away.
 - **With references**: part boundaries (legs, arms, shoulders do not smear),
   clothing that does not fuse into skin, faces that do not blend between references.
+- **Outfit colour**: a colour named in the topic is locked, and a different
+  colour is pushed back through the negative.
+- **Footwear**: the shoes from the reference person are preserved — colour,
+  silhouette, straps, heel height and material — and swapping to another style is
+  blocked. If you explicitly ask to change the shoes, that request wins.
 - **Object and furniture references**: shape, material, color and proportions kept
   from the original, including "similar but different furniture" swaps.
 - **Contact and action wording**: `pushed against`, `holding`, `throwing`,
@@ -462,8 +534,13 @@ GEMINI_API_KEY=...
 | Korean text inside the image is broken | The model cannot render Korean (Flux/SDXL). Use a Qwen-Image model or composite the text separately |
 | Two people appear | A single-character sheet was treated as a cast sheet. Write `character sheet` in the topic |
 | The output looks like a multi-panel sheet | A normal photo was detected as a sheet. Remove `character sheet` from the topic and describe the scene |
+| `image_out` / `reference_latent_out` is empty | Only a sheet image is connected. Sheets are dropped from all outputs, so connect one more reference besides the sheet |
 | The outfit from a reference is copied | Give that slot a role in the topic (`image 2 is background only`) |
 | People look smeared | Lower denoise (0.6-0.8) and raise resolution. Enter the value in `pf_denoise` to get a warning |
+| The face differs from the reference | Check whether the topic asks for a pose. Remove the pose sentence and use `중경 (MS)` or closer. If that is not enough, add a face-specific tool |
+| Shoe colour or style changes | A guard keeps the reference shoes. If it still changes, name the colour and style you want in the topic |
+| `pose_image` is connected but the pose does not change | A map that also draws hands and face can be misread. Connect a body-only map |
+| Changing the reference image does not change the result | A stale cache. Restart ComfyUI |
 | Skin looks like plastic | Remove `flawless`/`smooth` from the upstream prompt and use a grainy grade such as `cinematic film` or `35mm film` |
 | Emoji in the console show as `?` | A Windows console display issue. It does not affect the node |
 | A shared file contained an API key | Check whether it was an `Export (API)` file. See the exception in section 7 |

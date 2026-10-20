@@ -35,7 +35,7 @@ __all__ = [
 "QUALITY_GUARD", "QUALITY_GUARD_ANIMAL", "FACE_IDENTITY_GUARD", "SKIN_COLOR_GUARD", "NEGATIVE_ANATOMY_GUARD", "NEGATIVE_COLOR_CONTAMINATION_GUARD", "_NEGATIVE_BASE_COMMON", "OUTFIT_GUARD", "NUDITY_KEYWORDS", "NUDITY_PARTIAL_KEYWORDS", "_is_partial_exposure",
     "_is_nudity_request", "nudity_anatomy_guard", "coverage_guard",
     "EXPLICIT_COVER_KEYWORDS", "EXPLICIT_REVEAL_KEYWORDS",
-    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
+    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
     "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
     "GROUND_REF_NEGATIVE", "ground_reference_guard",
     "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio"
@@ -266,6 +266,18 @@ def _furniture_dna_guard(text: str, object_slots) -> str:
         return ""
     if not slots:
         return ""
+    # 배경 슬롯은 사물 DNA 대상이 아니다 (2026-10-19 사용자 제보). 배경은 장면
+    # 이라 객체 형태·접촉·방향을 강요하면 안 된다. _object_dna_slots 가 이미
+    # 배경 슬롯을 제외하지만, 호출자가 직접 넘기는 경우까지 막는다. **넘어온
+    # 사물 슬롯이 전부 배경이면** 문구를 내지 않는다(배경+진짜 가구가 섞인
+    # 경우엔 가구 문구를 유지한다 — 배경이 하나 있다고 가구 가드가 통째로
+    # 꺼지면 그 가구 DNA 가 사라진다).
+    try:
+        _bg = _background_role_slots(text or "")
+        if _bg and not (set(slots) - _bg):
+            return ""
+    except Exception:
+        pass
     t = (text or "").lower()
     # 왜(Why) 한국어는 경계 판정인가 (2026-10-07 라운드 2): raw `in` 이면
     # "블루스톤 테이블" 이 "톤" 으로 잡혀 분위기 전용 판정이 곳곳에서 발동한다.
@@ -401,6 +413,14 @@ def object_appearance_guard(text, slot_images, object_slots):
         return "", ""
     if not slots or not slot_images:
         return "", ""
+    # 배경 슬롯이 지정됐으면 외형·표면 고정도 끈다 (2026-10-19 사용자 제보).
+    # _furniture_dna_guard 와 **같은 판정**을 쓴다 — 두 곳이 갈라지면 한쪽만
+    # 발동해 배경에 표면 잠금이 남는다.
+    try:
+        if _background_role_slots(text or ""):
+            return "", ""
+    except Exception:
+        pass
     t = (text or "").lower()
     # 분위기 전용 지정이면 사물 외형을 요구하지 않는다. _furniture_dna_guard 의
     # 완화와 **같은 판정**을 쓴다 — 두 곳이 갈라지면 한쪽만 발동한다.
@@ -449,6 +469,14 @@ def _object_dna_slots(topic: str, image_labels, image_count: int) -> set:
                                        or list(range(1, image_count + 1)))]
         plan = _person_object_plan(topic or "", labels)
         excluded = {plan["main"]} | set(plan["persons"]) | set(plan["poses"])
+        # 배경 슬롯은 사물 DNA 대상이 **아니다** (2026-10-19 사용자 제보).
+        # 배경은 장면이지 가구·사물이 아니다 — "배경: 2번 이미지" 를 사물로
+        # 취급하면 contact lock·seat backs·orientation lock 이 나가 모델이
+        # 그 객체를 만들어낸다(실측: 생성물에 벽 턱·돌 의자). 완전 제외한다.
+        try:
+            excluded |= set(_background_role_slots(topic or ""))
+        except Exception:
+            pass
         return {x for x in labels if x not in excluded}
     except Exception:
         return set()
@@ -750,6 +778,31 @@ ANATOMY_COUNT_NEGATIVE = (
 )
 
 
+# 다리·발·종아리 무결성 positive (2026-10-21 사용자 실측). 왜(Why) positive 인가:
+# 이 워크플로의 KSampler 는 cfg=1.0 이라 ComfyUI 샘플러가 uncond_=None 으로 두고
+# **negative conditioning 을 계산조차 하지 않는다**(comfy/samplers.py 실측). 그래서
+# ANATOMY_COUNT_NEGATIVE 의 "extra feet/third leg" 는 이 워크플로에서 **전달되지
+# 않는다.** 사용자 제보(발 하나 더 생성·종아리 휨·손 이상)는 그 무효를 드러냈다.
+# cfg=1.0 에서 실효 방어는 positive 뿐이므로, 개수·형태를 positive 로 못박는다.
+#   - 발: 정확히 두 발, 발가락 5개, 추가·복제·갈라짐 없음 (앉은 자세에서 종아리
+#     ->발이 하나 더 생기는 경로를 정면으로 막는다)
+#   - 종아리: 곧고 자연스러운 형태, 무릎-발목 정렬, 휘거나 꺾이지 않음
+#   - 손: 손가락 경계 또렷, 뭉갬·융합 없음
+# 샷 인지: 얼굴·상반신(CU/ECU)은 다리·발이 화면에 없어 넣으면 없는 발을 그린다
+# (ANATOMY_COUNT_UPPER 와 같은 이유). 그래서 _limb_visible 일 때만 붙인다.
+LEG_FOOT_INTEGRITY_POSITIVE = (
+    "limb integrity: exactly two legs and exactly two feet in total, "
+    "one foot at the end of each leg, each foot complete with five toes; "
+    "no third foot, no extra foot, no duplicated or cloned leg, no foot "
+    "splitting from the calf, no limb growing from the shin; "
+    "each calf and shin is straight and naturally shaped with the knee and "
+    "ankle in line, not bent or kinked, natural calf muscle outline, "
+    "legs the correct length and not warped; "
+    "hands are fully formed with five distinct fingers on each hand, "
+    "finger boundaries clear, no fingers merged or blurred together"
+)
+
+
 # 얼굴·상반신 샷(극접 ECU / 근접 CU)용 개수 가드. 왜(Why) 다리를 빼나
 # (2026-10-11 실측): CU/ECU 는 다리·발이 화면에 없다. 그런데 전신 가드를
 # 그대로 넣으면 "두 다리·발가락 5개·다리 균형"을 요구해 모델이 **화면에
@@ -770,14 +823,14 @@ ANATOMY_COUNT_NEGATIVE_UPPER = (
 )
 
 
-# 화면비 인지형 다리 복제 에스컬레이션 (2026-10-16 실측).
-# 왜(Why): 13개 화면비 스윕(시드 42 고정, ratio_preset 만 변경)에서 종아리->발
-# 다리가 하나 더 생기는 버그가 16:9(1.78) 와 19:6(3.17) 에서만 재현됐다.
-# 16:10(1.6)·21:9(2.33) 은 같은 조건에서 클린. denoise=1.0 이라 참조가 픽셀로
-# 기여를 못 해 텍스트로만 전달되는데, 가로가 긴 프레임에서 모델이 빈 가로
-# 공간을 사지 복제로 채우는 잔여(denoise=1.0 한계)다. 풀바디 샷에서만, 위험
-# 비율일 때만 기존 ANATOMY_COUNT_NEGATIVE 위에 더 강한 "정확히 두 다리" 문구를
-# 한 번 더 얹는다(기존 negative 는 유지 — 짝이므로).
+# 화면비 인지형 다리 복제 에스컬레이션 (2026-10-16 실측, 2026-10-21 확장).
+# 왜(Why): 13개 가로 화면비 스윕(시드 42 고정)에서 종아리->발 다리가 하나 더
+# 생기는 버그가 16:9(1.78)·19:6(3.17) 에서 재현됐다. 2026-10-21 사용자 실측으로
+# 세로 프레임(848x1232 = 0.688)에서도 같은 버그가 확인됐다. denoise=1.0 이라
+# 참조가 픽셀로 기여를 못 해 텍스트로만 전달되는데, 긴 축의 빈 공간을 모델이
+# 사지 복제로 채우는 잔여(denoise=1.0 한계)다. 위험 비율일 때 기존
+# ANATOMY_COUNT_NEGATIVE 위에 더 강한 "정확히 두 다리" 문구를 한 번 더 얹는다
+# (기존 negative 는 유지 — 짝이므로). positive 짝은 LEG_FOOT_INTEGRITY_POSITIVE.
 ASPECT_LEG_DUPLICATION_NEGATIVE = (
     "exactly two legs total: one leg on the left and one leg on the right, "
     "each complete from hip to ankle with both feet present, separate and "
@@ -786,18 +839,26 @@ ASPECT_LEG_DUPLICATION_NEGATIVE = (
     "into two"
 )
 
-# 위험 비율 판정 (2026-10-16 스윕 기준). 스윕에서 버그가 난 비율만 모았다.
-# 16:9 ~= 1.7778, 19:6 ~= 3.1667. 16:10(1.6)·21:9(2.333) 은 클린으로 제외.
-_RISKY_ASPECT_RATIOS = (16.0 / 9.0, 19.0 / 6.0)
+# 위험 비율 판정. 2026-10-16 가로 스윕에서 16:9(1.7778)·19:6(3.1667) 이
+# 다리 복제를 냈다. 2026-10-21 사용자 실측: 세로 프레임(848x1232 = 0.688)에서도
+# 종아리->발 다리가 하나 더 생기고 종아리가 휘었다. 원인은 같은 잔여다 —
+# denoise=1.0 이라 참조가 픽셀로 기여하지 못하고, 긴 축의 빈 공간을 사지
+# 복제로 채운다. 그래서 **가로로 긴 비율과 세로로 긴 비율을 모두** 위험으로 본다
+# (정사각 근처는 제외 — 빈 공간이 적다).
+_RISKY_ASPECT_RATIOS = (16.0 / 9.0, 19.0 / 6.0)   # 가로로 긴 (2026-10-16)
+# 세로로 긴 비율의 하한/상한 (2026-10-21). 9:16 ≈ 0.5625, 3:4 = 0.75.
+# 이보다 좁으면(더 세로로 길면) 위험으로 본다.
+_PORTRAIT_RISKY_MAX = 0.80
 _ASPECT_RATIO_TOL = 0.05
 
 
 def _is_risky_aspect_ratio(aspect_ratio) -> bool:
     """출력 가로세로비가 실측으로 다리 복제 버그가 난 비율이면 True.
 
-    latent(또는 픽셀) 가로/세로를 받아 16:9·19:6 과 허용 오차 안에서 비교한다.
-    DenoResolutionSetup 이 divisible_by=32 로 반올림해도 오차는 수 % 이내라
-    tol=0.05 면 충분히 분리된다(다음 가까운 16:10=1.6 은 0.18 차이).
+    latent(또는 픽셀) 가로/세로를 받아 비교한다. 가로로 긴 비율(16:9·19:6)은
+    2026-10-16 스윕 실측이고, 세로로 긴 비율(0.80 이하)은 2026-10-21 사용자
+    실측(848x1232=0.688 에서 종아리에서 발이 하나 더 생김)이다. 둘 다
+    denoise=1.0 에서 긴 축 빈 공간을 사지 복제로 채우는 같은 잔여다.
     """
     try:
         r = float(aspect_ratio)
@@ -805,7 +866,9 @@ def _is_risky_aspect_ratio(aspect_ratio) -> bool:
         return False
     if r <= 0:
         return False
-    return any(abs(r - ref) <= _ASPECT_RATIO_TOL for ref in _RISKY_ASPECT_RATIOS)
+    if any(abs(r - ref) <= _ASPECT_RATIO_TOL for ref in _RISKY_ASPECT_RATIOS):
+        return True
+    return r <= _PORTRAIT_RISKY_MAX
 
 
 # 스케일 일관 샷 — 인물 전신·주변이 함께 보이는 샷에서만 사물 스케일 점검.
@@ -952,6 +1015,40 @@ def _ethnicity_guard(topic: str, image_count: int = 0,
 # 얼굴 클로즈업 샷 — latent가 작으면 얼굴 뭉개짐 확정이라 출발 점검 대상.
 FACE_CRITICAL_SHOTS = ("극접 (ECU)", "근접 (CU)")
 
+# 얼굴 정체성 negative (2026-10-20 실측). 왜(Why) 포즈 지시가 있을 때만
+# 켜나: 참조의 자세를 그대로 쓰는 실행(토픽에 포즈 없음)은 모델이 참조를
+# 거의 복사하므로 얼굴이 유지된다(실측 상관 0.953). 반대로 토픽이 자세를
+# 바꾸면 모델이 인물을 **새로 그려** 다른 사람이 된다(같은 조건에서 상관
+# 0.064). 이때 얼굴 변형을 negative 로 눌러 주면 눈·헤어·얼굴형이 참조로
+# 돌아온다(실측: 눈 가로/세로 2.829 -> 2.531, 원본 2.389, 상관 0.064 ->
+# 0.826). 항상 켜면 기존 결과가 전부 바뀌므로 **포즈 지시가 있을 때만** 켠다.
+FACE_IDENTITY_NEGATIVE = (
+    "different person, changed facial features, different eye shape, "
+    "different eyelids, different nose, different lips, face swap, "
+    "older face, younger face"
+)
+
+# 강한 포즈 상태 어휘만 쓴다. cam_subject 의 _KO_POSE_STATE 는 "손·팔·각도·
+# 위치" 처럼 흔한 단어까지 포함해 거의 모든 토픽에서 발동한다 — 그걸 쓰면
+# "항상 켜는" 것과 같아져 기존 결과를 흔든다.
+_POSE_STATE_STRONG = (
+    "앉", "서있", "서 있", "서서", "누워", "누운", "눕는", "쪼그", "엎드",
+    "일어서", "무릎 꿇", "기어", "뛰", "걷", "점프",
+    "sitting", "seated", "sit ", "standing", "stand ", "kneel", "lying",
+    "lie ", "crouch", "squat", "jump", "walk", "run ",
+)
+
+
+def _topic_requests_pose(topic) -> bool:
+    """토픽이 몸의 자세를 바꾸라고 지시하는가 (보수적 — 강한 어휘만)."""
+    try:
+        t = (topic or "").lower()
+        if not t:
+            return False
+        return any(w in t for w in _POSE_STATE_STRONG)
+    except Exception:
+        return False
+
 
 def _assemble_negative(cam, topic, image_count, image_labels, flags,
                        noir_phrase, extras=(), physics_neg="",
@@ -1046,6 +1143,12 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
         neg.append(GARMENT_BOUNDARY_NEGATIVE_UPPER if flags.get("garment_boundary_upper") else GARMENT_BOUNDARY_NEGATIVE)
     if _needs_scale_guard(topic or "", cam):
         neg.append(SCALE_COHERENCE_NEGATIVE)
+    # 얼굴 정체성 negative (2026-10-20). 포즈 지시가 있으면 모델이 인물을
+    # 새로 그려 얼굴이 바뀐다 — 그때만 켠다(위 상수 주석의 실측 참조).
+    # 사람이 없는 장면(사물·배경)에는 의미가 없으므로 인물 게이트를 건다.
+    if (image_count > 0 and _is_human_subject(topic or "")
+            and _topic_requests_pose(topic)):
+        neg.append(FACE_IDENTITY_NEGATIVE)
     if prevent_duplicates:
         neg.extend(["multiple people", "duplicate person", "cloned person",
                     "mirrored twin", "background person"])
@@ -1287,9 +1390,14 @@ BODY_BALANCE_NEGATIVE = ("disproportionate limbs, elongated arms, shortened legs
 # 신발 유지 가드. 왜(Why): 참조에 신발이 있어도 생성에서 맨발이 됐다.
 # PARTIAL_OBJECT_NEGATIVE 는 벗긴 뒤 반쪽 찌꺼기만 막고, 신발 존재 자체를
 # positive 로 지키는 문구가 없었다. 인물 + 참조 실행에만 붙는다.
-FOOTWEAR_POSITIVE = ("footwear presence guard: if the main person reference image shows shoes, "
-                     "boots, or any footwear on their feet, keep that footwear — same shoes "
-                     "visible on both feet, laces and soles intact, do not make the person barefoot")
+FOOTWEAR_POSITIVE = ("footwear identity lock: preserve the exact shoes from the main person reference image — "
+                     "same colour, same silhouette, same strap style and arrangement, same heel height, same material, "
+                     "same shoes on both feet, laces and soles intact, do not change the shoe colour, "
+                     "do not swap to a different shoe style, do not make the person barefoot, "
+                     "toes stay separate from the shoe: in open-toe shoes all five toes are "
+                     "bare, individually outlined and fully visible from tip to base, "
+                     "uniform bare skin across every toe, toes sit clear of the straps "
+                     "and are not tucked under the shoe upper")
 
 
 # 신발 교체 가드. 왜(Why) 별도 상수인가 (2026-10-15 실측): FOOTWEAR_POSITIVE 는
@@ -1302,12 +1410,22 @@ FOOTWEAR_POSITIVE = ("footwear presence guard: if the main person reference imag
 # (맨발·신발 소실)이 같고 "참조 신발 유지" 라는 지시가 없을 뿐이다.
 FOOTWEAR_CHANGE_POSITIVE = ("footwear change guard: the footwear described in the prompt takes "
                             "priority — wear exactly the described shoes on both feet, do not copy "
-                            "the reference image footwear, do not keep the reference shoes")
+                            "the reference image footwear, do not keep the reference shoes, "
+                            "toes stay separate from the shoe: in open-toe shoes all five toes "
+                            "are bare, individually outlined and fully visible from tip to "
+                            "base, uniform bare skin across every toe, toes sit clear of the "
+                            "straps and are not tucked under the shoe upper")
 
 
 FOOTWEAR_NEGATIVE = ("bare feet, barefoot, missing shoes, missing footwear, lost shoes, "
                      "invisible footwear, deformed footwear, melted shoes, feet without shoes, "
-                     "shoes disappearing, one shoe missing, half a shoe")
+                     "shoes disappearing, one shoe missing, half a shoe, "
+                     "shoes in a different colour, changed shoe colour, different shoe style, "
+                     "different heel, different straps, footwear swap, wrong shoe colour, "
+                     "toe covered by fabric, single toe wrapped in cloth, toe sock, "
+                     "rubber sleeve over one toe, fabric strap fused with a toe, "
+                     "toe merged into the shoe upper, big toe hidden by the shoe, "
+                     "extra fabric over the toes")
 
 
 # 얼굴·상반신 샷(극접 ECU / 근접 CU)용 신발 가드. 왜(Why) 다리 문구를 빼나:

@@ -1,11 +1,12 @@
 [project]
 name = "comfyui-gori-custom-nodes"
-description = "GoRi ComfyUI custom nodes — Camera Director (camera-aware prompts and conditioning for Qwen-Image 2.1) and Consistency Keeper (latent-space identity/geometry restoration pass)."
-version = "1.9.16"
+description = "GoRi ComfyUI custom nodes — Camera Director (camera-aware prompts and conditioning for Qwen-Image 2.1)."
+version = "1.9.17"
 license = {text = "MIT"}
 dependencies = []
-# 인체 마스크·포즈는 선택 의존성이라 기본 설치에 넣지 않는다. 없으면 그 기능들만
-# 조용히 꺼지고 나머지는 그대로 돈다(macOS Apple Silicon 에는 휠이 없다). 설치:
+# 포즈 모델(pose_landmarker_lite.task)은 참조 자동 분류(사람 찾기)에 쓰는
+# 선택 의존성이다. mediapipe 가 없으면 그 기능만 조용히 꺼지고 나머지는 그대로
+# 돈다(macOS Apple Silicon 에는 휠이 없다). 설치:
 #     pip install "comfyui-gori-custom-nodes[pose]"
 # bundled pose_landmarker_lite.task 는 mediapipe **tasks** API 용이다
 # (구 mediapipe.solutions 는 0.10.33 에서 제거됐다).
@@ -28,4 +29,4 @@ Repository = "https://github.com/kwonhyukdal/ComfyUI_GoRi_custom_nodes"
 PublisherId = "gori"
 DisplayName = "GoRi Custom Nodes"
 Icon = ""
-Tags = ["camera", "prompt", "qwen", "image-edit", "workflow", "latent", "consistency"]
+Tags = ["camera", "prompt", "qwen", "image-edit", "workflow", "latent"]

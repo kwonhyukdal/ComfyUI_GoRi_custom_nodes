@@ -46,9 +46,13 @@ def build_identity_anchor(image_count: int, topic: str, image_labels=None) -> st
     """Add a short human-reference identity anchor for text-only conditioning.
 
     This is intentionally narrower than the legacy guard: it does not modify
-    body proportions, anatomy, or negative conditioning. Skin realism is
-    included because plastic skin comes from photographic rendering, which
-    this camera node can direct.
+    anatomy or negative conditioning. Skin realism is included because plastic
+    skin comes from photographic rendering, which this camera node can direct.
+
+    2026-10-21: 'same body proportions, same overall color identity' 를
+    포함한다. 종전엔 이 앵커가 base run 의 reference_guard 보다 방어 폭이
+    좁아 Qwen prompt_in 경로에서 체형·색 일관성이 빠졌다(감사 발견). base
+    run 과 같은 문구를 넣어 두 경로의 신원 방어를 맞춘다.
 
     identity 소스는 역할 계획(plan)이 선출한 주 피사체로 둔다 -- 왜(Why):
     첫 연결이 사물(핸드백 등)이면 사물을 인물 identity 소스로 지목하는
@@ -60,7 +64,8 @@ def build_identity_anchor(image_count: int, topic: str, image_labels=None) -> st
     plan = _person_object_plan(topic, labels)
     first = str(plan["main"])
     head = (f"Use reference image {first} as the exact identity source for the main person. "
-            "Preserve the same facial identity and same facial structure, age, ethnicity, hairstyle")
+            "Preserve the same facial identity and same facial structure, age, ethnicity, hairstyle, "
+            "same body proportions, same overall color identity")
     tail = ("Render natural realistic skin texture with visible pores and fine detail, "
             "soft directional light, subtle film grain, no airbrushed smoothing.")
     # 왜(Why) 교체 감지면 의상 보존 문구를 바꾸나 (2026-10-13 실측): 종전에는

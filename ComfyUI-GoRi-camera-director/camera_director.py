@@ -27,7 +27,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.54"
+__version__ = "1.9.67"
 
 
 import json
@@ -368,6 +368,11 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         "anatomy_count": ((ANATOMY_COUNT_POSITIVE if _limb_visible
                            else ANATOMY_COUNT_POSITIVE_UPPER)
                           if anatomy_count else ""),
+        # 다리·발·종아리 무결성 positive (2026-10-21). cfg=1.0 이라 negative 가
+        # 무효인 워크플로에서 유일하게 작동하는 층. _limb_visible(다리·발이
+        # 화면에 보이는 샷)일 때만 붙인다 — CU/ECU 는 없는 발을 그린다.
+        "limb_integrity": (LEG_FOOT_INTEGRITY_POSITIVE
+                           if (anatomy_count and _limb_visible) else ""),
         "footwear": (FOOTWEAR_CHANGE_POSITIVE if footwear_change
                      else (_footwear_guard(_shot)[0] if footwear else "")),
         "body_object_boundary": (_body_object_boundary_guard(_shot)[0]
@@ -523,15 +528,25 @@ class CameraDirector:
 
     @staticmethod
     def _llm_camera(obj):
-        """LLM JSON의 camera 값이 허용 라벨일 때만 채택 (충분치 않으면 None)."""
+        """LLM JSON의 camera 값이 허용 라벨일 때만 채택 (충분치 않으면 None).
+
+        다중 선택(콤마) 값도 받는다 (2026-10-21 수정). 왜(Why): 사용자가 기능을
+        다중 선택하면 llm_user 가 그 콤마 값을 "copy as-is" 로 LLM 에 보낸다.
+        LLM 이 순순히 되돌려도 예전엔 `val in _TABLES[key]` 라 콤마 값이
+        거부됐다 — 유효 키가 3개 미만이 되면 통째로 규칙 폴백됐다. 이제 각
+        조각이 전부 유효 라벨이면 유효한 하나로 인정한다(정규화 후 반환).
+        """
         cam = obj.get("camera") if isinstance(obj, dict) else None
         if not isinstance(cam, dict):
             return None
         out, hits = dict(DEFAULTS), 0
         for key in out:
             val = cam.get(key)
-            if isinstance(val, str) and val in _TABLES[key]:
-                out[key] = val
+            if not isinstance(val, str):
+                continue
+            norm = normalize_multi_value(val, _TABLES[key])
+            if norm:
+                out[key] = norm
                 hits += 1
         return out if hits >= 3 else None  # 최소 3항목은 맞아야 신뢰
 
@@ -545,6 +560,37 @@ class CameraDirector:
             if isinstance(val, str) and val in _TABLES[key]:
                 cam[key] = val
         return cam
+
+    # ----- 입력 검증 -------------------------------------------------------
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        """기능 드롭다운의 다중 선택(콤마 문자열)을 ComfyUI 검증이 거부하지 않게 한다.
+
+        왜(Why) 필요한가 (2026-10-21 실측): 10개 기능 드롭다운은 콤보라서,
+        프런트의 다중 선택이 위젯에 "A,B" 콤마 문자열을 넣으면 그 값은 콤보
+        목록에 없다. ComfyUI 는 실행 전 콤보 값을 목록과 대조해 없으면
+        `Value not in list` 로 노드를 막는다 — 카메라 노드에 빨간 테두리가
+        생기고 실행이 멈춘다. 그 조합값 자체는 백엔드가 정상 처리한다
+        (build_clauses 가 라벨별 조항을 모두 생성).
+
+        ComfyUI 는 노드에 VALIDATE_INPUTS 가 있으면 콤보 "목록에 없음" 검사를
+        건너뛰고 이 메서드를 대신 쓴다 (execution.py:1029 — x 가
+        validate_function_inputs 에 있으면 콤보 검사를 하지 않는다).
+
+        규칙은 normalize_multi_value 와 같다: AUTO(또는 빈값)이면 통과,
+        콤마로 나눈 조각이 하나라도 그 슬롯의 유효 라벨이 아니면 거부.
+        단일 라벨(구 워크플로)도 자동으로 통과한다.
+
+        반환: True = 통과, 문자열 = 오류 메시지(reason).
+        """
+        for key, val in kwargs.items():
+            table = _TABLES.get(key)
+            if not table or not val:
+                continue
+            labels = split_multi(val)
+            if labels and any(lbl not in table for lbl in labels):
+                return f"{key}: {val!r} is not a valid selection"
+        return True
 
     # ----- 본체 ------------------------------------------------------------
     def run(self, topic="", preset=AUTO, automation="",
@@ -891,6 +937,23 @@ class CameraDirector:
                         "\nAttached image order and slot numbers: "
                         + ", ".join(str(x) for x in converted_labels)
                         + ". Use these numbers in references[].slot.")
+                # 배경 위임 가드 (2026-10-21 사용자 지시): 토픽이 "배경: N번 이미지" 로
+                # 배경을 참조에 위임하면, LLM 이 장면 글에 **다른 바닥·방·가구**를
+                # 지어내 그 지시를 덮는다(실측: 토픽은 배경을 2번에 위임했는데 LLM
+                # 글이 "floor is bare packed dirt" 를 추가해 흙 바닥이 생성됐다).
+                # 위임이 감지되면 환경을 발명하지 말라고 명시한다.
+                try:
+                    _bg_slots = _background_role_slots(topic or "")
+                    if _bg_slots:
+                        image_note += (
+                            "\nThe topic delegates the background to reference "
+                            "image(s) " + ", ".join(str(x) for x in sorted(_bg_slots))
+                            + ". The environment comes from those references — do "
+                            "NOT invent or describe a different floor, ground, room, "
+                            "or furniture of your own. Keep the environment "
+                            "unspecified in your scene so the reference governs it.")
+                except Exception:
+                    pass
                 resolved_model = resolve_model(provider, model)
                 hint_text = (llm_hint or "").strip()
                 # 사용자 지시는 LLM user 메시지 끝에 최우선 블록으로 붙인다.
@@ -1032,9 +1095,30 @@ class CameraDirector:
             llm_cam = self._llm_camera(llm_obj) if llm_obj else None
             if llm_cam is not None:
                 camera = {**llm_cam, **(fixed_cam or {})}  # 고정값이 LLM보다 우선
+                # LLM 이 실제로 고른 칸(값이 DEFAULTS 와 다른 칸)과 사용자 고정값을
+                # locked 에 넣는다 — 아래 후처리(구도→조명·이미지 힌트)가 그 칸을
+                # 덮지 않게 한다. 왜(Why) 필요한가 (2026-10-21): 예전엔 LLM 성공
+                # 경로가 resolve_rules_camera 를 아예 안 불러 apply_framing_lighting
+                # 과 apply_image_hints 가 죽었다. 그 결과 같은 입력에서 규칙 경로와
+                # LLM 경로의 후처리가 갈렸다. 판단 주체는 달라도 **후처리 보정은
+                # 공통**이어야 한다(사용자 지시). 단 LLM/사용자가 이미 정한 칸은
+                # 건드리지 않는다 — locked 로 존중한다.
+                for _k, _v in camera.items():
+                    if _k.startswith("_"):
+                        continue
+                    if _k in (fixed_cam or {}):
+                        locked.add(_k)
+                    elif _v != DEFAULTS.get(_k):
+                        locked.add(_k)
+                camera, locked = apply_framing_lighting(camera, locked)
+                if metrics:
+                    camera = apply_image_hints(camera, locked, metrics)
                 if preset_cam is None:
+                    hints_note = " + 이미지 힌트" if camera.get("_hints") else ""
                     cam_source = ("LLM 판단" + ("(이미지 참조)" if image_count else "")
-                                  + ("+직접 고정" if fixed_cam else ""))
+                                  + ("+직접 고정" if fixed_cam else "") + hints_note)
+                elif llm_attempted:
+                    cam_source = cam_source or "LLM 판단"
             else:
                 camera, locked, _ = resolve_rules_camera(
                     topic, metrics, fixed_cam, locked)
@@ -1049,6 +1133,30 @@ class CameraDirector:
         explicit_shot = topic_shot_label(topic)
         if explicit_shot and "shot" not in locked:
             camera["shot"] = explicit_shot
+
+        # 2.5) 무빙 게이팅 (2026-10-21 사용자 지시): 하류가 정지 이미지면
+        # motion·motion2 는 영상 전용 지시라 왜곡을 유발한다 — 제거한다.
+        # speed·amplitude 는 motion 수식어라 함께 기본값으로 되돌린다.
+        # 하류가 영상이면 그대로 둔다. 판정은 hidden 입력 prompt 그래프의
+        # 비디오 노드 표식으로 한다(detect_video_pipeline). 불명은 이미지로
+        # 간주(안전 기본). 프론트에도 신호를 보내 UI 가 '영상 전용' 표시를
+        # 하게 한다(백엔드/UI 어긋남 방지).
+        is_video = detect_video_pipeline(prompt)
+        try:
+            notify_pipeline_type(unique_id, is_video)
+        except Exception:
+            pass
+        if not is_video:
+            _removed_motion = []
+            for _mk in ("motion", "motion2"):
+                if split_multi(camera.get(_mk)):
+                    _removed_motion.append(_mk)
+                    camera[_mk] = "없음 (none)"
+            for _mk in ("speed", "amplitude"):
+                camera[_mk] = DEFAULTS.get(_mk, camera.get(_mk))
+            if _removed_motion:
+                _log("[Camera Director] 정지 이미지 파이프라인 — 무빙 제거 "
+                     "(" + ", ".join(_removed_motion) + "). 영상 워크플로에서만 활성")
 
         # 3) 장면: llm 성공 시 영문 확장, 그 외 주제 원문
         scene, scene_src = topic, "주제 원문"
@@ -1185,7 +1293,16 @@ class CameraDirector:
         hints = list(camera.pop("_hints", []))
         mismatch = scene_camera_mismatch(scene, camera)
         if mismatch:
-            _log(f"[Camera Director] ⚠ {mismatch}")
+            # 자동 교정 (2026-10-21 사용자 지시): 경고만 남기면 모순이 최종
+            # 프롬프트에 그대로 실려 "명시한 것과 다른 결과"가 나온다. 최종
+            # shot 라벨(카메라 블록)이 정본이므로 장면 글의 다른 샷 표현을
+            # 걷어낸다. fix_footwear_clause 등과 같은 후처리 계열이다.
+            _fixed_scene = fix_scene_shot_clause(_scene_assembled, camera)
+            if _fixed_scene != _scene_assembled:
+                _scene_assembled = _fixed_scene
+                _log(f"[Camera Director] ⚠ {mismatch} — 장면의 샷 표현을 제거함")
+            else:
+                _log(f"[Camera Director] ⚠ {mismatch}")
         # 출발 점검: 깨질 조합이면 콘솔 경고 (pf_* 0은 검사 안 함).
         for _warn in preflight_warnings(topic or scene, camera,
                                         steps=pf_steps, cfg=pf_cfg,
@@ -1197,7 +1314,7 @@ class CameraDirector:
         # 각자 반복하던 시대를 끝내고, 짝이 어긋날 수 없게 했다.
         _plan = resolve_guard_plan(
             (analysis or "") + " " + (scene or ""), camera, image_count,
-            image_labels, image_items, primary_image, reference_images,
+            image_labels, reference_items, primary_image, reference_images,
             tier=tier, llm_hint=llm_hint,
             weak_sheet_slots=weak_sheet, sheet_kind=_sheet_kind,
             declared_topic=topic or "")
@@ -1244,6 +1361,12 @@ class CameraDirector:
                  "(다리·팔·어깨·손가락 뭉개짐 방어)")
         if anatomy_count:
             positive = positive.rstrip(". ") + ". " + _gpos["anatomy_count"] + "."
+        # 다리·발·종아리 무결성 (2026-10-21). cfg=1.0 이라 negative 가 무효라
+        # positive 가 유일한 방어 — 발 추가·휜 종아리·손 뭉갬을 여기서 못박는다.
+        if _gpos["limb_integrity"]:
+            positive = positive.rstrip(". ") + ". " + _gpos["limb_integrity"] + "."
+            _log("[Camera Director] 다리·발·종아리 무결성 가드 활성 "
+                 "(추가 발·휜 종아리·손 뭉갬 방어)")
         if footwear:
             positive = positive.rstrip(". ") + ". " + _gpos["footwear"] + "."
         if body_object_boundary:
@@ -1666,6 +1789,20 @@ class CameraDirectorEncode(CameraDirector):
             prompt=prompt, extra_pnginfo=extra_pnginfo,
             vision_detail=vision_detail,
             pf_steps=pf_steps, pf_cfg=pf_cfg, pf_denoise=pf_denoise)
+        # 왜(Why) 여기서 다시 심나 (2026-10-21 결함 수정): 위 run() 은 이번 실행
+        # 한정으로 끝에서 clear_reference_kinds() 를 부른다(누수 방지). 그런데
+        # Skills 는 run() 을 지나온 뒤 **아래에서** 신원 앵커·image_out 을 다시
+        # 만든다 — 그 시점엔 힌트가 이미 없어, 가드 plan 은 힌트(2번=인물)로
+        # 만들고 앵커는 옛 규약(1번=주 피사체)으로 되돌아가 같은 프롬프트가
+        # 모순됐다(실측: "reference image 1 as the exact identity source").
+        # 여기서 참조 목록으로 힌트를 되심어 앵커·image_out 이 같은 판정을 쓴다.
+        # 정리는 이 함수 끝의 clear_reference_kinds() 가 맡는다.
+        if image_items:
+            try:
+                set_reference_kinds(classify_references(image_items))
+            except Exception as _e:  # noqa: BLE001
+                _log("[Camera Director] 참조 자동 분류 실패(Skills 재심기) "
+                     f"({type(_e).__name__}) — 기존 규약으로 진행")
         camera = getattr(self, "_last_camera", dict(DEFAULTS))
         camera_text = build_camera_conditioning(camera)
         external_prompt = (prompt_in or "").strip()
@@ -1985,6 +2122,12 @@ class CameraDirectorEncode(CameraDirector):
             if _anatomy_count_pi:
                 positive_text = self._combine_prompt_text(
                     positive_text, _gpos_pi["anatomy_count"])
+            # 다리·발·종아리 무결성 (2026-10-21) — prompt_in 경로도 같은 판정.
+            if _gpos_pi["limb_integrity"]:
+                positive_text = self._combine_prompt_text(
+                    positive_text, _gpos_pi["limb_integrity"])
+                _log("[Camera Director] 다리·발·종아리 무결성 가드 활성 "
+                     "(추가 발·휜 종아리·손 뭉갬 방어)")
             if _footwear_pi:
                 positive_text = self._combine_prompt_text(
                     positive_text, _gpos_pi["footwear"])
@@ -2193,12 +2336,27 @@ class CameraDirectorEncode(CameraDirector):
         if image_items:
             # 주 슬롯 이미지는 image_out과 reference_latent_out이 **같은 픽셀**을
             # 써야 짝이 맞는다. 한 번만 찾고 두 출력에 함께 쓴다 (리뷰로 확인된 복붙).
+            # 시트 슬롯은 여기서도 뺀다 (2026-10-21 결함 수정). README 5-6 은
+            # "시트는 참조 latent 에서 뺀다" 고 약속하는데, 그 제외가 conditioning
+            # 경로(_latent_skip_pi)에만 적용되고 image_out/reference_latent_out
+            # 은 미필터 image_items 에서 main 을 골라 시트가 그대로 나갔다.
+            # Qwen 은 참조 배치를 따라 그리므로 시트가 I2V 시작 프레임·3번 교정
+            # 노드의 기준 latent 로 들어가면 결과가 여러 칸 시트로 나온다.
+            # conditioning 과 같은 제외 집합을 쓴다(엄격 시트 + 약한 시트).
+            _sheet_skip = set(str(x) for x in
+                              (list(_px_sheet_pi) + list(_weak_pi)))
             for label, img in image_items:
+                if str(label) in _sheet_skip:
+                    continue
                 if label == main_slot:
                     main_img = img
                     break
             if main_img is None:
-                main_img = image_items[0][1]
+                # main 이 시트로 제외됐으면 시트가 아닌 첫 슬롯으로 폴백한다.
+                for label, img in image_items:
+                    if str(label) not in _sheet_skip:
+                        main_img = img
+                        break
             image_out = main_img
         # 기준 latent 출력 (3번 교정 노드용). _prepare가 이미 인코딩한 결과를
         # 캐시 키로 조회만 한다 — 재인코딩 없음. vae 미연결이면 None.

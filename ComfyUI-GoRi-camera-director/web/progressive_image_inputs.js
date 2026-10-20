@@ -169,6 +169,12 @@ function updateVisibility(node) {
     // 정확히 줄인다. 늘리는 쪽은 addInput(expandToFitContent)이 코어에서
     // 이미 처리하므로 건드리지 않는다.
     const countBefore = count;
+    // 소켓 변경 전의 여유 공간 (2026-10-19 사용자 보고 수정). 왜(Why) 재나:
+    // addInput 이 프런트엔드 expandToFitContent 를 태워 노드를 **콘텐츠보다
+    // 크게** 키운다(실측: 소켓 1칸 추가 시 20px 가 아니라 32px 증가, 남은
+    // 12px 이 여유로 생긴다). 그 여유를 상한 없는 topic 이 흡수해 2줄이
+    // 3줄로 부푼다 — "이미지1 에 선을 꼽으면 topic 이 늘어난다" 의 원인.
+    const freeBefore = Number(node.freeWidgetSpace);
 
     // 늘리기: 항상 안전(맨 뒤에 원래 이름으로 추가)
     while (count < desired) {
@@ -199,6 +205,42 @@ function updateVisibility(node) {
     if (removed > 0 && !node._goriLoaded && isSizeLike(node.size)) {
       node.setSize([node.size[0], node.size[1] - removed * SLOT_HEIGHT]);
     }
+    // 소켓 추가로 **늘어난 여유**를 되돌린다 (2026-10-19 사용자 보고 수정).
+    // 왜(Why) 다음 프레임으로 미루나: addInput 안에서는 freeWidgetSpace 가
+    // 아직 갱신되지 않는다(실측 로그: addInput("image_2") 시 "free 74->74").
+    // 실제 노드 성장과 여유 산정은 프런트엔드 arrange 가 다음 프레임에 한다.
+    // 그래서 지금 재면 옛값을 읽어 보정이 헛돈다 — 한 프레임 뒤에 잰다.
+    //
+    // 왜(Why) 필요한가: addInput 이 expandToFitContent 로 노드를 콘텐츠보다
+    // 크게 키운다(실측: 소켓 1칸 추가 시 20px 아니라 32px 증가). 그 12px 이
+    // 여유로 남고, 상한 없는 topic 이 흡수해 2줄 -> 3줄 로 부푼다. 여유가
+    // **늘었을 때만** 증가분을 높이에서 빼면 free 가 원래값으로 돌아와 topic
+    // 이 제 줄 수로 복귀한다(실측: 664 -> 652, free 62, topic 38px).
+    //
+    // 왜(Why) cap 으로 자르지 않고 "증가분"만 빼나: 사용자가 코너를 끌어 키운
+    // 노드는 free 가 cap 보다 크다(실측: 900px 노드 free=330). cap 으로 자르면
+    // 그 리사이즈를 되돌린다. 증가분만 빼면 사용자 여유는 그대로 남는다.
+    // 소켓이 여유를 **소비**한 경우(리사이즈된 노드에 소켓 추가, free 감소)는
+    // 음수라 손대지 않는다 — 그건 정상 동작이다.
+    const _beforeH = isSizeLike(node.size) ? node.size[1] : null;
+    const _correctFreeGrowth = () => {
+      try {
+        if (_beforeH === null || !isSizeLike(node.size)) return;
+        const freeAfter = Number(node.freeWidgetSpace);
+        if (isFinite(freeBefore) && isFinite(freeAfter)
+            && freeAfter > freeBefore) {
+          node.setSize([node.size[0], node.size[1] - (freeAfter - freeBefore)]);
+        }
+      } catch (_) {
+        /* 보정 실패는 조용히 무시 — 토픽 줄 수가 원복되지 않을 뿐이다 */
+      }
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(_correctFreeGrowth));
+    }
+    // 왜(Why) 지연도 함께 두나: requestAnimationFrame 이 없는/백그라운드 탭에서
+    // 프레임이 안 돌 수 있다. 디바운스(50ms) 뒤 arrange 가 끝난 시점을 노린다.
+    setTimeout(_correctFreeGrowth, 80);
     // 왜(Why) 정착했을 때만 키를 기록하나 (2026-10-11 실측): 줄이기가 드래그
     // 중 보류되면 count > desired 인 채로 끝난다. 이때 키를 기록하면 다음
     // 트리거가 조기 반환해 보류된 축소가 영영 안 된다. 정착한 경우에만
@@ -321,6 +363,51 @@ function shrinkNewNode(node) {
   }
   if (node.size[1] > h) {
     node.setSize([Math.max(node.size[0], min[0]), h]);
+  }
+}
+
+/** 로드된 노드를 **저장된 크기**로 되돌린다 (F5 재현 버그 수정, 2026-10-19).
+ *
+ * 왜(Why) 필요한가 (2026-10-19 라이브 실측): F5/컴피 재시작으로 워크플로를 열면
+ * 노드 정의가 image_1~image_10 소켓 10개를 먼저 만든다. 저장된 노드 높이(예:
+ * 612)는 소켓이 1개일 때의 값이라 10개를 못 담는다 → 프런트엔드가 콘텐츠에
+ * 맞춰 노드를 **756 으로 자동 확장**한다(expandToFitContent). 그 뒤
+ * updateVisibility 가 미연결 소켓 9개를 제거하지만 `_goriLoaded` 가 높이 감산을
+ * 건너뛰므로(저장 크기 존중) 노드가 756 에 남는다. 남는 여유(206px)를 상한 없는
+ * topic 위젯이 전부 흡수해 topic 칸이 2줄(≈38px)에서 167px 로 부풀었다 —
+ * "새로고침하면 topic 이 커진다" 의 직접 원인(실측 재현).
+ *
+ * 왜(Why) shrinkNewNode 를 그냥 부르지 않나: 그 함수는 `size-(free-cap)` 로
+ * 여유를 접는데, **사용자가 코너를 끌어 키운 노드도 같은 방식으로 접어**
+ * 의도한 리사이즈를 되돌린다(실측: 수동 900 → 612 로 붕괴). 그래서 로드
+ * 경로에서는 "저장된 크기" 자체를 복원해야 한다 — 저장 크기가 곧 사용자가
+ * 남겨 둔 의도(2줄이면 2줄, 키웠으면 키운 값)다.
+ *
+ * 왜(Why) `_goriSavedSize` 와 복원 대상이 다른가: onConfigure 가 저장된
+ * 크기를 심는다. 자동 확장은 그보다 **뒤**에 일어나므로, 현재 높이가 저장
+ * 높이보다 크면 그 차이는 확장분이다 — 저장 높이로 되돌리면 여유가 사라져
+ * topic 이 원래 줄 수로 돌아온다(실측: 756 → 612 로 되돌리면 topic 38px,
+ * free 62px=cap). 저장 높이 이하로는 절대 줄이지 않는다(사용자 축소 의도 보존).
+ *
+ * 매 드로우에서 불려도 싸다 — 값이 같으면 대입하지 않는다. 좁은 폭으로
+ * 리사이즈된 경우 폭은 건드리지 않는다(높이만 복원).
+ *
+ * 왜(Why) 시간 창이 필요한가 (2026-10-19 라이브 실측): 복원을 영구히 켜 두면
+ * **사용자가 나중에 코너를 끌어 키운 리사이즈까지 저장 크기로 되돌린다**
+ * (실측: 수동 900 → 즉시 612 로 붕괴). 자동 확장은 로드 직후 ~600ms 안에만
+ * 일어나므로, 그보다 넉넉한 창(기본 1500ms) 동안만 복원하고 이후엔 손대지
+ * 않는다. 창이 지나면 사용자 리사이즈가 그대로 살아남는다. */
+const SAVED_SIZE_RESTORE_WINDOW_MS = 1500;
+function restoreSavedSize(node) {
+  const saved = node?._goriSavedSize;
+  if (!isSizeLike(saved) || !isSizeLike(node.size)) return;
+  // 로드 직후 창 안에서만 복원한다. 창 밖은 사용자 리사이즈 영역이다.
+  const until = node._goriRestoreUntil;
+  if (typeof until === "number" && Date.now() > until) return;
+  // 저장 높이보다 **크면** 확장분이다 — 저장 높이로 되돌린다.
+  // 이미 저장 높이 이하면(사용자가 더 줄였거나 확장이 없었거나) 손대지 않는다.
+  if (node.size[1] > saved[1]) {
+    node.setSize([node.size[0], saved[1]]);
   }
 }
 
@@ -457,6 +544,10 @@ function ensureFixedTextareaDrawHook(node) {
     try {
       attachTopicScroll(this);
       applyFixedTextareaHeight(this);
+      // 로드된 노드의 자동 확장분을 저장 크기로 되돌린다 (2026-10-19 F5 버그).
+      // 매 프레임 불리지만 값이 같으면 대입하지 않으므로 비용은 비교뿐이고,
+      // 확장은 로드 직후 한 번뿐이라 몇 프레임 뒤 자연히 no-op 이 된다.
+      restoreSavedSize(this);
     } catch (_) {
       /* 보정 실패는 조용히 무시 — 다음 프레임에 다시 시도한다 */
     }
@@ -936,6 +1027,24 @@ app.api?.addEventListener?.("gori_llm_status", (event) => {
   }
 });
 
+// 하류 파이프라인 신호 (2026-10-21): 백엔드가 정지 이미지/영상 판정을 알린다.
+// 2026-10-21: motion/motion2 위젯 이름에 "only video" 가 항상 붙으므로(라벨
+// 재정의), 정지 이미지 판정 시 값에 붙이던 꼬리표는 제거했다. 이 신호는 노드
+// 속성(_goriIsVideo)에 판정을 기록해 두는 용도로 유지한다(백엔드의
+// notify_pipeline_type 과 짝 — 향후 표시·진단에 쓸 수 있게 남긴다).
+app.api?.addEventListener?.("gori_pipeline_type", (event) => {
+  try {
+    const detail = event.detail || {};
+    const id = Number(detail.node);
+    const node = Number.isFinite(id) ? app.graph?.getNodeById?.(id) : null;
+    if (!node) return;
+    node._goriIsVideo = !!detail.is_video;
+    app.canvas?.setDirty?.(true, true);
+  } catch (_) {
+    /* 무시 */
+  }
+});
+
 // 새 실행이 시작되면 모든 표시등을 초기화 (직전 실행의 잔광 제거)
 app.api?.addEventListener?.("execution_start", clearAllLlmLights);
 
@@ -1246,6 +1355,25 @@ const MULTI_WIDGET_NAMES = [
 ];
 const MULTI_AUTO_LABEL = "자동 (auto)";
 
+/** 위젯 표시 이름 재정의 (2026-10-21 사용자 지시).
+ *
+ * 무빙(motion/motion2)은 영상 파이프라인에서만 반영되므로 화면 이름에
+ * "only video" 를 붙여 사용자 혼란을 막는다. **내부 키(w.name)는 그대로**
+ * 둔다 — 저장된 워크플로의 widgets_values_named 매핑과 백엔드 키, LLM JSON
+ * 규격, 프리셋, 판정(cam_guards)이 전부 name 에 묶여 있어 이름을 바꾸면
+ * 기존 워크플로 값이 사라진다. 표시만 바꾸는 것이 안전하다.
+ */
+const WIDGET_DISPLAY_LABELS = {
+  motion: "motion (only video)",
+  motion2: "motion2 (only video)",
+};
+
+/** 위젯의 표시 이름 (label 이 있으면 우선, 없으면 name). 순수 함수. */
+function widgetDisplayName(w) {
+  if (!w) return "";
+  return w.label || w.name || "";
+}
+
 function splitMultiValue(v) {
   return String(v ?? "")
     .split(",")
@@ -1262,6 +1390,16 @@ function joinMultiValue(values, selected) {
 function multiDisplayText(v) {
   const sel = splitMultiValue(v);
   return sel.length ? `수동 (${sel.length}개)` : MULTI_AUTO_LABEL;
+}
+
+/** 무빙(motion/motion2) 위젯의 표시 텍스트.
+ *
+ * 2026-10-21: 위젯 **이름**에 이미 "only video" 가 붙으므로(label 재정의),
+ * 정지 이미지 판정 시 값에 붙이던 "· 영상 전용" 꼬리표는 제거했다(중복).
+ * 값은 다중 선택 표시(수동 n개 / 자동)만 담는다.
+ */
+function motionPipelineDisplay(node, name, v) {
+  return multiDisplayText(v);
 }
 
 let multiPopupEl = null;
@@ -1577,6 +1715,8 @@ function installMultiSelectWidget(node, name) {
     _goriMulti: true,
     type: "gori_multi",
     name,
+    // 표시 이름만 재정의 (내부 키 name 은 유지). WIDGET_DISPLAY_LABELS 참조.
+    label: WIDGET_DISPLAY_LABELS[name] || old.label || name,
     value: old.value,
     options: Object.assign({}, old.options, { values }),
     y: old.y,
@@ -1586,7 +1726,7 @@ function installMultiSelectWidget(node, name) {
       this.last_y = y;
       this.y = y;
       const realValue = this.value;
-      const display = multiDisplayText(realValue);
+      const display = motionPipelineDisplay(n, this.name, realValue);
       // ComfyUI 기본 draw 를 재사용해 **이름**까지 그대로 나오게 한다.
       // 표시용 텍스트를 잠시 value 로 넣어 그린 뒤 즉시 되돌린다.
       if (origDraw) {
@@ -1599,11 +1739,12 @@ function installMultiSelectWidget(node, name) {
         return;
       }
       // 기본 draw 가 없는 환경 대비 — 이름 + 값 + 화살표를 직접 그린다.
+      // 표시 이름은 label 우선(this.label), 없으면 name.
       ctx.save();
       ctx.textBaseline = "middle";
       ctx.fillStyle = "#999";
       ctx.textAlign = "left";
-      ctx.fillText(String(this.name || ""), 15, y + H / 2);
+      ctx.fillText(String(widgetDisplayName(this)), 15, y + H / 2);
       ctx.fillStyle = "#ddd";
       ctx.textAlign = "right";
       ctx.fillText(display, width - 20, y + H / 2);
@@ -1794,6 +1935,23 @@ app.registerExtension({
         pass();
         if (typeof requestAnimationFrame === "function") requestAnimationFrame(pass);
         setTimeout(pass, 300);
+      } else if (node._goriLoaded) {
+        // 로드 경로: 소켓 10개가 만들어진 뒤 프런트엔드가 노드를 콘텐츠에 맞춰
+        // 자동 확장했을 수 있다(저장 크기가 작을 때). 저장 크기로 되돌린다
+        // (2026-10-19 F5 버그). 확장은 이 시점 뒤에 일어날 수도 있어(디바운스
+        // 타이밍 가변) 몇 번 더 시도하고, 최종 방어선은 드로우 훅이다.
+        const restore = () => {
+          try {
+            restoreSavedSize(node);
+          } catch (_) {
+            /* 복원 실패는 조용히 무시 — 드로우 훅이 다시 시도한다 */
+          }
+        };
+        restore();
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(restore);
+        }
+        setTimeout(restore, 300);
       }
     };
 
@@ -1831,6 +1989,23 @@ app.registerExtension({
           // configure는 createNode 직후 동기 호출되므로, 아래 setTimeout
           // 시점엔 이 플래그가 이미 설정되어 있다.
           this._goriLoaded = true;
+          // 저장된 크기를 기억한다 (2026-10-19 F5 버그 수정). configure 는
+          // 소켓 10개(image_1~image_10, 노드 정의)가 이미 만들어진 뒤에 돌고,
+          // 그 상태에서 프런트엔드가 콘텐츠에 맞춰 노드를 자동 확장할 수 있다.
+          // 저장 크기가 곧 사용자의 의도이므로 여기서 복사해 두고, 로드 경로의
+          // restoreSavedSize 가 확장분을 되돌린다. 이 시점의 this.size 는
+          // 방금 복원된 저장값이다.
+          try {
+            if (isSizeLike(this.size)) {
+              this._goriSavedSize = [this.size[0], this.size[1]];
+              // 자동 확장은 로드 직후에만 일어난다. 그 창 동안만 복원하고,
+              // 창이 지나면 사용자 리사이즈를 건드리지 않는다.
+              this._goriRestoreUntil =
+                Date.now() + SAVED_SIZE_RESTORE_WINDOW_MS;
+            }
+          } catch (_) {
+            /* 크기 기억 실패는 조용히 무시 — 확장 보정만 생략된다 */
+          }
           // 접힘 상태는 **여기서 동기으로** 적용한다 (디바운스를 타지 않는다):
           // 늦게 숨기면 첫 arrange 가 펼친 채로 노드를 자동 증가시켰다가
           // 50ms 뒤 다시 줄여 하단 공백이 남는다(applyLlmFoldFromProperties
@@ -1920,6 +2095,7 @@ app.registerExtension({
 export {
   imageNumber, countImageSockets, lastLinkedImageNumber, lastImageSocketIndex,
   isDraggingLink, updateVisibility, restoreAll, topicElement, shrinkNewNode,
+  restoreSavedSize,
   applyFixedTextareaHeight, textareaFixedHeight, topicWidgetHeight,
   ensureFixedTextareaDrawHook, FIXED_TEXTAREA_LINES,
   findApiKeyWidget, maskApiKeyWidget, clearApiKeyWidget, apiKeyWidgetIndex,
@@ -1931,6 +2107,7 @@ export {
   installMultiSelectWidget, installMultiSelectWidgets,
   computePopupScreenPos, fitPopupBox, POPUP_MIN_VISIBLE_PX, popupContentScale,
   MULTI_WIDGET_NAMES, MULTI_AUTO_LABEL,
+  WIDGET_DISPLAY_LABELS, widgetDisplayName,
   findLlmHeaderWidget, llmFoldGroupWidgets, measureLlmFoldFootprint,
   setLlmSectionFolded, toggleLlmSectionFolded, applyLlmFoldFromProperties,
   resolveLlmFolded, installLlmSetupHeader, drawLlmSetupHeader,
@@ -1940,4 +2117,4 @@ export {
 
 
 // ===== Preset data (mirror of presets.json) =====
-const CAMERA_PRESETS = {"시네마틱 인물 (cinematic portrait)": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "제품 히어로 (product hero)": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "CF 버티컬 (vertical ad)": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "다큐 핸드헬드 (doc handheld)": {"shot": "중경 (MS)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "창가빛 (window light)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "드라마틱 롱샷 (dramatic long shot)": {"shot": "원경 (WS)", "lens": "24mm 광각 (wide)", "angle": "로우앵글 (low angle)", "composition": "리딩라인 (leading lines)", "lighting": "로우키 (low key)", "grade": "시네마틱 필름 (cinematic)", "motion": "돌리 인 (dolly in)", "speed": "느림 (slow)", "amplitude": "강하게 (dramatic)", "motion2": "없음 (none)"}};
+const CAMERA_PRESETS = {"시네마틱 인물 (cinematic portrait)": {"shot": "중근접 (MCU)", "lens": "85mm f/1.4 (bokeh)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "램브란트 (Rembrandt)", "grade": "시네마틱 필름 (cinematic)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "제품 히어로 (product hero)": {"shot": "중근접 (MCU)", "lens": "100mm 매크로 (macro)", "angle": "수평 (eye-level)", "composition": "중앙 대칭 (centered)", "lighting": "3점 스튜디오 (three-point)", "grade": "클린 커머셜 (commercial)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "약간 (subtle)"}, "CF 버티컬 (vertical ad)": {"shot": "중근접 (MCU)", "lens": "50mm 표준 (standard)", "angle": "수평 (eye-level)", "composition": "중앙 대칭 (centered)", "lighting": "3점 스튜디오 (three-point)", "grade": "비비드 포스터 (vivid)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "느림 (slow)", "amplitude": "약간 (subtle)"}, "다큐 핸드헬드 (doc handheld)": {"shot": "중경 (MS)", "lens": "35mm 스냅 (snapshot)", "angle": "수평 (eye-level)", "composition": "삼분할 (rule of thirds)", "lighting": "흐린 부드러움 (soft overcast)", "grade": "절제된 프리미엄 (premium)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "보통 (normal)", "amplitude": "보통 (normal)"}, "드라마틱 롱샷 (dramatic long shot)": {"shot": "원경 (WS)", "lens": "24mm 광각 (wide)", "angle": "로우앵글 (low angle)", "composition": "리딩라인 (leading lines)", "lighting": "로우키 (low key)", "grade": "시네마틱 필름 (cinematic)", "motion": "없음 (none)", "motion2": "없음 (none)", "speed": "느림 (slow)", "amplitude": "강하게 (dramatic)"}};

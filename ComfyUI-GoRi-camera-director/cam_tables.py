@@ -10,7 +10,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clause", "_motion_clauses", "split_multi", "normalize_multi_value", "grade_clauses", "build_clauses", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning"
+"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clauses", "split_multi", "normalize_multi_value", "grade_clauses", "build_clauses", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning"
 ]
 
 
@@ -609,12 +609,6 @@ def _motion_clauses(cam: dict, key: str) -> list:
         bits = [AMPLITUDE.get(amp, ""), SPEED.get(speed, ""), text]
         out.append(" ".join(b for b in bits if b) + " camera movement")
     return out
-
-
-def _motion_clause(cam: dict, key: str) -> str:
-    """무빙 1개 분량의 영문 조항 (첫 값). 없음·빈값이면 "" (구 호출 호환)."""
-    clauses = _motion_clauses(cam, key)
-    return clauses[0] if clauses else ""
 
 
 def _label_clauses(cam: dict, key: str, table: dict) -> list:

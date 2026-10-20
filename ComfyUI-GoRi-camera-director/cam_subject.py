@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import threading
+from functools import lru_cache
 
 try:
     from .cam_util import *  # noqa: F403
@@ -13,7 +14,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "ANIMAL_SUBJECT_KEYWORDS", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "set_reference_kinds", "clear_reference_kinds",
+"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "ANIMAL_SUBJECT_KEYWORDS", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
 "_hint_person_slots", "_hint_pose_slots", "_text_names_slots", "intent_core"
 ]
 
@@ -104,7 +105,11 @@ OUTFIT_RELATION_PATTERNS = (
 
 def _is_outfit_transfer(text: str) -> bool:
     """단순히 'dress/옷'이 있는 scenes가 아니라, image_N을 의상 참고로 쓰라는 의도만 판별한다."""
-    t = (text or "").lower()
+    return _is_outfit_transfer_cached((text or "").lower())
+
+
+@lru_cache(maxsize=64)
+def _is_outfit_transfer_cached(t: str) -> bool:
     has_ref = bool(re.search(r"\b(?:image|img)\s*_?\d+", t)
                    or re.search(r"이미지\s*_?\d+", t))
     has_slot = bool(_clothing_role_slots(t) or _outfit_target_slots(t))
@@ -170,8 +175,14 @@ def _is_human_subject(text: str) -> bool:
     # 토픽이 비었는데 참조에서 사람이 검출됐으면 사람 주제로 본다 (2026-10-19).
     # 인물 가드가 전부 이 함수 하나로 게이트되므로 여기서 힌트를 읽으면
     # 12개 호출부를 고치지 않아도 일관되게 켜진다.
-    if not t.strip() and _hint_person_slots():
-        return True
+    # 빈 토픽은 스레드 로컬 힌트에 따라 달라지므로 캐시하지 않는다.
+    if not t.strip():
+        return bool(_hint_person_slots())
+    return _is_human_subject_cached(t)
+
+
+@lru_cache(maxsize=64)
+def _is_human_subject_cached(t: str) -> bool:
     # **의상 교체** 표현은 사람을 함의한다(2026-09-29 실측 결함 수정).
     # "1 의상, 2 교체" 에는 인물 키워드가 하나도 없어서 이 함수가 False 였다.
     # 결과적으로 identity 앵커·해부·발란스 등 **인물 가드가 전부 조용히
@@ -295,6 +306,7 @@ _KO_SUFFIX_CHARS = (
 )
 
 
+@lru_cache(maxsize=512)
 def _ascii_only(word: str) -> bool:
     """영문 단어인지 (한글 어휘는 조사 규칙이 다르다)."""
     return all(ord(c) < 128 for c in word)
@@ -348,10 +360,14 @@ _ASCII_AMBIGUOUS = frozenset({
 })
 
 
+@lru_cache(maxsize=512)
+def _ascii_word_re(word: str):
+    return re.compile(r"\b" + re.escape(word) + r"\b")
+
+
 def _ascii_word_present(text: str, word: str) -> bool:
-    """영문 단어를 단어 경계로만 찾는다 (\b 매칭)."""
-    import re as _re
-    return bool(_re.search(r"\b" + _re.escape(word) + r"\b", text))
+    """영문 단어를 단어 경계로만 찾는다 (\\b 매칭)."""
+    return bool(_ascii_word_re(word).search(text))
 
 
 def _is_animal_subject(text: str) -> bool:
@@ -710,15 +726,25 @@ def _clothing_role_slots(text: str) -> set:
     그리고 슬롯 N 교체를 쓰면 그 번호는 **교체 대상**이므로 의상 소스에서
     빼준다(OUTFIT_TARGET_PATTERNS).
     """
+    return set(_clothing_role_slots_cached(text))
+
+
+@lru_cache(maxsize=64)
+def _clothing_role_slots_cached(text: str) -> frozenset:
     # 소스를 한 번만 계산해 목표 판정에도 같은 값을 넘긴다(2026-10-07 라운드 2
     # — 원래는 _outfit_target_slots 안에서 같은 계산을 또 했다).
-    src = _clothing_source_slots(text)
-    targets = _outfit_target_slots(text, src)
-    return src - targets if targets else src
+    src = _clothing_source_slots_cached(text)
+    targets = _outfit_target_slots_cached(text)
+    return frozenset(src - targets if targets else src)
 
 
 def _clothing_source_slots(text: str) -> set:
     """의상 소스 슬롯(교체 대상 판정 전 원본)."""
+    return set(_clothing_source_slots_cached(text))
+
+
+@lru_cache(maxsize=64)
+def _clothing_source_slots_cached(text: str) -> frozenset:
     slots = _collect_role_slots(text, CLOTHING_ROLE_PATTERNS)
     # 구버전 결함 교정(2026-09-29 실측): 골격 패턴 2번은
     # "이미지 2 의상을 이미지 1에 적용" 에서 "의상을 이미지 1" 을 잡아
@@ -726,7 +752,7 @@ def _clothing_source_slots(text: str) -> set:
     # 1번이 신원 소스에서 제외돼 사람이 사라진다.
     if _has_outfit_apply_verb(text):
         slots -= _collect_role_slots(text, _OUTFIT_APPLY_SLOT_PATTERNS)
-    return slots
+    return frozenset(slots)
 
 
 def _has_outfit_apply_verb(text: str) -> bool:
@@ -820,6 +846,64 @@ def intent_core(text: str) -> str:
     return ", ".join(kept)
 
 
+# 착용 서술은 상태 묘사일 수 있다. 특히 "신발을 신고 있다" 처럼 **일반 명사**만
+# 있으면 참조 이미지의 신발을 그대로 두어야 한다(2026-10-20 실측: 이 경우
+# _is_text_outfit_change 가 True 가 되어 FOOTWEAR_CHANGE_POSITIVE 가 나가고
+# 1.9.58 신발 보존 가드가 우회됐다). 구체 품목(단화·구두)이나 색·재질
+# 수식어가 붙으면 사용자가 그 신발을 지정한 것이므로 교체로 본다.
+_WEAR_GENERIC_KO = re.compile(r"(?:신발|옷차림|옷|의상)")
+_WEAR_GENERIC_EN = re.compile(
+    r"\b(?:shoes?|footwear|outfit|clothing|clothes|garment|apparel|"
+    r"wardrobe)\b")
+_WEAR_NOUN_KO = re.compile(
+    r"(?:의상|옷차림|옷|드레스|셔츠|블라우스|바지|원피스|코트|재킷|자켓|"
+    r"슈트|정장|한복|신발|구두|샌들|단화|운동화|하이힐|부츠|슬리퍼|플랫|"
+    r"로퍼|웨지|뮬|하이탑|치마|스커트|모자|가방)")
+_WEAR_NOUN_EN = re.compile(r"\b(?:" + _EN_GARMENT_WORDS + r")\b")
+_WEAR_MATERIAL_KO = (
+    "가죽", "스웨이드", "새틴", "실크", "린넨", "니트", "벨벳", "시폰",
+    "레이스", "메시", "캔버스", "고무", "에나멜", "캐시미어", "트위드",
+    "코듀로이", "퍼",
+)
+_WEAR_MATERIAL_EN = re.compile(
+    r"\b(?:leather|suede|satin|silk|linen|cotton|wool|knit|velvet|chiffon|"
+    r"lace|mesh|canvas|rubber|patent|cashmere|tweed|corduroy|fur)\b")
+_WEAR_IMPERATIVE_KO = re.compile(
+    r"(?:입는다|신는다|입어라|신어라|입으세요|신으세요|입어|신어)")
+
+
+def _wear_cue_ko(window: str) -> bool:
+    if any(color in window for color, _ in _ITEM_COLOR_KO):
+        return True
+    return any(word in window for word in _WEAR_MATERIAL_KO)
+
+
+def _wear_cue_en(window: str) -> bool:
+    if re.search(r"\b(?:" + _ITEM_COLOR_EN + r")\b", window):
+        return True
+    if _WEAR_MATERIAL_EN.search(window):
+        return True
+    return "-" in window
+
+
+def _wear_nouns_mean_change(text, noun_re, generic_re, cue) -> bool:
+    """착용 동사 뒤 의류 명사가 교체 지시인지 판정한다.
+
+    일반 명사(옷·신발·outfit)만 있으면 상태 묘사로 보고 참조를 유지한다.
+    구체 품목이거나 색·재질 수식어가 명사 앞뒤에 붙으면 교체로 본다.
+    이미지 슬롯 참조("image 2", "이미지 2")가 있으면 명시 참조이므로 교체다.
+    """
+    if re.search(r"(?:image|img)\s*_?\d+|이미지\s*_?\d+", text):
+        return True
+    for m in noun_re.finditer(text):
+        if not generic_re.match(text, m.start()):
+            return True
+        window = text[max(0, m.start() - 24):m.end() + 16]
+        if cue(window):
+            return True
+    return False
+
+
 def _is_text_outfit_change(text: str) -> bool:
     """의상 참조 이미지 없이 텍스트만으로 옷 교체를 명시했는가.
 
@@ -840,42 +924,46 @@ def _is_text_outfit_change(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    return _is_text_outfit_change_cached(t)
+
+
+@lru_cache(maxsize=64)
+def _is_text_outfit_change_cached(t: str) -> bool:
     low = t.lower()
     # 명시 유지는 교체가 아니다 — 먼저 제외한다.
     if re.search(r"\b(?:same|keep|preserve|maintain)\b[^.]{0,24}?\b(?:outfit|clothing|clothes|dress|shoes|footwear)\b", low):
         return False
     if re.search(r"(?:같은|원래|기존)\s*(?:옷|의상|드레스|차림|신발|구두|단화|샌들)", t):
         return False
-    # 영어: 교체 동사 + 의류 ("replace A with B dress", "change into ...")
-    # 왜(Why) 굴절형을 넣나: `\bwearing\b` 은 `\bwear\b` 에 안 걸린다.
-    # "wearing a red dress" 처럼 현재진행형이 가장 흔한 교체 표현이다.
+    # 영어: 명시 교체 동사 + 의류 ("replace A with B dress", "change into ...")
     if re.search(r"\b(?:replac(?:e[sd]?|ing)|chang(?:e[sd]?|ing)|"
-                 r"swap(?:ped|ping)?|wear(?:ing|s)?|wore|worn|"
-                 r"dress(?:ed)? in)\b", low) and re.search(
-            r"\b(?:" + _EN_GARMENT_WORDS + r")\b", low):
+                 r"swap(?:ped|ping)?)\b", low) and _WEAR_NOUN_EN.search(low):
         return True
+    # 영어: 착용 동사 + 의류. 진행형·3인칭은 상태 묘사일 수 있으므로 일반
+    # 명사만 있으면 참조 유지, 구체 품목이나 수식어가 있으면 교체다.
+    if re.search(r"\b(?:wear(?:ing|s)?|wore|worn|dress(?:ed)? in)\b", low) \
+            and _WEAR_NOUN_EN.search(low):
+        return _wear_nouns_mean_change(
+            low, _WEAR_NOUN_EN, _WEAR_GENERIC_EN, _wear_cue_en)
     # 영어: 형용사 + 의류 ("different outfit", "new dress", "red evening dress"
     # 뒤에 교체 맥락이 있을 때 — 단독 "red dress" 는 묘사일 수 있다)
     if re.search(r"\b(?:different|new|another|completely different)\b[^.]{0,32}?\b(?:"
                  + _EN_GARMENT_WORDS + r")\b", low):
         return True
     # 한국어: 교체 동사 + 의류 (슬롯 불필요)
-    if re.search(_OUTFIT_VERB, low) and re.search(
-            r"(?:의상|옷|옷차림|드레스|셔츠|블라우스|바지|원피스|코트|재킷|자켓|슈트|정장|한복|"
-            r"신발|구두|샌들|단화|운동화|하이힐|부츠"
-            r"|outfit|clothing|dress|clothes|shoes|sandals)", low):
+    if re.search(_OUTFIT_VERB, low) and (
+            _WEAR_NOUN_KO.search(low) or _WEAR_NOUN_EN.search(low)):
         return True
-    # 한국어: 착용 묘사("입고", "신고") + 의류·신발. 영어의 wearing+garment 와
-    # 같은 근거(2026-10-02 결정): 현재형 착용 서술이 가장 흔한 교체 표현이다.
-    # 왜(Why) 별도 분기가 필요한가: _OUTFIT_VERB 는 교체 계열(갈아입히다·교체)
-    # 만 담고 있어 "단화를 신고" 처럼 **착용 동사로만** 말한 신발 교체를 놓친다.
-    # 놓치면 identity anchor 가 "Do not change any shoe" 를 그대로 내보내
-    # 사용자 지시와 정면 충돌한다(2026-10-13 실측: 흰샌 단화 지시가 일부만 반영).
-    if re.search(r"(?:입고|입은|신고|신은)", t) and re.search(
-            r"(?:의상|옷|옷차림|드레스|셔츠|블라우스|바지|원피스|코트|재킷|자켓|슈트|정장|한복|"
-            r"신발|구두|샌들|단화|운동화|하이힐|부츠"
-            r"|outfit|clothing|dress|clothes|shoes|sandals)", t):
+    # 한국어: 명령형 착용("신는다", "입어라") + 의류. 명령은 수식어가 없어도
+    # 교체 지시다.
+    if _WEAR_IMPERATIVE_KO.search(t) and _WEAR_NOUN_KO.search(t):
         return True
+    # 한국어: 착용 묘사("입고", "신고") + 의류·신발. 영어와 같은 규칙으로
+    # 일반 명사만 있으면 상태 묘사로 보고 참조를 유지한다. 구체 품목이나
+    # 수식어가 있으면 교체다(2026-10-13 흰샌 단화 지시는 구체 품목이라 유지).
+    if re.search(r"(?:입고|입은|신고|신은)", t) and _WEAR_NOUN_KO.search(t):
+        return _wear_nouns_mean_change(
+            t, _WEAR_NOUN_KO, _WEAR_GENERIC_KO, _wear_cue_ko)
     # 한국어: "다른 옷", "새 드레스" (명시 교체)
     if re.search(r"(?:다른|새|새로운|완전히 다른)\s*(?:옷|의상|드레스|차림|신발|구두|단화|샌들|outfit|dress)", t):
         return True
@@ -1031,8 +1119,19 @@ def _outfit_target_slots(text: str, source_slots=None) -> set:
     source_slots(2026-10-07 라운드 2): 이미 계산한 소스를 넘기면 같은 정규식
     두 번을 다시 돌리지 않는다. 안 넘기면 원래대로 직접 계산한다.
     """
+    if source_slots is not None:
+        return _outfit_target_slots_uncached(text, source_slots)
+    return set(_outfit_target_slots_cached(text))
+
+
+@lru_cache(maxsize=64)
+def _outfit_target_slots_cached(text: str) -> frozenset:
+    return frozenset(_outfit_target_slots_uncached(text, None))
+
+
+def _outfit_target_slots_uncached(text: str, source_slots) -> set:
     slots = _collect_role_slots(text, OUTFIT_TARGET_PATTERNS)
-    src = (_clothing_source_slots(text) if source_slots is None
+    src = (_clothing_source_slots_cached(text) if source_slots is None
            else source_slots)
     return slots - src
 
@@ -1144,6 +1243,60 @@ def _object_role_slots(text: str) -> set:
     사물 슬롯을 사람으로 오인하는 것을 막는다(다중 인물 자동 분류).
     """
     return _collect_role_slots(text, OBJECT_ROLE_PATTERNS)
+
+
+# 배경 역할 어휘 (2026-10-19 사용자 제보). 왜(Why) 사물과 분리하나:
+# "배경: 2번 이미지" 로 배경을 지정했는데 image_2 가 **가구·사물 슬롯**으로
+# 분류돼 `_furniture_dna_guard` 가 "prop identity guard / contact lock /
+# Seat backs, rails and frames / orientation lock" 을 통째로 내보냈다. 그
+# 결과 사용자가 어떤 사물도 지시하지 않았는데 16:9 는 우측 벽 아래 턱,
+# 9:16 은 사각 돌 의자가 생겨 피사체가 그 위에 앉았다(실측: 생성물 2장).
+# 배경은 사물이 아니라 **장면**이다 — 참조의 배경을 배경으로 쓸 뿐, 특정
+# 객체의 형태·접촉·방향을 강요하면 모델이 그 객체를 만들어낸다. 그래서
+# 사물 DNA 대상에서 **완전히 제외**한다(분위기 슬롯의 "완화"와도 다르다 —
+# 완화 문구조차 객체 존재를 암시한다).
+BACKGROUND_ROLE_WORDS = (
+    "배경|배경지|뒷배경|백그라운드|공간배경|배경화면"
+)
+_EN_BACKGROUND_WORDS = (
+    "background|backdrop|setting|environment"
+)
+_BACKGROUND_WORDS = BACKGROUND_ROLE_WORDS + "|" + _EN_BACKGROUND_WORDS
+# 왜(Why) _role_patterns 를 그대로 안 쓰나 (2026-10-19 실측): 공용 패턴의
+# `\s*` 간격이 **줄바꿈을 넘어** 매칭해 "피사체: 1번 이미지\n배경: 2번 이미지"
+# 에서 1번을 배경 슬롯으로 잘못 잡았다(실측: background_role_slots == {1}).
+# 줄바꿈을 넘지 않도록 간격을 `[ \t]*` 로 좁히고, 배경 어휘가 **앞**에 오는
+# 형태("배경: 2번 이미지")와 **뒤**에 오는 형태("2번 이미지 배경")를 모두 잡는다.
+_BG_GAP = r"[^\S\n]{0,8}"          # 줄바꿈 제외한 좁은 간격
+_S = r"[^\S\n]*"                    # 줄바꿈 제외 간격 (문자 클래스에 \s 는 \n 포함이라 따로 둔다)
+# 슬롯 표기 두 형태: "N번 이미지"(숫자 먼저) 또는 "이미지 N"(단어 먼저).
+_BG_SLOT_A = r"(\d{1,2})" + _S + r"(?:번|번째)?" + _S + r"(?:의|에|에서)?" + _S
+_BG_SLOT_B = r"(?:image|img|이미지)" + _S + r"_?" + _S + r"(\d+)(?![0-9])"
+_BG_CONNECT = r"(?:으로|로|는|은|는요|:)?" + _S
+BACKGROUND_ROLE_PATTERNS = (
+    # "배경: 2번 이미지" / "배경으로 쓸 이미지 2" / "background image 2"
+    r"(?:" + _BACKGROUND_WORDS + r")" + _BG_GAP + _BG_CONNECT
+    + r"(?:" + _BG_SLOT_A + r"(?:image|img|이미지)|" + _BG_SLOT_B + r")",
+    # "배경 2번" / "background 2" / "배경은 2"
+    r"(?:" + _BACKGROUND_WORDS + r")" + _BG_GAP + _BG_CONNECT
+    + r"(\d{1,2})" + _S + r"(?:번|번째)?(?![0-9])",
+    # "2번 이미지 배경" / "이미지 2를 배경" / "image 2 as background"
+    r"(?:" + _BG_SLOT_A + r"(?:image|img|이미지)|" + _BG_SLOT_B + r")"
+    + _BG_GAP + r"(?:을|를|은|는|이|가|의|에|에서|으로|로|as|for)?" + _S
+    + r"(?:" + _BACKGROUND_WORDS + r")",
+    # "2번 배경" / "2 background"
+    r"(\d{1,2})" + _S + r"(?:번|번째)" + _BG_GAP + _BG_CONNECT
+    + r"(?:" + _BACKGROUND_WORDS + r")",
+)
+
+
+def _background_role_slots(text: str) -> set:
+    """배경 역할이 명시된 번호(1~10) 집합. 없으면 set().
+
+    왜(Why): "배경: 2번 이미지", "2번은 배경" 같은 지정을 잡아 image_2 를
+    사물 DNA 대상에서 뺀다(위 BACKGROUND_ROLE_WORDS 주석 참조).
+    """
+    return _collect_role_slots(text, BACKGROUND_ROLE_PATTERNS)
 
 
 # 사물 DNA 가드를 **제외**할 슬롯을 지정하는 어휘. 기본은 모든 보조 슬롯에

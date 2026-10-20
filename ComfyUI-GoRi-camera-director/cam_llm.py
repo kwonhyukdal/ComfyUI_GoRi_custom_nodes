@@ -23,7 +23,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"PROVIDER_DEFAULT_MODELS", "_MODEL_PREFIX", "resolve_model", "_notify_llm_status", "_release_vram", "_free_gpu_for_local_llm", "_scrub_api_key_from_prompt", "_self_workflow_node", "_scrub_api_key_from_extra_pnginfo", "_api_key_left_in_png", "_SCRUB_WARNED", "_warn_scrub_unavailable", "_scrub_warn_once", "_write_env_file_key", "_write_env_file", "_valid_api_key_payload", "llm_system", "llm_user", "_SCENE_META_PAT", "clean_scene_text", "scene_camera_mismatch"
+"PROVIDER_DEFAULT_MODELS", "_MODEL_PREFIX", "resolve_model", "_notify_llm_status", "_release_vram", "_free_gpu_for_local_llm", "_scrub_api_key_from_prompt", "_self_workflow_node", "_scrub_api_key_from_extra_pnginfo", "_api_key_left_in_png", "_SCRUB_WARNED", "_warn_scrub_unavailable", "_scrub_warn_once", "_write_env_file_key", "_write_env_file", "_valid_api_key_payload", "llm_system", "llm_user", "_SCENE_META_PAT", "clean_scene_text", "scene_camera_mismatch", "fix_scene_shot_clause", "detect_video_pipeline", "notify_pipeline_type"
 ]
 
 
@@ -160,6 +160,70 @@ def _free_gpu_for_local_llm() -> bool:
         return True
     except Exception:
         return False
+
+
+# 비디오 파이프라인 표식 (2026-10-21). 왜(Why) 부분 일치 화이트리스트인가:
+# 비디오 샘플러·I2V 노드는 계속 늘어나므로 정확한 class_type 열거는 곧 낡는다.
+# 알려진 계열 이름 조각을 대소문자 무시하고 찾는다. **못 찾으면 이미지로
+# 간주**한다 — 안전한 기본이다: 이미지 파이프라인에 motion 이 들어가면 왜곡을
+# 유발하지만, 영상 파이프라인에서 motion 이 빠지는 것은 덜 해롭다.
+_VIDEO_MARKERS = (
+    "svd", "videolinearcfg", "animatediff", "ade_", "wanvideo", "wanimage",
+    "i2v", "v2v", "hunyu", "ltxv", "ltx", "cosmos", "mochi", "cogvideo",
+    "opensora", "opensoraplan", "svd_img2vid", "kling", "hailuo", "minimax",
+    "vhs_", "videomodel", "video_", "sv3d", "stablevideo", "seedance",
+    "framepack", "gimmvfi", "temporaldiff", "animatediff",
+)
+
+
+def detect_video_pipeline(prompt) -> bool:
+    """실행 프롬프트 그래프에 비디오 샘플러/모델 노드가 있으면 True.
+
+    왜(Why) 그래프를 보나 (2026-10-21): 이 노드의 하류가 정지 이미지인지 영상인지
+    에 따라 motion 지시를 넣을지 정해야 한다(정지 이미지에 'push-in camera
+    movement' 는 왜곡을 유발한다). hidden 입력 `prompt` 에 실행 그래프 전체가
+    들어오므로 class_type 을 훑어 판정한다.
+
+    반환: True=비디오(또는 비디오 표식 발견), False=이미지/불명.
+    불명은 False 로 둔다 — 안전 기본(위 주석 참조). 실패도 False.
+    """
+    try:
+        if not isinstance(prompt, dict):
+            return False
+        for entry in prompt.values():
+            if not isinstance(entry, dict):
+                continue
+            ct = str(entry.get("class_type", "") or "").lower()
+            if not ct:
+                continue
+            for marker in _VIDEO_MARKERS:
+                if marker in ct:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def notify_pipeline_type(node_id, is_video) -> None:
+    """하류 파이프라인이 이미지인지 영상인지 프론트엔드에 알린다.
+
+    프론트는 이 신호로 motion/motion2 위젯에 '영상 전용' 표시를 한다 —
+    프리셋이 채운 motion 값이 있어도 정지 이미지 파이프라인이면 실행에
+    반영되지 않음을 UI 로 보여준다(백엔드/UI 어긋남 방지, 사용자 지시).
+
+    ComfyUI 서버 밖(테스트·스탠드얼론)에서는 조용히 무시한다.
+    """
+    if node_id is None:
+        return
+    try:
+        from server import PromptServer
+        ps = PromptServer.instance
+        if ps is not None:
+            ps.send_sync("gori_pipeline_type",
+                         {"node": str(node_id), "is_video": bool(is_video)})
+    except Exception:
+        pass
+
 
 
 def _scrub_api_key_from_prompt(prompt, unique_id) -> bool:
@@ -474,6 +538,17 @@ def llm_system() -> str:
         "inside the image (sign/caption), keep it verbatim in double quotes and add "
         "'on-image text' to negative only if the model cannot render it.\n"
         "- Keep the topic's intent; do not invent facts.\n"
+        "- Environment and props: describe ONLY the setting, floor, furniture, "
+        "and objects that the topic states OR that are visibly present in a "
+        "background/prop reference image. NEVER invent a floor material, "
+        "furniture, room, or prop that the topic does not mention and no "
+        "reference establishes. If the topic delegates the background to a "
+        "reference image (e.g. \"배경: 2번 이미지\" / \"background: image 2\"), "
+        "the environment comes from that reference — do NOT write a different "
+        "floor, room, or furniture of your own; keep the environment "
+        "unspecified so the reference governs it.\n"
+        "- Landscape detail: do not add terrain or ground texture (dirt, grass, "
+        "sand, cobblestone, snow) unless the topic or a reference shows it.\n"
         "- references: one entry per attached image, using the slot number printed "
         "in the user message. role = what the image is FOR: person (a human), "
         "outfit (a garment to put on a person), object (prop/product/furniture), "
@@ -534,20 +609,115 @@ def clean_scene_text(text: str) -> str:
     return cleaned
 
 
+def _unallowed_shot_label(scene: str, allowed_labels) -> str:
+    """장면에 있으면서 allowed_labels 에 없는 샷 라벨 하나(최장 일치)를 반환.
+
+    왜(Why) _longest_shot_label 대신 이걸 쓰나 (2026-10-21): 최종 shot 이 다중
+    선택이면 고른 샷이 **여러 개**다. 단일 exclude 로 보면 나머지 고른 샷을
+    "모순"으로 오판한다 — 사용자가 중근접+중경을 골랐는데 장면이 중경을 말하면
+    중경을 걷어내는 버그가 있었다. allowed 는 고른 라벨 **집합**이다.
+
+    **최장 일치 원칙을 먼저 지킨다**: 장면에서 가장 길게 일치한 라벨이
+    allowed 안이면 모순 아님(빈 문자열). 한국어·영어 라벨은 서로 부분 문자열로
+    겹치므로("medium close-up shot" ⊃ "close-up shot", 중근접 ⊃ 근접) 이 순서가
+    없으면 고른 MCU 를 CU 로 오판한다.
+    """
+    allowed = {str(x) for x in (allowed_labels or []) if x}
+    if not allowed:
+        return ""
+    longest = _longest_shot_label(scene, exclude="")
+    if not longest:
+        return ""
+    return "" if longest in allowed else longest
+
+
 def scene_camera_mismatch(scene: str, camera: dict) -> str | None:
-    """장면 문장이 최종 카메라 라벨과 어긋나면 경고 문구를 반환한다 (자동 수정은 안 함).
+    """장면 문장이 최종 카메라 라벨과 어긋나면 경고 문구를 반환한다.
 
     (Why: 장면 prose는 LLM이 쓰고 카메라 블록은 라벨 기반으로 조립되어,
      LLM이 prose에 다른 샷을 적으면 최종 프롬프트에 모순이 실린 실측 사례가
-     있었다. 자동 교정은 오검출 리스크가 커서 로그로만 알린다.)
+     있었다. 이 함수는 **탐지·경고**만 하고 문장은 건드리지 않는다 — 실제
+     교정은 fix_scene_shot_clause 가 한다. 탐지와 교정을 나눈 이유: 로그
+     문구는 그대로 두고(기존 계약), 교정 규칙만 따로 시험할 수 있다.)
     topic_shot_label과 동일 최장 일치 기준을 쓴다 — 경고 기준과 샷 확정 기준이
     어긋나면 "경고만 뜨고 모순은 그대로"가 되기 때문이다.
+
+    다중 선택(콤마) shot 은 **고른 라벨 전부**를 정상으로 본다 (2026-10-21 수정).
+    첫 값만 보면 두 번째로 고른 샷을 모순으로 오판했다.
     """
-    # shot 이 다중 선택(콤마 구분)일 수 있다 — 첫 값을 기준으로 어긋남을 본다.
-    shot_val = (split_multi(camera.get("shot")) or [""])[0]
-    other = _longest_shot_label(scene, exclude=shot_val)
+    shot_labels = split_multi(camera.get("shot"))
+    other = _unallowed_shot_label(scene, shot_labels)
     if other:
         final_shot = camera.get("shot")
         return (f"장면 문장에 '{other}' 표현이 있는데 최종 shot은 "
                 f"'{final_shot}' — 프롬프트가 모순될 수 있음")
     return None
+
+
+def fix_scene_shot_clause(scene: str, camera: dict) -> str:
+    """장면 문장에서 최종 shot 과 어긋나는 샷 표현을 제거한다 (자동 교정).
+
+    왜(Why) 자동 교정인가 (2026-10-21 사용자 지시): scene_camera_mismatch 가
+    경고만 남기면 모순이 **최종 프롬프트에 그대로 실린다.** 사용자는 프롬프트에
+    명시한 것과 다른 결과가 나오는 경로라며 자동 수정을 요구했다. 샷 확정은
+    카메라 블록(라벨 기반)이 정본이므로, 장면 글에 남은 다른 샷 표현은 걷어낸다.
+
+    규칙 (fix_footwear_clause 와 같은 철학 — 실패하면 원문 유지):
+      - 최종 shot 라벨의 표현은 그대로 둔다 (모순 아님).
+      - 다른 샷 라벨의 표현이 장면에 있으면 그 표현을 지운다. 표현 앞뒤의
+        대표 관사·전치사("a ", "an ", "the ", "of a ")가 고아로 남으면 함께
+        정리한다.
+      - 지운 뒤 생긴 이중 공백·고아 쉼표를 정리한다.
+      - 확정 shot 이 AUTO/빈값이면 손대지 않는다 (판정 불가).
+
+    반환: 교정된 장면 문자열. 변경이 없거나 계산 실패면 입력 그대로.
+    """
+    try:
+        if not isinstance(scene, str) or not scene:
+            return scene
+        shot_labels = split_multi(camera.get("shot"))
+        # 고른 라벨이 하나도 없거나(자동) 알 수 없는 라벨뿐이면 손대지 않는다.
+        known = [l for l in shot_labels if l in TOPIC_SHOT_PHRASES]
+        if not known:
+            return scene
+        out = scene
+        # 어긋나는 샷 표현이 여러 개일 수 있다 — 고른 라벨의 표현만 남을
+        # 때까지 반복한다 (예: "medium shot ... close-up shot" 둘 다 제거).
+        # 다중 선택이면 **고른 라벨 전부**를 남긴다 (2026-10-21 수정).
+        for _ in range(6):
+            other = _unallowed_shot_label(out, known)
+            if not other:
+                break
+            for phrase in TOPIC_SHOT_PHRASES.get(other, ()):
+                if not phrase:
+                    continue
+                # " shot" 로 끝나는 표현은 bare 형태("medium")까지 함께 본다.
+                forms = [phrase]
+                if phrase.endswith(" shot"):
+                    bare = phrase[:-5]
+                    if len(bare.split()) >= 2:
+                        forms.append(bare)
+                for form in forms:
+                    # 앞 관사·전치사 + 표현 + 뒤 "of" 를 한 덩어리로 흡수해
+                    # 고아 단어가 남지 않게 한다.
+                    esc = re.escape(form)
+                    pat = re.compile(
+                        r"(?:\b(?:a|an|the|in|with|using|at|from)\s+)?"
+                        + esc + r"(?:\s+of)?[,]?\s*",
+                        re.I)
+                    out = pat.sub(" ", out)
+        # 변경이 없으면 원문 그대로 반환한다 — 정리 정규식이 멀쩡한 문장의
+        # 선행 관사·공백까지 건드리지 않게 한다 (2026-10-21 회귀 방지).
+        if out == scene:
+            return scene
+        # 정리: 이중 공백, 문장부호 앞 공백, 고아 쉼표, 시작 쉼표.
+        out = re.sub(r"\s{2,}", " ", out)
+        out = re.sub(r"\s+([.,;])", r"\1", out)
+        out = re.sub(r",\s*,", ", ", out)
+        out = re.sub(r"^\s*(?:in|with|of|at|from|using|a|an|the)\s+", "", out,
+                     flags=re.I)
+        out = out.strip().lstrip(",; ").strip()
+        return out or scene
+    except Exception:
+        return scene
+
