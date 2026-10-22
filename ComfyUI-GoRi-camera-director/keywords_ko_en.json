@@ -42,6 +42,7 @@
     {"value": "줌 인 (zoom in)", "keywords": ["줌 인", "줌인", "확대하며", "zoom in"]},
     {"value": "랙포커스 (rack focus)", "keywords": ["랙포커스", "초점 이동", "핀트 이동", "rack focus", "focus pull"]},
     {"value": "홉팬 (whip pan)", "keywords": ["휙 돌리", "빠른 팬", "whip pan", "fast pan"]},
+    {"value": "느린 팬 (sweeping pan)", "keywords": ["느린 팬", "천천히 팬", "넓게 팬", "스위핑 팬", "sweeping pan", "slow pan"]},
     {"value": "스테디캠 (steadicam)", "keywords": ["스테디캠", "부드럽게 활공", "steadicam", "gimbal glide"]},
     {"value": "슬로우 푸시인 (push-in)", "keywords": ["다가가", "천천히 다가", "가까이 접근", "approach", "push in", "closer slowly"]},
     {"value": "풀백 (pull-back)", "keywords": ["멀어지", "후퇴", "점점 멀", "pull back", "retreat", "zoom out", "fade away"]},

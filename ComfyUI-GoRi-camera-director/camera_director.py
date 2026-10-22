@@ -27,7 +27,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.67"
+__version__ = "1.9.80"
 
 
 import json
@@ -124,15 +124,44 @@ def preflight_warnings(_topic: str, camera: dict, latent_mp=None,
         cfg = _num_or_zero(cfg)
         denoise = _num_or_zero(denoise)
         shot = (camera or {}).get("shot", "")
-        if (latent_mp is not None and shot in FACE_CRITICAL_SHOTS
+        # 다중 선택(R169)은 콤마 문자열이라 통째로 비교하면 CU 가 있어도
+        # 경고가 사라진다 (2026-10-21 감사, R181). 얼굴 샷만 골라 문구에 쓴다.
+        face_shots = [s for s in split_multi(shot) if s in FACE_CRITICAL_SHOTS]
+        if (latent_mp is not None and face_shots
                 and latent_mp < 1.0):
             msgs.append(
-                f"얼굴 클로즈업({shot})인데 latent가 작음({latent_mp:.1f}MP) — "
+                f"얼굴 클로즈업({', '.join(face_shots)})인데 latent가 작음"
+                f"({latent_mp:.1f}MP) — "
                 "얼굴 뭉개짐 주의, 1MP 이상 권장")
         if steps and (steps < 8 or steps > 150):
             msgs.append(f"steps={steps} 범위 이탈 (8~150 권장) — 결과 불안정 가능")
         if cfg and (cfg < 1.0 or cfg > 12.0):
             msgs.append(f"cfg={cfg} 범위 이탈 (1.0~12.0 권장) — 파손·뻣뻣함 주의")
+        # 경계 1e-9 는 comfy/samplers.py:610 의 math.isclose(cond_scale, 1.0)
+        # (rel_tol 기본 1e-9) 과 같은 값이다 — 여기서 넓게 잡으면 샘플러가
+        # uncond 를 계산하는 구간(예: 1.001)까지 "죽었다"고 잘못 말하게 된다.
+        elif cfg and abs(cfg - 1.0) <= 1e-9 and steps and steps > 12:
+            # 왜(Why) cfg=1.0 을 따로 경고하나 (2026-10-21 실측): ComfyUI 의
+            # comfy/samplers.py 는 math.isclose(cond_scale, 1.0) 이면 uncond_=None
+            # 으로 두고 negative conditioning 을 **계산조차 하지 않는다.** 그러면
+            # 이 노드가 내보내는 negative 가 통째로 사라진다 — 부위 개수
+            # (ANATOMY_COUNT_NEGATIVE 의 "extra feet/third leg"), 위험 비율 다리
+            # 복제 에스컬레이션(ASPECT_LEG_DUPLICATION_NEGATIVE), 물리·접촉까지.
+            # 사용자 제보("자동 프리셋에서 다리 3개", 848x1232=0.688, cfg=1.0)가
+            # 정확히 이 상태였다: 에스컬레이션은 켜졌는데 채널이 죽어 무효였다.
+            # 노드는 denoise=1.0 은 경고하면서 cfg=1.0 은 침묵했고, 사용자는
+            # negative 가드가 살아 있다고 믿었다. 그 믿음을 깬다.
+            # 저스텝(<=12)이면 증류 스케줄이라 cfg=1.0 이 의도된 정상값이고 올리면
+            # 오히려 burn 한다 — denoise 경고(R30b)와 같은 분기로 뺀다.
+            msgs.append(
+                f"cfg={cfg} — ComfyUI 기본 경로는 cfg 가 1.0 이면 uncond 를 계산하지 않아 "
+                "negative conditioning 이 통째로 무효입니다. 이 노드의 negative "
+                "가드(부위 개수·다리 복제·여분 발·접촉)가 생성에 전달되지 않고 "
+                "positive 가드만 방어합니다. negative 를 쓰려면 cfg 2.0~4.0 을 "
+                "권장합니다 — 단 일부 환경은 1.0 초과에서 샘플러가 크래시하므로"
+                "(실측 2026-10-13: aimdo malloc_graph_pop NULL) 그때는 런처에 "
+                "--disable-comfy-compiler 를 넣거나 positive 가드와 2차 패스"
+                "(일관성 키퍼)로 방어하십시오")
         if denoise and not 0.0 < denoise <= 1.0:
             msgs.append(f"denoise={denoise} 범위 이탈 (0 초과 1 이하)")
         elif denoise and denoise > 0.9:
@@ -221,6 +250,70 @@ def _sheet_kind_from_llm(obj) -> str:
     return kind if kind in ("single", "multi") else ""
 
 
+def _object_log_text(dets) -> str:
+    """사물 검출 목록 → "chair 0.72, cup 0.55". 없으면 "".
+
+    왜(Why) 이름과 점수를 함께 찍나: 점수만 보면 무엇이 잡혔는지 알 수 없고,
+    이름만 보면 얼마나 확신하는지 알 수 없다. 오탐을 사람이 판단하려면 둘 다
+    필요하다 — 이 줄은 그 판단의 근거로 남긴다.
+    """
+    try:
+        parts = []
+        for d in (dets or []):
+            if not isinstance(d, dict):
+                continue
+            nm = str(d.get("name") or "").strip()
+            if not nm:
+                continue
+            parts.append("%s %.2f" % (nm, float(d.get("score") or 0.0)))
+        return ", ".join(parts)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _slot_analysis_text(label, poses, dets) -> str:
+    """슬롯 1개 → "1번: person 1 / 사물 chair 0.72, cup 0.55".
+
+    AC-2 의 예시가 이 형식이다. 사람 수는 포즈 모델이, 사물은 객체 검출기가
+    낸다 — 두 근거를 한 줄에 나란히 둬서 서로 어긋나는지 눈으로 볼 수 있다.
+    """
+    parts = []
+    n = int(poses or 0)
+    if n > 0:
+        parts.append("person %d" % n)
+    obj_txt = _object_log_text(dets)
+    if obj_txt:
+        parts.append("사물 " + obj_txt)
+    return "%d번: %s" % (int(label), " / ".join(parts) if parts else "검출 없음")
+
+
+def _reference_analysis_text(items) -> str:
+    """참조 항목들 → 슬롯별 요약 한 줄. 볼 게 없으면 "".
+
+    왜(Why) `classify_reference` 를 다시 부르나: `classify_references` 는
+    {슬롯: kind} 만 준다. 사물까지 보려면 분류 결과 전체가 필요한데, 분류는
+    `_sig` 내용 지문으로 캐시되므로 **추가 추론 비용이 0** 이다.
+    슬롯 하나가 실패해도 그 칸만 건너뛰고 나머지는 남긴다 — 진단용 줄이
+    진단 대상 때문에 사라지면 안 된다.
+    """
+    segs = []
+    for pair in (items or []):
+        try:
+            label, img = pair
+            n = int(str(label))
+        except (TypeError, ValueError):
+            continue
+        try:
+            info = classify_reference(img)
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(info, dict):
+            continue
+        segs.append(_slot_analysis_text(n, info.get("poses"),
+                                        info.get("objects")))
+    return " | ".join(segs)
+
+
 def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
                        image_items, primary_image, _reference_images,
                        tier="", llm_hint="", weak_sheet_slots=None,
@@ -248,6 +341,21 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     """
     text = subject_text or ""
     is_human = _is_human_subject(text)
+    # 참조 이미지에 사람이 검출됐으면 사람으로 본다 (2026-10-21 사용자 실측).
+    # 왜(Why) 텍스트만으로 부족한가: topic 을 비우고 참조 사진만 넣는 정상
+    # 사용에서 text 에 사람 언급이 없어 is_human=False 가 된다. 그러면 다리·
+    # 발 무결성(leg limb_integrity)·부위 개수·신발 가드가 **전부 꺼져**,
+    # 사람이 있는 장면인데 다리 3개가 나온다(사용자 실측: topic 빈칸 + 참조
+    # 2장 + 16:9). 참조 자동 분류가 픽셀로 사람을 찾았으면 그 사실을 반영한다.
+    # _hint_person_slots 는 classify_references 가 심은 사람 슬롯이다(없으면
+    # 빈 리스트 → 참조에 사람이 없는 제품·풍경 장면은 종전과 동일). run_prompt
+    # 경로는 run() 뒤 힌트가 살아 있어 반영되고, 힌트가 없는 테스트·단독 호출은
+    # 영향받지 않는다.
+    if not is_human:
+        try:
+            is_human = bool(_hint_person_slots())
+        except Exception:  # noqa: BLE001
+            pass
     labels = list(image_labels or [])
     # 왜(Why) 샷 인지 게이트가 필요한가 (2026-10-11 실측): 근접(CU)·극접(ECU)
     # 샷은 다리·발이 화면에 없다. 그런데 anatomy_count("두 다리, 발가락 5개")·
@@ -257,7 +365,12 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # 부위가 보이는 샷에만 걸어야 한다. 샷이 AUTO거나 비어 있으면(판정 불가)
     # 보수적으로 켠다 — 꺼서 방어가 사라지는 것보다 낫다.
     _shot = (_camera if isinstance(_camera, dict) else {}).get("shot", "")
-    _limb_visible = _shot not in FACE_CRITICAL_SHOTS
+    # 다중 선택(R169)은 "근접 (CU),중경 (MS)" 같은 콤마 문자열이다. 통째로
+    # 비교하면 어떤 표에도 없으므로 분기가 조용히 꺼진다 (2026-10-21 감사,
+    # R181): 화면에 없는 다리 문구가 다시 붙어 여분의 다리를 만들었다.
+    # 하나라도 얼굴 클로즈업이면 상반신(다리·발 없음) 변형을 고른다 — 문구가
+    # 화면에 없는 사지를 설명하는 쪽이 실제 손실이었다(2026-10-11 실측).
+    _limb_visible = not has_any_label(_shot, FACE_CRITICAL_SHOTS)
     # 다중 참조(2장 이상)면 믹스 변형 가드를 양쪽에 자동 첨부.
     mix_guard = image_count >= 2
     # 인물 신체 발란스: 인물 주제 + 사지가 보이는 샷. 왜(Why) 샷을 보나
@@ -306,13 +419,34 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # 들어가고, 반환 dict 에는 조각이 없어 읽을 곳이 없다 — write-only 였다.
     spacing_pos = ""
     spacing_measure = None
-    if image_count >= 2:
+    # 하단 잘림 측정 (2026-10-21): 간격 가드(spacing_guard)는 참조 2장 이상에서만
+    # 프롬프트 문구를 만든다. 그러나 "참조 피사체가 하단에서 잘려 있는가" 는
+    # 1장에서도 읽을 수 있고(오히려 1장 워크플로에서 더 흔하다), 재는 값은 같다.
+    # 그래서 측정 게이트만 primary_image 기준으로 넓히고 **문구 게이트는 그대로
+    # 둔다** — 문구 생성 조건을 넓히면 다른 조건의 결과가 함께 흔들린다.
+    if primary_image is not None:
         spacing_measure = subject_spacing(primary_image)
+    if image_count >= 2:
         _sp_pos, _sp_neg = spacing_guard(spacing_measure, text)
         if phys_pos == "" and _sp_pos:
             spacing_pos = _sp_pos
         if _sp_neg:
             phys_neg = (phys_neg + ", " + _sp_neg) if phys_neg else _sp_neg
+    # 참조 인물이 화면 하단에서 잘려 하반신을 새로 그려야 하는 상태인가.
+    # 왜(Why) 이 판정을 만드나 (2026-10-21 사용자 실측): 참조에 하반신이 없는데
+    # 전신 샷을 요구하면 모델이 화면에 없는 다리·발을 **새로 그려야 하고**, 그
+    # 과정에서 다리·발이 하나 더 생긴다. 사용자 제보 "프리셋 자동에서 다리 3개"
+    # 의 워크플로 참조(2026-09-27 17 42 22.png)가 허벅지 중간에서 잘려 하단
+    # 여백이 0% 였다. subject_spacing 은 그 값을 이미 재고 있었지만 로그에만
+    # 쓰였고, 가드는 반대 방향("바닥이 보이면 그대로 유지")뿐이었다 — 노드는
+    # 이 조건을 침묵했고 사용자는 원인을 알 수 없었다.
+    # 사지가 화면에 없는 근접·극접은 하반신을 그릴 필요가 없어 제외한다.
+    # 경계는 spacing_guard 와 **같은** SPACING_BOTTOM_CROP 을 쓴다 — 두 판정이
+    # 다른 값을 쓰면 어떤 여백에서 서로 반대를 말하게 된다.
+    _bm = (spacing_measure or {}).get("bottom_margin")
+    ref_bottom_cropped = bool(is_human and _limb_visible
+                              and _bm is not None
+                              and _bm <= SPACING_BOTTOM_CROP)
     grounding = ""
     if not phys_pos and is_human:
         grounding = physics_grounding_guard(text)
@@ -336,6 +470,12 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
 
     furniture_slots = _object_dna_slots(text, labels, image_count)
     furniture_pos = _furniture_dna_guard(text, furniture_slots)
+    # 배경 참조의 사물 충실 (2026-10-22 실측, 파란 동그라미). 사물 정식 슬롯과
+    # 달리 **존재를 요구하지 않는다** — 조건문 하나만 낸다. 왜 필요한지는
+    # cam_guards 의 FURNITURE_BACKGROUND_POSITIVE 주석 참조(실측: 좌.png 의 검은
+    # 원기둥 다리 4개가 갈색 목재로 바뀌고 앞다리가 신발에 끼었다).
+    furniture_bg_slots = _background_dna_slots(text, labels, image_count)
+    furniture_bg_pos = _furniture_background_guard(text, furniture_bg_slots)
     # 참조 사물 외형 고정 (2026-10-16 실측, 파란 동그라미): 의자 등받이 채널
     # 터프팅이 사라지고 색이 밝아졌다. FURNITURE_DNA 는 "정체성 유지"라 어떤
     # 특징인지 지명하지 못하고, denoise=1.0 에서 참조 픽셀은 거의 안 쓰인다 —
@@ -380,6 +520,7 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         "garment_boundary": (_garment_boundary_guard(_shot)[0]
                              if garment_boundary else ""),
         "furniture": furniture_pos,
+        "furniture_bg": furniture_bg_pos,
         "character_sheet": sheet_text,
         "pose": pose_pos,
         "spacing": spacing_pos,
@@ -406,8 +547,10 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
             "hint_defense": hint_defense,
             "remove_item": bool(remove_item),
             "furniture": bool(furniture_pos),
+            "furniture_bg": bool(furniture_bg_pos),
             "character_sheet": bool(sheet_text),
             "pose_ref": bool(pose_pos),
+            "ref_bottom_cropped": ref_bottom_cropped,
         },
         "physics_neg": phys_neg,
         "pose_slots": sorted(pose_slots),
@@ -418,6 +561,7 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         "weak_sheet_slots": [str(s) for s in (weak_sheet_slots or [])],
         "spacing_measure": spacing_measure,
         "furniture_slots": furniture_slots,
+        "furniture_bg_slots": furniture_bg_slots,
         "furniture_surface_pos": furn_surface_pos,
         "furniture_surface_neg": furn_surface_neg,
     }
@@ -728,6 +872,13 @@ class CameraDirector:
                     _log("[Camera Director] 참조 자동 분류 — 인물 슬롯 "
                          + "/".join(str(x) for x in _persons)
                          + f" (분석 {len(ref_kinds)}칸)")
+                # 참조 분석 요약 (2026-10-21) — 슬롯마다 사람 수와 사물을 한 줄로.
+                # 왜(Why) 남기나: 검출 결과가 어디에도 안 보이면 사용자는 노드가
+                # 무엇을 읽었는지 알 수 없고 우리도 검출률을 판단할 수 없다.
+                # 프롬프트 문구는 건드리지 않는다(범위 밖) — 관측만 한다.
+                _an = _reference_analysis_text(reference_items)
+                if _an:
+                    _log("[Camera Director] 참조 분석 — " + _an)
             except Exception as _e:  # noqa: BLE001
                 ref_kinds = {}
                 _log("[Camera Director] 참조 자동 분류 실패 "
@@ -1261,11 +1412,44 @@ class CameraDirector:
         # 부채 보유 문장 복구 (2026-10-15): 번역이 없앤 부채를 한글 원문
         # 근거로 되붙인다 (같은 이유 — 없어진 지시는 생성물에도 없다).
         _scene_assembled = fix_fan_clause(scene, _scene_assembled)
+        # 손가락 분리 단서를 장면 문장 위치에도 둔다 (2026-10-22 R194 실측).
+        # 왜(Why) 가드 위치만으로는 부족했나: 실기 A/B 에서 가드 위치 단독은
+        # 시드별로 엇갈렸다(-0.14 / +0.08 / +0.36). 시드 8개 짝지음에서는 장면
+        # 문장에도 둔 팔이 평균 +0.33 · 5승 2패 1무 · 해부 붕괴 0 이었다.
+        # 문구·게이트는 cam_guards 의 scene_finger_cue 한 곳에 있다(R192 가드와
+        # 같은 사람 판정 — 여기서 다시 판정하지 않는다).
+        _scene_cue = scene_finger_cue((analysis or "") + " " + (scene or ""))
+        if _scene_cue:
+            _scene_assembled = (_scene_assembled.rstrip().rstrip(".")
+                                + ". " + _scene_cue)
+        # 로그는 여기서 남기지 않는다 (R196, 2026-10-22 실측). 이 조립문은
+        # prompt_in 이 있으면 **버려진다** — run_prompt 가 앵커로 다시 세운다.
+        # 그래서 여기서 "둠" 을 찍으면 실제 출력에 없는 삽입을 알리게 되고,
+        # run_prompt 도 같은 줄을 찍어 한 생성에 같은 로그가 2번 났다.
+        # 최종 텍스트를 아는 run_prompt 한 곳에서만 찍는다.
         # 포즈 분기 문장 (2026-10-13, PROVISIONAL): 포즈 동사가 있는 장면은
         # 묘사 쪽으로 당긴다. 참조와 같으면 무해(일치하므로)하고 다르면
         # 분기를 지시한다. 샘플러 추종은 사용자 A/B 로 확인한다.
         _scene_assembled = add_pose_divergence(
             _scene_assembled, image_count, scene)
+        # 신발 형용사가 옷 명사에 붙은 입력 경고 (2026-10-22, **로그 전용**).
+        # 왜(Why) 로그만인가: 원인은 카메라가 아니라 사용자가 쓴 문장이다
+        # (오타 "단환" → 번역기가 "closed-toed shorts" 창작 — 실측). 문구를
+        # 바꾸면 원문에 없는 것을 지어내는 추정 교정이 되고, 같은 문구를 쓰는
+        # 멀쩡한 조건의 결과도 함께 흔들린다(2026-10-21 잘림 경고와 같은 판단).
+        # 그래서 새 플래그·plan 키·negative 가 없다. 사용자가 고칠 문제이므로
+        # 사실(문제 문구)과 처방(철자 확인)만 알린다.
+        # 왜(Why) 사용자 입력만 보나: 카메라가 만든 가드 문구에는 "open-toe
+        # shoes" 처럼 정상 조합만 있다 — 진단 대상은 사람이 쓴 문장이다.
+        # 왜(Why) _scene_assembled 도 함께 보나: 한글 토픽은 이 시점에 이미
+        # 영문이고, 번역기가 창작한 문장은 여기에만 나타난다.
+        for _fn_bad in footwear_noun_mismatch(
+                " ".join(x for x in (topic, scene, _scene_assembled,
+                                     prompt_in) if x)):
+            _log("[Camera Director] ⚠ 신발 형용사가 옷 명사에 붙어 있습니다: "
+                 f"\"{_fn_bad}\" — 번역기가 신발 낱말을 다른 단어로 옮겼을 "
+                 "수 있습니다. 주제의 신발 단어 철자를 확인하십시오 "
+                 "(실측 예: \"단환\" → \"단화\")")
         # 정면 응시 보강 (2026-10-15 실측): "정면을 바라보며" 가 있어도
         # 생성 결과는 시선을 옆으로 돌렸다. 사람 주제 + 정면 markers 일 때만
         # positive 보강문과 negative 회피어를 짝으로 준다.
@@ -1304,6 +1488,13 @@ class CameraDirector:
             else:
                 _log(f"[Camera Director] ⚠ {mismatch}")
         # 출발 점검: 깨질 조합이면 콘솔 경고 (pf_* 0은 검사 안 함).
+        # 여기서 latent_mp 를 넘기지 않는 것은 **빠뜨린 것이 아니다** — base
+        # 노드에는 LATENT 입력이 없고 run() 에도 latent 인자가 없어 알 수 있는
+        # 값 자체가 없다(해상도 없는 경로에서 저해상 경고는 불가능하다).
+        # 얼굴 클로즈업·저해상 경고는 latent 를 받는 Encode 경로가 낸다
+        # (run_prompt 가 같은 점검에 latent_mp 를 넘긴다). 이 사실은 R179 가
+        # 실측으로 고정한다 — 종전에 "run() 이 안 넘겨 두 경로 모두 침묵한다" 는
+        # 보고가 있었으나 사실이 아니었다.
         for _warn in preflight_warnings(topic or scene, camera,
                                         steps=pf_steps, cfg=pf_cfg,
                                         denoise=pf_denoise):
@@ -1336,6 +1527,19 @@ class CameraDirector:
         _phys_pos = _gpos["physics"]
         _phys_neg = _plan["physics_neg"]
         _px_sheet = _plan["pixel_sheet_slots"]
+        # 참조 하단 잘림 경고 (2026-10-21). **로그 전용** — 프롬프트 문구는
+        # 건드리지 않는다. 근거: 실측에서 자동 프리셋 조항을 하나씩 바꿔도
+        # (샷만·렌즈만) 3다리가 남았으므로 문구로 잡히는 문제가 아니고,
+        # 문구를 늘리면 같은 게이트를 쓰는 다른 조건의 결과가 함께 흔들린다.
+        # 사용자에게 필요한 것은 사실과 처방이므로 그것을 여기서 알린다.
+        if _gflags.get("ref_bottom_cropped"):
+            _bm_ref = (_plan["spacing_measure"] or {}).get("bottom_margin") or 0.0
+            _log("[Camera Director] ⚠ 참조 인물이 화면 하단에서 잘려 있습니다"
+                 f"(측정 하단 여백 {int(round(_bm_ref * 100))}%) — 이 샷은 화면에 "
+                 "없는 하반신(다리·발)을 모델이 새로 만들어야 하므로 다리·발 "
+                 "개수가 늘어날 수 있습니다. 다리까지 보이는 참조를 함께 넣거나, "
+                 "상반신 샷(근접 CU·극접 ECU)으로 자르거나, 시드를 바꾸거나, "
+                 "2차 패스(일관성 키퍼)로 방어하십시오")
         if mix_guard:
             positive = positive.rstrip(". ") + ". " + _gpos["mix_guard"] + "."
             _log("[Camera Director] 다중 참조 믹스 가드 활성 (연결 이미지 "
@@ -1381,6 +1585,16 @@ class CameraDirector:
             _log("[Camera Director] 가구·사물 DNA 가드 활성 ("
                  + "/".join(str(x) for x in sorted(_plan["furniture_slots"]))
                  + "번 — 형태·재질·색·비율 원본 유지)")
+        # 배경 참조의 사물 충실 (2026-10-22 실측) — 위 사물 DNA 와 달리 **존재를
+        # 요구하지 않는** 조건문이다. 있으면 참조 그대로, 없으면 만들지 말 것.
+        # 왜 배경에만 붙는지는 cam_guards 의 FURNITURE_BACKGROUND_POSITIVE 참조.
+        _fbg_text = _gpos.get("furniture_bg", "")
+        if _fbg_text:
+            positive = positive.rstrip(". ") + ". " + _fbg_text + "."
+            _log("[Camera Director] 배경 참조 사물 충실 가드 활성 ("
+                 + "/".join(str(x) for x in
+                            sorted(_plan["furniture_bg_slots"]))
+                 + "번 — 화면에 보이면 참조 그대로: 다리·접지·재질·색)")
         # 참조 사물 외형 고정 (2026-10-16 실측) — 가구 DNA 문구와 **짝**이다.
         # 한쪽만 붙으면 방어가 조용히 사라진다 (같은 이음새 결함 실측 다수).
         _fsurf_pos = _plan.get("furniture_surface_pos", "")
@@ -1458,6 +1672,7 @@ class CameraDirector:
                                   physics_neg=_phys_neg,
                                   detail_def=detail_def,
                                   furniture=bool(_furn_text),
+                                  furniture_bg=bool(_fbg_text),
                                   remove_item=bool(_rm_text),
                                    anatomy_count=anatomy_count,
                                    anatomy_count_upper=bool(
@@ -1748,16 +1963,25 @@ class CameraDirectorEncode(CameraDirector):
             return director_conditioning
         return base_conditioning + director_conditioning
 
-    # 프롬프트 문장 합치기 — 마침표 하나로 자연스럽게 이어 붙인다
+    # 프롬프트 문장 합치기 — 마침표 하나로 자연스럽게 잇고, 끝도 마침표 하나로 닫는다.
+    # 왜(Why) 끝 마침표를 여기서 보장하나 (R197, 2026-10-22 전수 실측): 이 함수의
+    # 마지막 분기가 `base + ". " + camera` 를 그대로 돌려주고, 마지막에 붙는
+    # 조각(prompt_in 분기의 가드 절)이 마침표 없이 끝나면 조립문 전체가
+    # 마침표 없이 끝났다. 실측: 30 토픽 × prompt_in 3종 × 참조 4조합 = 360/600
+    # 케이스가 마침표 없이 끝났고, prompt_in 이 없는 경로(품질가드 조립)는
+    # 마침표로 끝나 **두 경로가 서로 달랐다**. 위 주석이 이미 "마침표 하나" 를
+    # 계약으로 적어 두었으므로 코드를 그 계약에 맞춘다.
+    # 조각마다 끝 마침표·공백을 떼고 이어 붙이므로 ".." 도 " ." 도 생기지 않는다
+    # (R195 와 같은 규칙 — 그리하여 결과는 정확히 마침표 한 번으로 끝난다).
     @staticmethod
     def _combine_prompt_text(base_text: str, camera_text: str) -> str:
         base = (base_text or "").strip().rstrip("., ")
-        camera = (camera_text or "").strip()
+        camera = (camera_text or "").strip().rstrip(". ")
         if not base:
-            return camera
+            return camera + "." if camera else ""
         if not camera:
             return base + "."
-        return base + ". " + camera
+        return base + ". " + camera + "."
 
     # 프롬프트 전용 실행 본체 — 판정/가드/문장 조립 후 conditioning 2개 + 문장 + 이미지 + latent 반환
     def run_prompt(self, clip, topic="", preset=AUTO, automation="",
@@ -1903,6 +2127,8 @@ class CameraDirectorEncode(CameraDirector):
                  "캐릭터 시트 패턴 감지 (topic 문구와 무관)")
         _cs_text_pi = _gpos_pi["character_sheet"]
         _furn_pos_pi = _gpos_pi["furniture"]
+        # 배경 참조 사물 충실 (2026-10-22) — base run 과 같은 plan 조각.
+        _furn_bg_pi = _gpos_pi.get("furniture_bg", "")
         # 참조 사물 외형 고정 (2026-10-16) — 가구 DNA 문구와 짝이다.
         _furn_surf_pos_pi = _plan_pi.get("furniture_surface_pos", "")
         _furn_surf_neg_pi = _plan_pi.get("furniture_surface_neg", "")
@@ -2000,6 +2226,19 @@ class CameraDirectorEncode(CameraDirector):
             _user_text = fix_background_clause(_ko_user_pi, _user_text)
             # 부채 보유 문장 복구 (2026-10-15, base run과 동일 판정).
             _user_text = fix_fan_clause(_ko_user_pi, _user_text)
+            # 손가락 분리 단서를 장면 문장 위치에도 둔다 (2026-10-22 R194 실측).
+            # base run 과 **같은 헬퍼**(scene_finger_cue)로 판정한다 — 두 경로가
+            # 각자 판정하면 한쪽만 갱신돼 방어가 조용히 어긋난다(2026-09-28 실측).
+            # 문장 소스는 resolve_guard_plan 에 넘긴 _eth_text_pi 와 같다.
+            # 위치: 포즈 분기·정면 응시·색상 고정보다 **앞** — 실측한 팔에서 단서가
+            # 사용자 문장 끝(prompt_in 안)에 있었고 그 뒤에 저 문장들이 붙었다.
+            _scene_cue_pi = scene_finger_cue(_eth_text_pi)
+            if _scene_cue_pi and _user_text.strip():
+                _user_text = (_user_text.rstrip().rstrip(".")
+                              + ". " + _scene_cue_pi)
+            # 로그는 아래(분기 밖)에서 **최종 텍스트**를 보고 한 번만 남긴다
+            # (R196). 여기서 찍으면 prompt_in 이 **없는** 분기에서 이 사본이
+            # 버려지는데도(positive_text = prompt_out) "둠" 이라고 알리게 된다.
             # 포즈 분기 문장 (2026-10-13, PROVISIONAL): _scene_pi_en 과
             # external_prompt_en 을 합친 뒤 한 번만. 각자에 붙이면 문장이
             # 2회 중복된다 (add_pose_divergence 는 같은 문장 중복을 막지만
@@ -2030,6 +2269,18 @@ class CameraDirectorEncode(CameraDirector):
         else:
             positive_text = prompt_out
             single_person_anchor = ""
+        # R196 (2026-10-22 실측) — 단서 로그는 **최종 텍스트에서 한 번만**.
+        # 왜(Why) 종전에는 같은 줄이 2번 찍혔나: run() 과 run_prompt() 가 각자
+        # 자기 삽입에 로그를 남겼는데, 두 분기 중 **한쪽 삽입은 항상 버려진다**
+        #   prompt_in 있음   positive_text 를 앵커로 다시 세운다 -> run() 몫 버려짐
+        #   prompt_in 없음   positive_text = prompt_out          -> run_prompt 몫 버려짐
+        # 그래서 "실제로 나가는 글자" 를 아는 이 자리에서 한 번만 알린다.
+        # 판정 표식은 앞이 ". " 인 사본이다 — 단서 문구(SCENE_FINGER_CUE)가
+        # FINGER_SEPARATION_POSITIVE 를 품고 그 부분문자열이 **가드 문장 끝과
+        # 같은 글자**라, 그냥 세면 가드 몫까지 세어진다(2026-10-22 실측 함정).
+        if (". " + SCENE_FINGER_CUE) in positive_text:
+            _log("[Camera Director] 손가락 분리 단서를 장면 문장 위치에도 둠 "
+                 "(R194 · 실측 평균 +0.33, 보장 아님)")
         # 포즈 맵 + 프롬프트 묘사를 **함께** 쓴다 (2026-10-14 사용자 지시).
         # pose_image 가 연결되고 판독되면 맵 문장을 프롬프트에 **보탠다**.
         # image_items(개수·vision·latent)에는 넣지 않는다 — 맵은 참조 사진이
@@ -2148,6 +2399,11 @@ class CameraDirectorEncode(CameraDirector):
             if _furn_surf_pos_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _furn_surf_pos_pi)
+            # 배경 참조 사물 충실 (2026-10-22) — base run 과 같은 판정·같은
+            # plan 조각이다. 사물 정식 슬롯과 달리 존재를 요구하지 않는다.
+            if _furn_bg_pi:
+                positive_text = self._combine_prompt_text(positive_text,
+                                                          _furn_bg_pi)
             # (캐릭터 시트 문구는 위에서 _cs_text_pi 로 이미 병합했다.
             # 실행 간 캐시로 같은 문구를 또 붙이면 110단어어 positive 가 두 번
             # 들어가 token 을 중복 소비한다. 2026-09-28 실행 간 캐시 제거,
@@ -2221,6 +2477,7 @@ class CameraDirectorEncode(CameraDirector):
             image_labels=last_labels,
             pose_ref=bool(_pose_pos_pi), physics_neg=_phys_neg_pi,
             detail_def=_detail_def_pi, furniture=bool(_furn_pos_pi),
+            furniture_bg=bool(_furn_bg_pi),
             remove_item=_remove_item_pi, anatomy_count=_anatomy_count_pi,
             character_sheet=bool(_cs_text_pi),
             sheet_kind=getattr(self, "_last_sheet_kind", ""),

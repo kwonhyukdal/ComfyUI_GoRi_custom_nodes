@@ -14,8 +14,9 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "ANIMAL_SUBJECT_KEYWORDS", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
-"_hint_person_slots", "_hint_pose_slots", "_text_names_slots", "intent_core"
+"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "HUMAN_PRONOUN_KEYWORDS", "_human_pronoun_present", "ANIMAL_SUBJECT_KEYWORDS", "_animal_keyword_present", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
+"_hint_person_slots", "_hint_pose_slots", "_text_names_slots", "intent_core",
+"footwear_noun_mismatch"
 ]
 
 
@@ -169,6 +170,41 @@ HUMAN_SUBJECT_KEYWORDS = (
 _MODEL_OBJECT_PATTERN = re.compile(r"(?:3d|3-d|3차원|scale)\s*(?:model|모델)")
 
 
+# 인물 대명사 (2026-10-22, R193). 왜(Why) 필요한가(실측): 사용자 토픽이 그래프
+# 안의 번역 노드를 지나 "He is wearing jeans, his hands on his knees, and is
+# sitting on a chair indoors, looking straight ahead." 가 되자 인물 키워드가
+# 하나도 없어 `_is_human_subject` 가 False 였고, **인물 가드 22문장이 통째로
+# 사라졌다**(같은 문장을 "The woman is …" 로 쓰면 붙는다. 프롬프트 3,334자 vs
+# 7,024자). 대명사는 사람을 가리키는 가장 흔한 표기인데 목록에 없었다.
+#
+# 왜(Why) 두 단계인가: 대명사는 **문맥 없이는 약한 신호**다. 실측 —
+# "The cat is licking his paw" 는 동물 장면인데 "his" 하나로 사람이 되어버린다.
+# 그래서 동물 종이 명시됐으면 대명사만으로는 사람으로 보지 않는다(위 의상 교체
+# 분기의 동물 양보와 같은 판단). 동물 낱말 스캔은 `_animal_keyword_present`
+# 하나만 쓴다 — `_is_animal_subject` 를 부르면 그 함수가 다시 이 함수를 불러
+# **무한 재귀**가 된다(그 함수 첫 줄이 `_is_human_subject` 다).
+#
+# 왜(Why) 단어 경계인가: 영문 부분 일치로 하면 "the" 안의 "he" 가 잡혀
+# **모든 영문 토픽**이 사람이 된다. `_ascii_word_present` 로만 본다.
+HUMAN_PRONOUN_KEYWORDS = (
+    "he", "she", "him", "her", "hers", "his", "they", "them", "their",
+    "theirs", "himself", "herself", "themselves",
+    "그녀", "그들",
+)
+
+
+def _human_pronoun_present(text: str) -> str:
+    """사람을 가리키는 대명사. 있으면 그 낱말을, 없으면 빈 문자열을 돌려준다."""
+    t = (text or "").lower()
+    for word in HUMAN_PRONOUN_KEYWORDS:
+        if _ascii_only(word):
+            if _ascii_word_present(t, word):
+                return word
+        elif _ko_word_present(t, word):
+            return word
+    return ""
+
+
 # 사람 주제인지 — 의상 교체 표현도 사람으로 보고, 동물/사물 명시가 있으면 양보한다
 def _is_human_subject(text: str) -> bool:
     t = (text or "").lower()
@@ -195,19 +231,12 @@ def _is_human_subject_cached(t: str) -> bool:
         # 이면 "양옆" 이 "양", "소파" 가 "소", "말풍선" 이 "말" 로 잡혀
         # 동물 우선 분기가 발화해 **인물 가드가 통째로 사라진다**. 문서화된
         # 실측 오탐(2026-09-28)을 이 형제 함수가 그대로 달고 있었다.
-        for animal in ANIMAL_SUBJECT_KEYWORDS:
-            if _ascii_only(animal):
-                # 왜(Why) 영문도 경계 판정인가 (2026-10-11 실측): raw `in` 이면
-                # "dog" 이 "dogmatic", "owl" 이 "bowl", "lion" 이 "rebellious",
-                # "rat" 이 "pirate" 안에서 잡혀 **사람 장면이 동물로 뒤집히고**
-                # _is_human_subject 가 False 가 되어 인물 가드가 통째로 사라진다.
-                # 실측: "wear the outfit from image 2, a dogmatic pose" →
-                # human=False 이고 animal 도 False 라 어느 가드도 안 붙었다.
-                # 형제 함수 _is_animal_subject 와 같은 _ascii_word_present 로 맞춘다.
-                if _ascii_word_present(t, animal):
-                    return False
-            elif _ko_word_present(t, animal):
-                return False
+        #
+        # 2026-10-22 (R193): 낱말 스캔은 `_animal_keyword_present` 하나로 합쳤다.
+        # 대명사 단계가 같은 스캔을 써야 하는데 `_is_animal_subject` 는 첫 줄에서
+        # 이 함수를 다시 불러 무한 재귀가 된다(실측: 그대로 넣으면 RecursionError).
+        if _animal_keyword_present(t):
+            return False
         return True
     if _MODEL_OBJECT_PATTERN.search(t):
         keywords = tuple(k for k in HUMAN_SUBJECT_KEYWORDS
@@ -239,6 +268,13 @@ def _is_human_subject_cached(t: str) -> bool:
             # 명시 키워드로 유지한다.
             if _ko_word_present(t, keyword):
                 return True
+    # ③ 대명사 단계 (2026-10-22, R193). 명사가 없어도 사람을 가리키는 대명사가
+    #    있으면 사람으로 본다 — 단, **동물 종이 명시됐으면 양보한다.**
+    #    왜(Why) 양보인가(실측): "The cat is licking his paw" 를 사람으로 보면
+    #    고양이 그림에 사람 해부·정체성 가드가 붙는다. 대명사는 문맥 없이는
+    #    약한 신호이므로 동물 명시를 이긴다고 보지 않는다.
+    if _human_pronoun_present(t) and not _animal_keyword_present(t):
+        return True
     return False
 
 
@@ -257,6 +293,29 @@ ANIMAL_SUBJECT_KEYWORDS = (
     "돼지", "곰", "호랑이", "사자", "원숭이", "판다", "펭귄", "오리", "백조",
     "거북이", "뱀", "개구리", "물고기", "고래", "돌고래", "햄스터",
 )
+
+
+def _animal_keyword_present(text: str) -> bool:
+    """동물 낱말이 문맥에 있는지만 본다 (사람 판정을 부르지 않는다).
+
+    왜(Why) 따로 있나 (2026-10-22, R193): `_is_animal_subject` 는 첫 줄에서
+    `_is_human_subject` 를 부른다. 사람 판정의 대명사 단계가 동물 양보를 보려고
+    그 함수를 부르면 **서로를 불러 무한 재귀**가 된다. 스캔만 여기로 뺀다.
+
+    왜(Why) 영문도 경계 판정인가 (2026-10-11 실측): raw `in` 이면 "dog" 이
+    "dogmatic", "owl" 이 "bowl", "lion" 이 "rebellious", "rat" 이 "pirate" 안에서
+    잡혀 **사람 장면이 동물로 뒤집히고** 인물 가드가 통째로 사라진다. 실측:
+    "wear the outfit from image 2, a dogmatic pose" → human=False 이고 animal 도
+    False 라 어느 가드도 안 붙었다. 형제 함수와 같은 `_ascii_word_present` 를 쓴다.
+    """
+    t = (text or "").lower()
+    for keyword in ANIMAL_SUBJECT_KEYWORDS:
+        if _ascii_only(keyword):
+            if _ascii_word_present(t, keyword):
+                return True
+        elif _ko_word_present(t, keyword):
+            return True
+    return False
 
 
 ANIMAL_SPECIES_POSITIVE = (
@@ -377,13 +436,7 @@ def _is_animal_subject(text: str) -> bool:
         return False
     if _is_human_subject(t):
         return False
-    for keyword in ANIMAL_SUBJECT_KEYWORDS:
-        if _ascii_only(keyword):
-            if _ascii_word_present(t, keyword):
-                return True
-        elif _ko_word_present(t, keyword):
-            return True
-    return False
+    return _animal_keyword_present(t)
 
 
 MULTI_PERSON_KEYWORDS = (
@@ -998,6 +1051,66 @@ def _topic_changes_shoes(text: str) -> bool:
         return False
     return bool(re.search(_SHOE_TOPIC_KO, t)
                 or re.search(r"\b(?:" + _SHOE_TOPIC_EN + r")\b", t.lower()))
+
+
+# 신발 형용사가 **신발이 아닌** 옷 명사에 붙은 입력 감지 (2026-10-22 실측).
+#
+# 왜(Why) 필요한가: 사용자 토픽의 오타("단환")를 그래프 안의 구글 번역 노드가
+# "closed-toed shorts" 로 옮겼고, 그 문장이 프롬프트에 그대로 실려 긴 청바지가
+# 청반바지로 잘렸다. 카메라 규칙 폴더에서 "shorts" 는 0건이었다 — 밖에서 들어온
+# 문장이다. 카메라가 고칠 수 있는 것이 아니다(원문에 근거가 없다). 사람이 고칠
+# 수 있게 **사실만 알린다** — 프롬프트 문구는 건드리지 않는다(2026-10-21 참조
+# 잘림 경고와 같은 판단: 문구를 바꾸면 멀쩡한 입력의 결과도 함께 흔들린다).
+#
+# 어휘는 두 벌만 새로 둔다. 신발 어휘는 _SHOE_TOPIC_EN(이 파일에 이미 있다)을
+# 그대로 쓰고, 옷 어휘만 _NON_FOOTWEAR_EN 을 따로 둔다 — _EN_GARMENT_WORDS 는
+# 신발류를 **포함**하므로 "신발이 아닌 것" 판정에는 쓸 수 없다.
+_FOOTWEAR_ADJ_EN = re.compile(
+    r"\b(?:open|closed|peep|round|pointed|square)[\s-]?toe(?:d|s)?\b",
+    re.I)
+_NON_FOOTWEAR_EN = re.compile(
+    r"\b(?:shorts|pants|trousers|jeans|skirt|dress|gown|sweater|shirt|"
+    r"blouse|jacket|coat|suit|uniform|bottoms|leggings|tights)\b", re.I)
+_SHOE_NOUN_RE = re.compile(r"\b(?:" + _SHOE_TOPIC_EN + r")\b", re.I)
+# 형용사와 명사 사이 수식어(색·재질)를 넘길 창. 실측 최장은
+# "closed-toed white cotton summer shorts" 37자다.
+_FOOTWEAR_MISMATCH_WINDOW = 40
+
+
+def footwear_noun_mismatch(text):
+    """신발 형용사가 신발이 아닌 옷 명사에 붙은 자리를 돌려준다 (로그 전용).
+
+    돌려주는 것은 **원문 표기 그대로의 조각** 목록이다(예: "closed-toed
+    shorts"). 판정: 형용사 뒤 창(문장 경계에서 자름) 안에서 처음 만나는 옷
+    어휘가
+      신발 어휘   -> 정상. 아무것도 돌려주지 않는다.
+      그 밖의 옷  -> 그 자리를 돌려준다.
+      아는 어휘 없음 -> 침묵한다. 모르는 낱말에 근거를 지어내지 않는다.
+    양쪽이 다 있으면 **앞에 온 쪽**이 명사를 수식한다("closed-toed sandals
+    and jeans" 는 정상, "closed-toed shorts and shoes" 는 지목).
+
+    한계: 영문 판정이다. 한글 원문만 있고 영문이 없으면 잡지 못한다(한글
+    신발 명사 목록이 열려 있어 "신발이 아닌 것" 을 단정할 수 없다). 사용자
+    파이프라인은 토픽이 이미 영문이라 이 경로로 잡힌다.
+    """
+    out = []
+    if not text or not isinstance(text, str):
+        return out
+    for m in _FOOTWEAR_ADJ_EN.finditer(text):
+        tail = text[m.end():m.end() + _FOOTWEAR_MISMATCH_WINDOW]
+        cut = re.search(r"[.\n;!?]", tail)
+        if cut:
+            tail = tail[:cut.start()]
+        other = _NON_FOOTWEAR_EN.search(tail)
+        if not other:
+            continue
+        shoe = _SHOE_NOUN_RE.search(tail)
+        if shoe and shoe.start() < other.start():
+            continue
+        phrase = text[m.start():m.end() + other.end()]
+        if phrase not in out:
+            out.append(phrase)
+    return out
 
 
 # 의류 색상 감지 (2026-10-15 실측): "흰색 단화" 지시에도 결과물의 신발은

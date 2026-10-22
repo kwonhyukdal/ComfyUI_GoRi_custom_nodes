@@ -167,13 +167,30 @@ def _free_gpu_for_local_llm() -> bool:
 # 알려진 계열 이름 조각을 대소문자 무시하고 찾는다. **못 찾으면 이미지로
 # 간주**한다 — 안전한 기본이다: 이미지 파이프라인에 motion 이 들어가면 왜곡을
 # 유발하지만, 영상 파이프라인에서 motion 이 빠지는 것은 덜 해롭다.
+# 비디오 파이프라인 표식 (class_type 부분 일치, 소문자 비교).
+# 왜(Why) 낱말 경계를 보나 (2026-10-21 감사, R181): 예전에는 "ade_"·"v2v"·
+# "hunyu"·"minimax" 같은 짧은 조각이 들어 있었고 `in` 이라 경계가 없었다.
+# 그래서 Stable**Cade_**StageC_VAEEncode(이미지), Wa**v2V**ecModelLoader(음성),
+# CLIPTextEncode**Hunyu**anDiT(이미지), MiniMax**Music**3TextEncode(음악) 이
+# 영상으로 오인됐다 — 설치된 노드 4,252개 대조에서 10종이 오탐이었다.
+# 오탐이면 정지 이미지에서 무빙이 제거되지 않아 왜곡이 그대로 발생한다.
 _VIDEO_MARKERS = (
-    "svd", "videolinearcfg", "animatediff", "ade_", "wanvideo", "wanimage",
-    "i2v", "v2v", "hunyu", "ltxv", "ltx", "cosmos", "mochi", "cogvideo",
-    "opensora", "opensoraplan", "svd_img2vid", "kling", "hailuo", "minimax",
-    "vhs_", "videomodel", "video_", "sv3d", "stablevideo", "seedance",
-    "framepack", "gimmvfi", "temporaldiff", "animatediff",
+    "svd", "videolinearcfg", "animatediff", "wanvideo", "wanimage",
+    "i2v", "hunyuanvideo", "imagetovideo", "latentvideo", "ltxv", "ltx",
+    "cosmos", "mochi", "cogvideo", "opensora", "opensoraplan", "svd_img2vid",
+    "kling", "hailuo", "minimaxh3", "minimaxhailuo", "minimaxtexttovideo",
+    "minimaximagetovideo", "minimaxallinone", "vhs_", "videomodel",
+    "video_", "sv3d", "stablevideo", "seedance", "framepack", "gimmvfi",
+    "temporaldiff",
 )
+# 이름 **앞**에만 유효한 표식. "ade_" 를 부분 일치로 두면 "StableCascade_..." 의
+# "cade_" 에 걸리고, "v2v" 는 "Wav2Vec" 한가운데에 걸린다.
+_VIDEO_PREFIXES = ("ade_", "v2v_")
+# 이름에 image 가 있어도 영상인 경우 (이미지→영상 변환). 이 힌트가 없는데
+# 이름에 image 가 있으면 이미지 노드로 본다 (KlingImageGenerationNode,
+# WanImageToImageApi, HunyuanImageEditApi 등).
+_VIDEO_IMAGE_HINTS = ("imagetovideo", "image2video", "image-to-video",
+                      "img2vid", "i2v")
 
 
 def detect_video_pipeline(prompt) -> bool:
@@ -196,6 +213,11 @@ def detect_video_pipeline(prompt) -> bool:
             ct = str(entry.get("class_type", "") or "").lower()
             if not ct:
                 continue
+            if ("image" in ct
+                    and not any(h in ct for h in _VIDEO_IMAGE_HINTS)):
+                continue
+            if ct.startswith(_VIDEO_PREFIXES):
+                return True
             for marker in _VIDEO_MARKERS:
                 if marker in ct:
                     return True

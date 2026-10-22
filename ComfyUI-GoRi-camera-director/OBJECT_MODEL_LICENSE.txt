@@ -1,0 +1,74 @@
+efficientdet_lite0.tflite
+=========================
+
+MediaPipe Object Detector (EfficientDet-Lite0) 모델 파일.
+
+    출처   https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite
+    크기   7,254,339 bytes (6.92 MB)
+    sha256 4b59100025bea1235a84c1038879a6cccc9f6c49f5e41144e91e74d99e780993
+    라이선스 Apache License 2.0 (google-ai-edge/mediapipe)
+    형식   .tflite (TFLite flatbuffer + 붙은 ZIP: labels.txt)
+    학습   COCO 데이터셋 (90 출력 슬롯 = 이름 80 + 자리표시 10)
+
+사용 목적
+--------
+
+Camera Director 가 **참조 이미지에 사람 외에 무엇이 있는지** 읽는 데 쓴다.
+사람 수·자세·사람 bbox 는 이미 포즈 모델(PoseLandmarker)이 낸다. 이 모델은
+그 바깥의 사물(의자·컵·자동차·가구 등)의 **이름·점수·경계 상자**를 낸다.
+
+    detect_objects()          [{"name": "chair", "score": 0.71, "bbox": (x, y, w, h)}]
+    classify_reference()      결과 dict 의 "objects" 키
+    노드 로그                 "[Camera Director] 참조 분석 — 1번: person 1 / 사물 chair 0.72"
+
+bbox 는 0~1 정규화이며 (x, y) 는 좌상단이다. 모델 원본은 입력 이미지의
+**픽셀** 좌표를 주므로 노드가 입력 폭·높이로 나눠 정규화한다
+(2026-10-21 실측: 359x256 입력에서 raw origin_x=207, width=137).
+
+이 파일이 없으면 사물 검출만 조용히 꺼지고(빈 목록 + 사유 1회 로그)
+사람·포즈 판정과 픽셀 분석은 그대로 돈다. 환경변수로 경로를 지정할 수 있다:
+
+    setx GORI_OBJECT_MODEL "C:\어딘가\efficientdet_lite0.tflite"
+
+환경변수가 동봉본보다 우선한다.
+
+임계값
+------
+
+노드 기본값은 score_threshold 0.30 이다 (2026-10-22 에 0.35 에서 내렸다).
+표본 실측에서 0.35 는 맞힌 사물 하나를 버리고 있었다. 0.30 으로 내려
+가구 검출이 늘어도 배경 오탐은 늘지 않았고, 더 내리면(0.20) 오탐이 나므로
+이 근처가 한계다. 교체 모델을 쓰면 이 값을 다시 실측해야 한다.
+
+대체 모델
+--------
+
+Object Detector 계열은 efficientdet_lite0/1/2 와 ssd_mobilenet_v2 다.
+교체할 때는 위 임계값을 표본으로 다시 잰 뒤 바꾼다.
+
+라이선스 고지 (Apache License 2.0, Section 4 요구사항)
+------------------------------------------------------
+
+이 파일은 Google MediaPipe 배포물이며 Apache License 2.0 으로 배포된다.
+재배포 시 다음을 만족해야 한다:
+
+  (a) 수신자에게 Apache License 2.0 사본을 함께 제공한다
+  (b) 수정된 파일에는 변경 사실을 명시한다 (이 파일은 미수정 원본이다)
+  (c) 원본의 저작권·Patent·상표·출처 고지를 보존한다
+  (d) 원본에 NOTICE 파일이 있으면 함께 제공한다
+
+전체 라이선스: https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE
+모델 문서:     https://developers.google.com/edge/mediapipe/solutions/vision/object_detector
+
+검증 방법 (2026-10-21 실측)
+---------------------------
+
+    python -c "import hashlib;print(hashlib.sha256(open('efficientdet_lite0.tflite','rb').read()).hexdigest())"
+      -> 4b59100025bea1235a84c1038879a6cccc9f6c49f5e41144e91e74d99e780993
+
+    python -c "import zipfile;print(zipfile.ZipFile('efficientdet_lite0.tflite').namelist())"
+      -> ['labels.txt']    (90줄 — person, chair, cup ... toothbrush)
+
+모델 안에 라이선스 문자열은 없다(실측: b'license' 부분열 0회, b'Apache' 0회).
+다른 동봉본(.task 3종)과 같은 방식으로 **배포 출처**를 근거로 고지한다.
+파일 본문이 아니라 출처가 라이선스를 정한다.

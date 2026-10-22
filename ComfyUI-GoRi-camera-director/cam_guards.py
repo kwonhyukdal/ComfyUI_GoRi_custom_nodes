@@ -35,8 +35,8 @@ __all__ = [
 "QUALITY_GUARD", "QUALITY_GUARD_ANIMAL", "FACE_IDENTITY_GUARD", "SKIN_COLOR_GUARD", "NEGATIVE_ANATOMY_GUARD", "NEGATIVE_COLOR_CONTAMINATION_GUARD", "_NEGATIVE_BASE_COMMON", "OUTFIT_GUARD", "NUDITY_KEYWORDS", "NUDITY_PARTIAL_KEYWORDS", "_is_partial_exposure",
     "_is_nudity_request", "nudity_anatomy_guard", "coverage_guard",
     "EXPLICIT_COVER_KEYWORDS", "EXPLICIT_REVEAL_KEYWORDS",
-    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
-    "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
+    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "FINGER_SEPARATION_POSITIVE", "SCENE_FINGER_CUE", "scene_finger_cue", "HAND_INTEGRITY_POSITIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_background_dna_slots", "_furniture_background_guard", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
+    "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "SCENERY_BACKGROUND_POSITIVE", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
     "GROUND_REF_NEGATIVE", "ground_reference_guard",
     "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio"
 ]
@@ -252,6 +252,63 @@ FURNITURE_ORIENTATION_POSITIVE = (
 )
 
 
+# 배경 슬롯의 사물 충실 가드 (2026-10-22 실측, 파란 동그라미).
+# 왜(Why) R158(2026-10-19) 이후에도 필요한가: 그때는 배경 슬롯의 사물 가드를
+# 통째로 껐다(접촉·방향·개수 문구가 없는 사물을 만들어 냈다 — 사용자 제보
+# "벽 턱·돌 의자"). 그 부작용으로 **참조한 배경 그대로를 요구하는 문구까지**
+# 사라져, 배경 참조가 사물이 찍힌 사진일 때 정체성을 지키는 말이 하나도 남지
+# 않았다. 실측(2026-10-22 01:40, 좌.png, seed 42, cfg 1.0): 참조의 검은 원기둥
+# 다리 4개가 갈색 목재 각진 다리로 바뀌고 앞다리가 신발 속으로 들어가 바닥에
+# 닿지 않았다. positive 에 사물 문구 0개, cfg 1.0 이라 negative 는 무효 —
+# lever 자체가 없었다.
+# 그래서 **존재를 요구하지 않는 조건문 하나**만 되살린다: 있으면 참조 그대로,
+# 없으면 만들지 말 것. 접촉·방향·개수(단일 인스턴스) 강요는 R158 대로 계속
+# 끈다 — 그 문구들이 "없는 사물" 을 만든 원인이었다.
+# {slots} 자리표시자는 FURNITURE_COLOR_POSITIVE 의 {color} 와 같은 방식이다.
+FURNITURE_BACKGROUND_POSITIVE = (
+    "background fidelity guard: the frame keeps the exact content of reference "
+    "image {slots}. If any furniture, object or prop from that reference is "
+    "visible, it stays exactly as it appears there — same silhouette and "
+    "construction, the same number of legs and supports with each leg and "
+    "support keeping its own shape, section, length and colour, the same "
+    "material and surface finish, the same colours and pattern, the same "
+    "proportions. Its legs and supports reach the ground the same way as in "
+    "the reference, and no part of the furniture passes through, pierces, "
+    "cuts into or disappears into a foot, ankle, calf, hand or arm. Do not "
+    "substitute a different object, a different material or a different leg "
+    "design, and do not add any furniture, object, ledge, platform or prop "
+    "that is not present in reference image {slots}."
+)
+
+
+# R190 (2026-10-22): 배경으로 지정한 참조의 **방(바닥·러그·벽)** 이 가드 밖이었다.
+#
+# 왜(Why): 사용자가 시드 7 생성물을 탈락시켰다 — "바닥 타일이 바뀌었다".
+# 실측(_workspace/chair_case/floor_cmp.png): 참조와 시드 100·1234·2026 은 나무
+# 마루인데 시드 7 만 큼직한 밝은 타일이었다. 바로 위
+# FURNITURE_BACKGROUND_POSITIVE 는 "any furniture, object or prop" 만 지명해
+# 바닥·러그·벽에는 **구체 요구가 하나도 없었다**(도입부 한 문장뿐).
+#
+# R158 규칙은 유지한다 — "참조에 **보이는** 표면" 만 말하고 **존재를 요구하지
+# 않는다**. 러그를 요구하면 참조에 없는 러그가 생긴다(R158 의 원인이 그것이었다).
+# 그래서 조건부로 쓴다: 있으면 그대로, 없으면 만들지 말 것.
+#
+# {slots} 자리표시자는 위 문구와 같은 방식이다. 배선은 늘리지 않는다 —
+# `_furniture_background_guard` 가 이어 붙이므로 플래그(furniture_bg)·plan 키
+# (furniture_bg_slots)·짝 negative(OBJECT_DRIFT_NEGATIVE)가 그대로 따라온다.
+SCENERY_BACKGROUND_POSITIVE = (
+    "room fidelity guard: the room surfaces visible in reference image {slots} "
+    "stay as they are there — the same flooring with the same material and the "
+    "same plank or tile pattern running in the same direction, the same rug, "
+    "carpet or mat with the same pattern, texture and colour, the same wall, "
+    "ceiling, window, curtain and door surfaces, and the same lighting "
+    "direction and colour temperature. None of those surfaces is restyled, "
+    "recoloured, covered up or swapped for a different material or pattern — a "
+    "wood plank floor stays a wood plank floor and does not become large pale "
+    "tiles, and the reverse."
+)
+
+
 def _furniture_dna_guard(text: str, object_slots) -> str:
     """가구·사물 DNA positive 문구. 사물 슬롯이 없으면 "".
 
@@ -297,6 +354,39 @@ def _furniture_dna_guard(text: str, object_slots) -> str:
             + " " + FURNITURE_CONTACT_POSITIVE
             + " " + FURNITURE_ORIENTATION_POSITIVE
             + " " + OBJECT_INSTANCE_POSITIVE)
+
+
+def _furniture_background_guard(text: str, background_slots) -> str:
+    """배경 슬롯 전용 **조건부** 충실 문구. 대상이 없으면 "".
+    두 문구를 이어 붙인다 — 가구·사물(R189) + 방 표면(R190, 2026-10-22).
+
+    _furniture_dna_guard 와 문구를 나눠 쓰는 이유: 그쪽은 "그 사물이 화면에
+    있다" 를 전제하는 접촉·방향·개수 문구를 포함하고, 2026-10-19 사용자 제보
+    (R158)로 배경 슬롯에서 통째로 빠졌다. 배경에는 그 전제가 성립하지 않지만
+    **참조한 배경 그대로**는 요구되어야 한다 — 그 요구를 말하는 문구가 사라져
+    모델이 사전 지식으로 다시 그렸다(2026-10-22 실측). 그래서 선택은
+    `_background_dna_slots` 가 따로 하고 문구는 여기서 조건문으로 낸다.
+
+    방 문구(SCENERY_BACKGROUND_POSITIVE)를 따로 둔 이유: 사용자가 시드 7 을
+    탈락시킨 것이 바닥 재질이었고(2026-10-22), R189 문구는 가구만 지명해
+    바닥·러그·벽에 구체 요구가 없었다. 문구를 나눠 두면 한쪽만 조정할 수 있고
+    R189 핀이 흔들리지 않는다.
+    """
+    try:
+        slots = sorted(int(x) for x in set(background_slots or []))
+    except (TypeError, ValueError):
+        return ""
+    if not slots:
+        return ""
+    # 분위기 전용 지정이면 형상을 요구하지 않는다 — _furniture_dna_guard 의
+    # 완화와 **같은 판정**을 쓴다(두 곳이 갈라지면 한쪽만 발동한다).
+    t = (text or "").lower()
+    if any((_ko_word_present(t, k) if not _ascii_only(k) else k in t)
+           for k in NON_OBJECT_SLOT_KEYWORDS):
+        return ""
+    listed = ", ".join(str(x) for x in slots)
+    return (FURNITURE_BACKGROUND_POSITIVE.format(slots=listed)
+            + " " + SCENERY_BACKGROUND_POSITIVE.format(slots=listed))
 
 
 # 참조 사물 외형 고정 (2026-10-16 실측, 파란 동그라미): 의자 참조(image_2)의
@@ -482,6 +572,35 @@ def _object_dna_slots(topic: str, image_labels, image_count: int) -> set:
         return set()
 
 
+def _background_dna_slots(topic: str, image_labels, image_count: int) -> set:
+    """배경으로 지정된 슬롯 — 조건부 충실 가드 대상 (2026-10-22).
+
+    왜(Why) _object_dna_slots 와 따로 두나: 개념이 다르다. 사물 DNA 슬롯은
+    "그 사물이 화면에 있다" 를 전제하는 접촉·방향·개수 문구를 포함하고,
+    2026-10-19 사용자 제보(R158)로 배경 슬롯에서 통째로 빠졌다. 배경은 그
+    전제가 성립하지 않지만 **참조한 배경 그대로**는 요구되어야 한다 — R158
+    이후 그 요구를 말하는 문구가 사라져 모델이 자기 사전 지식으로 다시
+    그렸다(2026-10-22 실측: 의자 다리 4개가 목재로 바뀌고 앞다리가 신발에
+    끼어 바닥에 닿지 않았다). 선택은 따로, 문구는 조건문으로.
+    """
+    try:
+        if image_count <= 0:
+            return set()
+        labels = [int(str(x)) for x in (image_labels
+                                       or list(range(1, image_count + 1)))]
+        bg = set(_background_role_slots(topic or ""))
+        if not bg:
+            return set()
+        plan = _person_object_plan(topic or "", labels)
+        # 주 피사체·추가 인물·포즈 슬롯은 배경일 수 없다 — 배경 어휘가 그
+        # 슬롯을 가리키는 오검출을 여기서 막는다(R158 이 줄바꿈 오검출을 막은
+        # 것과 같은 이유의 방어선).
+        excluded = {plan["main"]} | set(plan["persons"]) | set(plan["poses"])
+        return {x for x in labels if x in bg and x not in excluded}
+    except Exception:
+        return set()
+
+
 def _remove_item_guard(text: str) -> str:
     """사물 제거 잔여물 negative. **항상** 켠다 (인물 주제 한정).
 
@@ -526,7 +645,19 @@ def add_quality_guard(prompt: str, image_count: int = 0, topic: str = "", image_
     fit_guard = outfit_guard(image_count, topic)
     if fit_guard:
         parts.append(fit_guard)
-    return ". ".join(parts) + "."
+    # 왜(Why) 조각마다 끝 마침표를 떼고 잇나 (R195, 2026-10-22 실측): 1인
+    # reference_guard 가 "…unless the user explicitly requests a clothing
+    # change." 처럼 **마침표로 끝난다**. 그대로 ". " 로 이어 붙이면
+    # "change.. face and body preservation guard" 처럼 마침표가 두 번 나가고,
+    # 마지막 조각이 마침표로 끝나면 끝에도 ".." 가 붙는다. 실측 경로:
+    #   positive_text = prompt_out (camera_director.py:2257) — prompt_in 이
+    #   비었을 때(topic 만으로 쓰는 정상 사용) 이 함수의 결과가 그대로
+    #   사용자 prompt_out 이 된다. 참조 1장 + prompt_in 없음에서 ".." 1곳
+    #   재현(ref1-nopin). prompt_in 이 있으면 앵커 재조립 분기라 안 걸린다.
+    # 조각이 마침표·공백으로 끝나면 떼고 이어 붙여 마침표를 정확히 한 번만
+    # 둔다(빈 조각이 되면 뺀다 — ". . " 같은 구멍을 만들지 않으려는 것).
+    _cleaned = [p.strip().rstrip(". ") for p in parts]
+    return ". ".join(p for p in _cleaned if p) + "."
 
 
 def assemble(scene: str, cam: dict, image_count: int = 0, topic: str = "", image_labels=None) -> str:
@@ -702,8 +833,12 @@ def macro_detail_guard(topic: str, cam: dict) -> str:
     왜(Why): 100mm 매크로는 제품 촬영에도 쓰이므로 렌즈만으로는 모공·솜털
     문구를 붙일 수 없고, 인물 판정이 함께 있어야 제품에 체모 표현이
     들어가는 오작동을 막을 수 있다.
+    다중 선택(콤마)이면 **하나라도** 매크로일 때 붙인다 (2026-10-21 감사,
+    R181) — 통째로 비교하면 "100mm 매크로 (macro),85mm f/1.4 (bokeh)" 에서
+    결 강조가 조용히 사라졌다.
     """
-    if cam.get("lens") != "100mm 매크로 (macro)" or not _is_human_subject(topic or ""):
+    if (not has_any_label(cam.get("lens"), ("100mm 매크로 (macro)",))
+            or not _is_human_subject(topic or "")):
         return ""
     return ("macro detail emphasis: extreme fine detail, sharp micro-contrast, "
             "visible pores, fine vellus hair, and natural skin texture")
@@ -778,6 +913,75 @@ ANATOMY_COUNT_NEGATIVE = (
 )
 
 
+# 손가락 분리 단서 (2026-10-22 사용자 실측, R192). 왜(Why) 별도 상수인가:
+# 같은 단서를 전신 가드(손 문장 안)와 상반신 가드(CU/ECU)가 함께 쓴다. 정의를
+# 하나로 두어야 한쪽만 고쳐 짝이 어긋나는 사고를 막는다(2026-09-28 실측).
+#
+# 왜(Why) 이 문구인가: 기존 손 문구는 "경계 또렷 / 뭉갬 없음"이라 **"X가 아니다"**
+# 쪽이었다. cfg=1.0 워크플로는 negative conditioning 을 계산조차 하지 않으므로
+# (comfy/samplers.py 실측) positive 문구가 유일한 방어인데, diffusion 은 부정문보다
+# 그려질 서술에 잘 반응한다. 실측(토픽 위치, 시드 42/43/1234 짝지음): 손가락 구간의
+# 피부 run 평균이 3.09→3.48, 2.41→3.13, 2.46→3.04 로 늘고, 확대 사진에서 회색으로
+# 번지던 손가락이 분리됐다(3/3). 같은 실측에서 팔·긴 청바지·방·신발 회귀는 없었다.
+# 한계(정직): "조금 벌어져 있다"(실측에서 효과를 본 표현)를 그대로 쓰지 않았다 —
+# 잡는 손(가방 손잡이·컵)과 충돌하기 때문이다. 그래서 **자세와 무관하게 그릴 수
+# 있는** 모양·경계 서술로 적었다. 확률을 올릴 뿐 보장하지 않는다.
+FINGER_SEPARATION_POSITIVE = (
+    "each finger a separate shape with its own outline and a clear gap "
+    "between neighbouring fingers"
+)
+
+
+# 장면 문장 위치에 한 번 더 두는 같은 단서 (2026-10-22 R194 실측).
+# 왜(Why) 가드 위치에 더해 장면 문장에도 두나: 실기 A/B(1.9.75 vs 1.9.76, 시드
+# 42/43/1234)에서 **가드 위치 단독은 엇갈렸다**(-0.14 / +0.08 / +0.36). 그래서
+# 시드를 8개로 늘려 "장면 문장 끝에도 같은 단서를 둔 팔"과 짝지어 재니 평균
+# 손가락 구간 피부 run 차이 +0.33(5승 2패 1무)이었고, 뚜렷 개선 3쌍 · 비슷 3쌍 ·
+# 소폭 하락 1쌍, 해부 붕괴 0 이었다. 장면 문장은 카메라가 조립하는 텍스트의
+# **맨 앞**이라 가드 묶음(끝)보다 먼저 읽힌다.
+# 왜(Why) 실측에 쓴 문장 그대로인가: 다른 문장으로 다듬으면 그 측정이 전이되지
+# 않는다. 뒤 절 "no fingers merged or blurred together" 는 부정문이라 cfg=1.0 에서
+# 효과가 없지만(샘플러가 negative 를 계산조차 하지 않는다), 실측한 문장이므로
+# 그대로 쓴다 — 빼면 "측정한 것과 다른 것"이 된다.
+# 한계(정직): 이 실측은 팔 **전체**(가드 + 장면 + 사용자 텍스트)의 것이고, 이
+# 구현은 사용자 텍스트 쪽을 카메라가 대신 넣을 수 없어 **장면 문장 사본 1개**만
+# 넣는다. 그래서 기대 효과는 0 과 +0.33 사이이며 보장이 아니다. 붙인 코드로
+# 다시 8시드 재측정하는 것이 맞다(재시작 필요).
+SCENE_FINGER_CUE = (
+    FINGER_SEPARATION_POSITIVE
+    + ", no fingers merged or blurred together"
+)
+
+
+def scene_finger_cue(subject_text: str) -> str:
+    """장면 문장 뒤에 붙일 손가락 단서 (사람 주제일 때만).
+
+    왜(Why) 사람 게이트인가: 이 문구는 사람 손가락 서술이다. 동물·사물·풍경
+    주제에 붙으면 **없는 손을 그리게 한다** — R192 가드와 같은 게이트를 쓴다.
+    왜(Why) 힌트까지 보나: resolve_guard_plan 의 is_human 과 **같은 규칙**이어야
+    한다(텍스트 판정 + 참조에서 검출된 사람). 다르면 한쪽만 붙어 방어가 조용히
+    어긋난다(2026-09-28 실측과 같은 형태).
+    """
+    if (subject_text or "").strip() and _is_human_subject(subject_text):
+        return SCENE_FINGER_CUE
+    try:
+        return SCENE_FINGER_CUE if _hint_person_slots() else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# 손 무결성 positive (2026-10-22 R192). 왜(Why) 분리했나: 이 문장이
+# LEG_FOOT_INTEGRITY_POSITIVE 안에 "; hands are fully formed …" 로 묻혀 있었다.
+# 가드 이름도 주석도 다리·발·종아리 중심이라, 다리 문구를 손보는 사람이 손 문장을
+# 통째로 지워도 아무도 모른다(2026-10-07 분리 모듈 누락과 같은 형태). 그래서 손
+# 이름을 가진 상수로 빼고 전신·상반신 두 경로가 같은 정의를 참조하게 한다.
+HAND_INTEGRITY_POSITIVE = (
+    "hands are fully formed with five distinct fingers on each hand, "
+    "finger boundaries clear, " + FINGER_SEPARATION_POSITIVE + ", "
+    "no fingers merged or blurred together"
+)
+
+
 # 다리·발·종아리 무결성 positive (2026-10-21 사용자 실측). 왜(Why) positive 인가:
 # 이 워크플로의 KSampler 는 cfg=1.0 이라 ComfyUI 샘플러가 uncond_=None 으로 두고
 # **negative conditioning 을 계산조차 하지 않는다**(comfy/samplers.py 실측). 그래서
@@ -787,7 +991,7 @@ ANATOMY_COUNT_NEGATIVE = (
 #   - 발: 정확히 두 발, 발가락 5개, 추가·복제·갈라짐 없음 (앉은 자세에서 종아리
 #     ->발이 하나 더 생기는 경로를 정면으로 막는다)
 #   - 종아리: 곧고 자연스러운 형태, 무릎-발목 정렬, 휘거나 꺾이지 않음
-#   - 손: 손가락 경계 또렷, 뭉갬·융합 없음
+#   - 손: HAND_INTEGRITY_POSITIVE 를 그대로 잇는다 (정의는 손 이름을 가진 상수 쪽)
 # 샷 인지: 얼굴·상반신(CU/ECU)은 다리·발이 화면에 없어 넣으면 없는 발을 그린다
 # (ANATOMY_COUNT_UPPER 와 같은 이유). 그래서 _limb_visible 일 때만 붙인다.
 LEG_FOOT_INTEGRITY_POSITIVE = (
@@ -798,8 +1002,7 @@ LEG_FOOT_INTEGRITY_POSITIVE = (
     "each calf and shin is straight and naturally shaped with the knee and "
     "ankle in line, not bent or kinked, natural calf muscle outline, "
     "legs the correct length and not warped; "
-    "hands are fully formed with five distinct fingers on each hand, "
-    "finger boundaries clear, no fingers merged or blurred together"
+    + HAND_INTEGRITY_POSITIVE
 )
 
 
@@ -808,11 +1011,16 @@ LEG_FOOT_INTEGRITY_POSITIVE = (
 # 그대로 넣으면 "두 다리·발가락 5개·다리 균형"을 요구해 모델이 **화면에
 # 없는 사지를 만들어 넣는다** — 사용자가 본 "발이 하나 더 생긴다"의 직접
 # 경로다. 손·손가락·팔은 CU 에서도 보이므로 남기고, 다리·발 문구만 뺀다.
+# 2026-10-22 (R192): 손가락 분리 단서를 이 경로에도 붙인다. 종전에는 이 가드에
+# 손 모양 서술이 "complete unambiguous shapes" 하나뿐이라, 손이 화면에 크게
+# 나오는 샷인데도 분리 단서가 없었다. 전신 가드와 **같은 상수**를 쓴다.
+# 한계(정직): 전신 경로(짝지음 3시드)만 실측했다. 이 경로의 효과는 별도 실측이
+# 없다 — 손이 더 크게 잡혀 뭉갬 위험이 낮다고 보지만 그것은 추정이다.
 ANATOMY_COUNT_POSITIVE_UPPER = (
     "correct digit count, clearly readable hands: exactly five fingers on "
     "each hand (one thumb plus four fingers), two arms ending in two hands, "
     "every arm fully formed and whole, hands drawn as complete "
-    "unambiguous shapes"
+    "unambiguous shapes, " + FINGER_SEPARATION_POSITIVE
 )
 
 ANATOMY_COUNT_NEGATIVE_UPPER = (
@@ -891,7 +1099,7 @@ def _needs_scale_guard(topic: str, cam: dict) -> bool:
     """인물 + 전신·주변 가시 샷이면 스케일 가드 대상."""
     try:
         return bool(_is_human_subject(topic or "")
-                    and (cam or {}).get("shot", "") in SCALE_SHOTS)
+                    and has_any_label((cam or {}).get("shot", ""), SCALE_SHOTS))
     except Exception:
         return False
 
@@ -1073,7 +1281,7 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
         neg.append(NEGATIVE_ANATOMY_GUARD)
         neg.append(NEGATIVE_COLOR_CONTAMINATION_GUARD)
     neg.extend(_camera_failure_modes(cam, topic))
-    if cam.get("grade") == "느와르 (noir)":
+    if has_any_label(cam.get("grade"), ("느와르 (noir)",)):
         neg.append(noir_phrase)
     if _is_human_subject(topic or ""):
         neg.append(ANATOMY_DETAIL_NEGATIVE)
@@ -1128,6 +1336,11 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
         neg.append(FURNITURE_DNA_NEGATIVE)
         neg.append(OBJECT_DRIFT_NEGATIVE)
         neg.append(OBJECT_INSTANCE_NEGATIVE)
+    if flags.get("furniture_bg"):
+        # 배경 참조의 사물 충실 가드와 짝 (2026-10-22). 존재를 요구하는
+        # OBJECT_INSTANCE_NEGATIVE 는 넣지 않는다 — 우리가 요구하지 않은
+        # "단일 인스턴스" 의 짝이라 맞지 않는다.
+        neg.append(OBJECT_DRIFT_NEGATIVE)
     if flags.get("remove_item"):
         # 빈 문자열을 세면 join 이 ", " 꼬리를 남긴다(2026-10-07 라운드 2 —
         # _remove_item_guard 는 비인물 topic 에 "" 를 돌려준다).
@@ -1163,6 +1376,7 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
                           image_labels=None, pose_ref: bool = False,
                           physics_neg: str = "", detail_def: bool = False,
                           furniture: bool = False,
+                          furniture_bg: bool = False,
                           remove_item: bool = False,
                           anatomy_count: bool = False,
                           character_sheet: bool = False,
@@ -1182,6 +1396,7 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
         {"anatomy_count": anatomy_count, "character_sheet": character_sheet,
          "sheet_kind": sheet_kind,
          "detail_def": detail_def, "furniture": furniture,
+         "furniture_bg": furniture_bg,
          "remove_item": remove_item,
          "anatomy_count_upper": anatomy_count_upper,
          "detail_def_upper": detail_def_upper,
@@ -1505,9 +1720,13 @@ GARMENT_BOUNDARY_NEGATIVE_UPPER = (
 
 
 def _footwear_guard(shot):
-    """샷별 신발 가드 (positive, negative). CU/ECU 면 upper 변형."""
+    """샷별 신발 가드 (positive, negative). CU/ECU 면 upper 변형.
+
+    다중 선택(콤마)이면 하나라도 CU/ECU 일 때 upper 를 쓴다 (2026-10-21 감사,
+    R181) — 통째로 비교하면 전신 변형이 나와 화면에 없는 발 문구가 붙었다.
+    """
     try:
-        if shot in FACE_CRITICAL_SHOTS:
+        if has_any_label(shot, FACE_CRITICAL_SHOTS):
             return FOOTWEAR_POSITIVE_UPPER, FOOTWEAR_NEGATIVE_UPPER
         return FOOTWEAR_POSITIVE, FOOTWEAR_NEGATIVE
     except Exception:
@@ -1637,7 +1856,7 @@ def color_adherence_guard(text, en_text):
 def _body_object_boundary_guard(shot):
     """샷별 신체-사물 경계 가드 (positive, negative). CU/ECU 면 upper 변형."""
     try:
-        if shot in FACE_CRITICAL_SHOTS:
+        if has_any_label(shot, FACE_CRITICAL_SHOTS):
             return BODY_OBJECT_BOUNDARY_POSITIVE_UPPER, BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER
         return BODY_OBJECT_BOUNDARY_POSITIVE, BODY_OBJECT_BOUNDARY_NEGATIVE
     except Exception:
@@ -1647,7 +1866,7 @@ def _body_object_boundary_guard(shot):
 def _garment_boundary_guard(shot):
     """샷별 의복 경계 가드 (positive, negative). CU/ECU 면 upper 변형."""
     try:
-        if shot in FACE_CRITICAL_SHOTS:
+        if has_any_label(shot, FACE_CRITICAL_SHOTS):
             return GARMENT_BOUNDARY_POSITIVE_UPPER, GARMENT_BOUNDARY_NEGATIVE_UPPER
         return GARMENT_BOUNDARY_POSITIVE, GARMENT_BOUNDARY_NEGATIVE
     except Exception:
@@ -1661,7 +1880,8 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
                    character_sheet: bool = False, image_count: int = 0,
                    image_labels=None, pose_ref: bool = False,
                    physics_neg: str = "", detail_def: bool = False,
-                   furniture: bool = False, remove_item: bool = False,
+                   furniture: bool = False, furniture_bg: bool = False,
+                   remove_item: bool = False,
                    anatomy_count: bool = False,
                    anatomy_count_upper: bool = False,
                    detail_def_upper: bool = False,
@@ -1688,6 +1908,7 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
         {"anatomy_count": anatomy_count, "character_sheet": character_sheet,
          "sheet_kind": sheet_kind,
          "detail_def": detail_def, "furniture": furniture,
+         "furniture_bg": furniture_bg,
          "remove_item": remove_item,
          "anatomy_count_upper": anatomy_count_upper,
          "detail_def_upper": detail_def_upper,

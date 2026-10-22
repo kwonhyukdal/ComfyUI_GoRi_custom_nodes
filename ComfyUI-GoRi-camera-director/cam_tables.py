@@ -10,7 +10,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clauses", "split_multi", "normalize_multi_value", "grade_clauses", "build_clauses", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning"
+"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clauses", "split_multi", "has_any_label", "normalize_multi_value", "grade_clauses", "build_clauses", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning"
 ]
 
 
@@ -186,6 +186,7 @@ MOTION = {
     "핸드헬드 (handheld)": "handheld camera with organic drift",
     "스테디캠 (steadicam)": "smooth steadicam glide",
     "홉팬 (whip pan)": "fast whip pan",
+    "느린 팬 (sweeping pan)": "slow sweeping pan across the scene",
     "줌 인 (zoom in)": "slow zoom in",
     "랙포커스 (rack focus)": "rack focus pull between planes",
     "팔로우 (follow)": "follow shot tracking the subject",
@@ -564,6 +565,26 @@ def split_multi(val) -> list:
         return []
     return [v.strip() for v in str(val).split(",")
             if v.strip() and v.strip() != AUTO]
+
+
+def has_any_label(val, labels) -> bool:
+    """위젯 값(단일 또는 콤마 다중)에 `labels` 중 하나라도 있으면 True.
+
+    왜(Why) 필요한가 (2026-10-21 감사, R181): 드롭다운 10개는 콤마 다중값을
+    담을 수 있는데(R169), 가드 여러 곳이 `shot in FACE_CRITICAL_SHOTS` 처럼
+    **문자열 전체**를 표와 비교했다. "근접 (CU),중경 (MS)" 는 어떤 표에도 없는
+    문자열이므로 분기가 조용히 꺼졌다 — 화면에 없는 다리 문구가 다시 붙고
+    (2026-10-11 실측 증상), 매크로 결 강조·느와르 색조 방어·저해상 경고가
+    사라졌다. 예외도 로그도 나지 않았다.
+
+    왜(Why) `split_multi` 를 쓰나: 단일·다중·자동(auto)·빈값을 이미 한 가지
+    모양(리스트)으로 만들어 주는 유일한 파서다. 여기에 두 번째 파서를 만들면
+    한쪽만 고치는 결함이 생긴다.
+    """
+    try:
+        return any(v in labels for v in split_multi(val))
+    except Exception:
+        return False
 
 
 def normalize_multi_value(val, table) -> str:

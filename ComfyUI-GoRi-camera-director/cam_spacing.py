@@ -15,7 +15,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"SPACING_GRID", "SPACING_SKIN_CHROMA", "SPACING_RG", "SPACING_TOUCH_RATIO", "SPACING_APART_RATIO", "SPACING_FAR_RATIO", "SPACING_HEAD_BAND", "_skin_score", "subject_spacing", "spacing_guard", "spacing_log_text"
+"SPACING_GRID", "SPACING_SKIN_CHROMA", "SPACING_RG", "SPACING_TOUCH_RATIO", "SPACING_APART_RATIO", "SPACING_FAR_RATIO", "SPACING_HEAD_BAND", "SPACING_BOTTOM_CROP", "_skin_score", "subject_spacing", "spacing_guard", "spacing_log_text"
 ]
 
 
@@ -58,6 +58,15 @@ SPACING_FAR_RATIO = 0.28   # 간격이 이보다 크면 "크게 떨어짐"(화�
 
 
 SPACING_HEAD_BAND = 0.18    # 머리 분리 판정용 상단 밴드 비율 (어깨 위까지만)
+
+
+# 하단 잘림 경계. 이 값 이하면 피사체가 화면 하단에서 잘린 것으로 본다.
+# 왜(Why) 상수로 두나 (2026-10-21): 두 판정이 **같은 값**을 써야 한다.
+#   - spacing_guard: 여백이 이보다 크면 "바닥이 보이게 유지" 문구를 붙인다
+#   - resolve_guard_plan: 여백이 이 이하면 "하반신을 발명해야 한다" 경고를 켠다
+# 둘이 다른 값을 쓰면 어떤 여백에서 문구와 경고가 서로 반대를 말한다.
+# 격자 48칸 기준이라 이 경계는 "남은 여백 1칸 이하 = 잘림" 을 뜻한다.
+SPACING_BOTTOM_CROP = 0.03
 
 
 def _skin_score(rgb_small):
@@ -298,11 +307,13 @@ def spacing_guard(measure: dict, topic: str) -> tuple:
                 "spatial fidelity: keep the same vertical arrangement as the "
                 "reference, one subject higher in the frame than the other, "
                 "do not align them on the same level")
-        if m.get("bottom_margin") is not None and m.get("bottom_margin", 0) > 0.03:
+        if m.get("bottom_margin") is not None and m.get("bottom_margin", 0) > SPACING_BOTTOM_CROP:
             # 접지 여부는 한 장에서 확정할 수 없다(바닥이 보이는 게 정상이라
             # 전경이 최하단에 닿는지만 보면 근거가 없다). 대신 **측정 가능한
             # 사실**인 "피사체 아래 남은 여백(=보이는 바닥 비율)"만 유지시킨다.
             # 스케일 가드(인물-사물 비율)와 같은 축의 사실이라 서로 보강된다.
+            # 경계는 SPACING_BOTTOM_CROP 을 공유한다 — 잘림 경고와 이 문구가
+            # 서로 반대를 말하지 않게 하기 위함이다(2026-10-21).
             pos = (pos + ", " if pos else "") + (
                 "spatial fidelity: keep the same amount of floor and ground "
                 "visible below the subject as in the reference, subject seated "

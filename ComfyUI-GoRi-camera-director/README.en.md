@@ -23,6 +23,18 @@ Menu         HF Skills / Camera
 
 ---
 
+## Quick start (3 steps)
+
+1. Type the scene into `topic`. **Korean is fine.**
+2. Connect the final model's CLIP to `clip`.
+3. Connect `positive_out` to the KSampler's `positive` and `negative_out` to
+   `negative`, then run.
+
+Picking a preset fills all ten camera fields for you. If you have reference
+photos, connect them from `image_1` upward. The sections below explain each step.
+
+---
+
 ## 1. Install
 
 1. Copy the `ComfyUI-GoRi-camera-director` folder into `ComfyUI/custom_nodes/`.
@@ -115,6 +127,8 @@ A woman in a black coat turns around in a rainy alley
   a rainy alley" are read the same way. When deciding what each reference image is
   for (pose, outfit, ...), decorative tags are filtered out to avoid misreading.
 - Dialogue or extra description is fine. The camera clauses are appended after it.
+- **For how to write a prompt that actually holds, see 4-7.** Naming the person, the
+  arm position and the garment matters most.
 
 ### 4-2. preset — set the mood in one click
 
@@ -131,7 +145,7 @@ Choosing `자동 (auto)` clears them back to auto.
 | `드라마틱 롱샷 (dramatic long shot)` | Wide, low angle, low key, strong contrast |
 
 > **All five presets are unique.** Choosing any of them visibly changes the output.
-> To customize preset values, see section 10.
+> To adjust a preset, pick different values in the ten camera fields below.
 >
 > **Presets carry no camera movement (`motion`).** Movement only applies to video
 > pipelines, so selecting a preset leaves `motion` and `motion2` at `none`. To
@@ -157,10 +171,10 @@ automatically**. A run never fails because of this.
 | `composition` | Placement in frame | 8 (rule of thirds, centered, leading lines…) |
 | `lighting` | Quality of light | 10 (window light, golden hour, Rembrandt, low key…) |
 | `grade` | Color treatment | 8 (cinematic film, vivid, noir…) |
-| `motion` | Camera movement (video only) | 21 (push-in, pan, orbit, handheld…) |
+| `motion` | Camera movement (video only) | 22 (push-in, pan, orbit, handheld…) |
 | `speed` | Movement speed | slow / normal / fast |
 | `amplitude` | Movement strength | subtle / normal / dramatic |
-| `motion2` | A second movement (video only) | Same 21 as `motion` |
+| `motion2` | A second movement (video only) | Same 22 as `motion` |
 
 > On screen, `motion` and `motion2` show as **`motion (only video)`** — the name
 > carries an `(only video)` suffix. Movement only applies to video pipelines and
@@ -204,10 +218,10 @@ stays the way you left it.
 
 | Field | Description |
 |---|---|
-| `provider` | [OI] · Anthropic · Gemini · OpenRouter · Groq · DeepSeek · Mistral · Ollama · LM Studio · Custom |
+| `provider` | OpenAI · Anthropic · Gemini · OpenRouter · Groq · DeepSeek · Mistral · Ollama · LM Studio · Custom |
 | `model` | Model name. Empty uses the provider default |
 | `api_key` | Key. If empty, `.env` and environment variables are checked |
-| `custom_base_url` | Only for `Custom ([OI] compatible)` |
+| `custom_base_url` | Only for `Custom (OpenAI compatible)` |
 | `vision_detail` | Image size sent to the LLM: `선명 (768)` / `균형 (512)` / `절약 (384)` |
 
 Running with `AI 판단 (llm)` makes the `model` field **blink green**. Local LLMs
@@ -232,6 +246,57 @@ disables the check.
 - Denoise above 0.9 is flagged as drifting away from the original.
 
 > These fields **only warn**. They never block or change your values.
+
+### 4-7. Writing a prompt that holds — five rules
+
+**The node only keeps what you name.** Everything you leave out is filled
+differently on every run.
+
+**1. Name the person**
+
+```
+The woman is wearing jeans and sits on a chair indoors      (yes)
+Wearing jeans and sitting on a chair indoors                (no — nobody named)
+```
+
+The node looks for a person in the text and attaches the face, finger and limb
+guards. With nobody named, **none of them attach.**
+
+Korean nouns (`여성`, `여자`, `사람`, `모델`) survive translation, so they are safe.
+Watch this when you use a translator — the same meaning can come out as `He`, and
+the guards drop silently.
+
+**2. Say where the arms and hands are**
+
+```
+The woman sits on a chair with both hands on her knees, looking ahead    (yes)
+The woman sits on a chair, looking ahead                                (no — the arms are nowhere)
+```
+
+When the arms from the reference photo do not carry over to the new pose (arms
+raised to hold something, now sitting), an unnamed arm **disappears.**
+
+**3. Name the garment**
+
+If you do not name the garment, **the reference image is the only anchor**, and a
+pose change redraws that area, so it differs from run to run. Naming it (`long
+jeans`) keeps it stable.
+
+**4. Write footwear as adjective + noun**
+
+`closed-toed shoes` (good). A footwear adjective attached to another garment
+(`closed-toed shorts`) prints one warning line in the console. It warns; it never
+blocks.
+
+**5. Fix the seed and change one thing at a time**
+
+With many constraints the model satisfies **only some** of them, and which one it
+drops changes from run to run. So **fix the seed** and edit the sentence. Picking
+a lucky image by changing seeds is not reproducible.
+
+> Guards **raise the odds; they do not guarantee.** If what you named does not come
+> out, add one more of the five items above. Console logs and `prompt_out` show
+> what was attached.
 
 ---
 
@@ -264,9 +329,9 @@ image 2 is pose only
 image 2, sitting
 ```
 
-Pose slots are removed from identity, outfit and object sources, and are **not
-sent to the LLM** — they travel only through the image model's pixel path. That
-is why the face or clothes in a pose reference do not leak into the main subject.
+A pose slot is used only for the pose and is dropped as a source of face, outfit
+or objects. That is why the face or clothes in a pose reference do not leak into
+the main subject.
 
 In `AI 판단 (llm)` mode you do not have to name a slot at all: the LLM looks at
 each reference image's pose and **picks the pose reference itself**, attaching a
@@ -361,37 +426,21 @@ pixels and assigns the roles itself.**
 - The result is logged: `참조 자동 분류 — 인물 슬롯 2`.
 - If the topic names a slot (`image 2 is pose only`), **that always wins**.
 
-**An object on a plain background is read as an `item`** (outfit photo, product
-photo, studio furniture). Pixels cannot tell a garment from an object (measured:
-the two signals overlap), so it only decides "item" and leaves wear-or-place to a
-**conditional** sentence:
+**An object on a plain background is read as an "item"** (outfit photo, product
+photo, studio furniture). Pixels alone cannot tell a garment from an object, so
+the node decides only "item" and lets the model work out whether to wear it or
+place it.
 
-```
-reference image 1 is an isolated item: if it is a garment, put it on the person
-from reference image 2 with its exact colour, cut and material; if it is an
-object or product, keep its exact shape, material and colour and place it in the
-scene.
-```
+- A garment photo is put on the person from another reference; an object or
+  product keeps its shape, material and colour and is placed in the scene.
+- A room photo holding many objects is not an item. Only a single object on a
+  plain background counts.
+- Where person detection is not available, slot 1 is treated as the main subject.
 
 **AI 판단 (llm) classifies the roles more precisely.** The LLM looks at the
-attached images and returns each slot's role in its JSON, which overrides the
-pixel verdict (logged as `LLM 참조 역할 — 1번=outfit`). The role vocabulary is
-closed to six words — `person`·`outfit`·`object`·`background`·`style`·`pose` — and
-a slot number that is not actually connected is dropped. With an explicit
-`outfit`, the sentence states the transfer outright:
-
-```
-dress the person from reference image 2 in the garment shown in reference image 1,
-keeping its exact colour, cut, material and pattern; the garment must be worn on
-the body, not held or placed beside it.
-```
-
-A room photo holding many objects is not an item (unknown). Only a single object
-on a plain background counts.
-
-Person detection uses a pose model. It borrows the model bundled with the keeper
-folder; if that is missing (camera installed alone), the analysis turns off and
-slot 1 becomes the main subject as before.
+attached images and assigns each slot's role, which overrides the pixel verdict.
+The roles are person, outfit, object, background, style and pose, and a slot that
+is not actually connected is ignored.
 
 Character sheets are still detected from pixels even with an empty topic.
 
@@ -429,12 +478,9 @@ sheet: the same person from several angles gets "every view is the same person",
 a row of different characters gets "each panel is a different character". A topic
 word like `multiple characters` always wins over that judgment.
 
-> The sheet is sent **only to the LLM** (to read identity) and is dropped from
-> every path to the image model — not just the reference latents but also
-> `image_out` and `reference_latent_out` (the outputs feeding Keeper, I2V and
-> upscaling). Qwen-Image follows the layout of a reference image, so passing
-> the sheet through would produce a multi-panel output. This handling prevents
-> that.
+> The sheet is used **only to read identity** and is never passed to the drawing
+> side. So connecting a sheet does not produce a multi-panel image, and the sheet
+> is dropped from `image_out` and `reference_latent_out` as well.
 
 ### 5-7. Guards that attach automatically
 
@@ -469,10 +515,8 @@ In `규칙 (auto)` mode, a Korean topic or `prompt_in` is translated to English 
 the translation model is present. `AI 판단 (llm)` does not use it — the LLM writes
 the English scene itself.
 
-- **Model location**: `ComfyUI/models/translation/tc-big-ko-en`
-  (or `models/translation/tc-big-ko-en` inside the node folder, or the folder
-  named by the `GORI_TRANSLATE_MODEL` environment variable)
-- **Not bundled with the repo.** Download it once, about 420 MB.
+- **Model location**: drop it into `ComfyUI/models/translation/tc-big-ko-en`.
+- **Not bundled with the node.** Download it once, about 420 MB.
 - **Without it, Korean passes through unchanged.** Translation quietly turns off
   and the node keeps working.
 - If you only use English, the model is never loaded.
@@ -537,6 +581,8 @@ GEMINI_API_KEY=...
 | `image_out` / `reference_latent_out` is empty | Only a sheet image is connected. Sheets are dropped from all outputs, so connect one more reference besides the sheet |
 | The outfit from a reference is copied | Give that slot a role in the topic (`image 2 is background only`) |
 | People look smeared | Lower denoise (0.6-0.8) and raise resolution. Enter the value in `pf_denoise` to get a warning |
+| One arm is missing | The reference arms did not carry over to the new pose. Name the arm position in the topic (`both hands on her knees`). See 4-7 |
+| A garment changes (long jeans become shorts) | Name the garment in the topic. Without it the reference image is the only anchor. See 4-7 |
 | The face differs from the reference | Check whether the topic asks for a pose. Remove the pose sentence and use `중경 (MS)` or closer. If that is not enough, add a face-specific tool |
 | Shoe colour or style changes | A guard keeps the reference shoes. If it still changes, name the colour and style you want in the topic |
 | `pose_image` is connected but the pose does not change | A map that also draws hands and face can be misread. Connect a body-only map |
@@ -564,22 +610,7 @@ a copy**, so quality and identity drift. For a continuous sequence:
 
 ---
 
-## 10. Editing presets and keywords
-
-| File | Purpose |
-|---|---|
-| `presets.json` | Change or add presets. Values must match the dropdown labels exactly |
-| `keywords_ko_en.json` | The Korean/English keyword list used by `규칙 (auto)`. Add your own words |
-
-Presets live in **two places**. The values used at run time are in `presets.json`;
-the values that fill the widgets when you pick a preset on screen are in the
-`CAMERA_PRESETS` block inside `web/progressive_image_inputs.js`. **Editing only
-one of them makes the filled widgets and the actual result disagree.** Keep both
-in sync when you change a preset.
-
----
-
-## 11. Credits and license
+## 10. Credits and license
 
 - Camera prompt structure inspired by `higgsfield-ai/skills` (MIT)
 - Five camera angles (POV, reflection, panoramic, three-quarter rear, wide hero)
