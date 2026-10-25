@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""tc-big-ko-en 한국어→영어 번역 어댑터 (카메라 노드 규칙/수동 tier 전용).
+"""tc-big-ko-en 한국어→영어 번역 어댑터 (카메라 노드 규칙 tier 전용).
 
 왜(Why) 이 파일이 필요한가
 --------------------------
-규칙(auto)/수동(manual) tier 에서는 카메라가 사용자의 한글 prompt_in / topic 을
+규칙(auto) tier 에서는 카메라가 사용자의 한글 prompt_in / topic 을
 그대로 샘플러로 보낸다. 그럼 한글이 영문 프롬프트에 섞여 나간다. LLM tier 는
-이미 cam_llm.py 가 영문으로 확장하지만, 규칙/수동에는 번역 주체가 없었다.
+이미 cam_llm.py 가 영문으로 확장하지만, 규칙 tier 에는 번역 주체가 없었다.
 이 어댑터가 그 빈칸을 메운다 — 모델은 Helsinki-NLP/opus-mt-tc-big-ko-en (cc-by-4.0).
 
 설계 결정 (실측 기반, 2026-10-13)

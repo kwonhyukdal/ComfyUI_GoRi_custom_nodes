@@ -20,6 +20,32 @@ PRESETS = _load("presets.json", {})
 KEYWORDS = _load("keywords_ko_en.json", {})
 
 
+def _lower_keywords(entries):
+    """키워드 항목을 (value, 소문자 키워드 튜플) 로 바꾼다.
+
+    왜(Why) 사본을 두나 (2026-10-25 최적화): rules() 가 호출마다 모든 키워드에
+    str(k).lower() 를 다시 걸었다. 표는 상수이므로 모듈 로드 때 한 번만
+    소문자로 만들어 두면 호출당 재계산이 사라진다. 출력은 완전히 동일하다.
+    dict 가 아닌 항목(예: JSON 의 `_comment` 안내문)은 건너뛴다 — 원래
+    rules() 도 그런 항목을 읽지 않았다.
+    """
+    out = []
+    if not isinstance(entries, list):
+        return out
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        out.append((entry.get("value"),
+                    tuple(str(k).lower() for k in entry.get("keywords", []))))
+    return out
+
+
+# 소문자 키워드 사본 — rules() 전용 (호출마다 lower() 재계산 방지).
+_KEYWORDS_LOWER = {cat: _lower_keywords(entries)
+                   for cat, entries in KEYWORDS.items()
+                   if isinstance(entries, list)}
+
+
 AUTO = "자동 (auto)"
 
 
@@ -67,6 +93,18 @@ TOPIC_SHOT_PHRASES = {
 }
 
 
+# 평탄화한 샷 구문 색인 — (라벨, 구문, "… shot" 의 축약형). 왜(Why) 미리 만드나
+# (2026-10-25 최적화): _longest_shot_label 이 호출마다 딕셔너리를 순회하며
+# `p.endswith(" shot")` 와 슬라이스를 다시 계산했다. 표는 상수이므로 한 번만
+# 평탄화한다. 순회 순서(딕셔너리 순서 → 구문 순서)는 그대로라 최장 일치 결과가
+# 완전히 동일하다.
+_SHOT_PHRASE_INDEX = tuple(
+    (label, phrase, phrase[:-5] if phrase.endswith(" shot") else "")
+    for label, phrases in TOPIC_SHOT_PHRASES.items()
+    for phrase in phrases
+)
+
+
 def _longest_shot_label(text: str, exclude: str = "") -> str:
     """텍스트에서 샷 구문을 찾되, 가장 길게(구체적으로) 일치한 라벨 하나를 반환한다.
 
@@ -79,17 +117,14 @@ def _longest_shot_label(text: str, exclude: str = "") -> str:
     if not s:
         return ""
     best_label, best_len = "", 0
-    for label, phrases in TOPIC_SHOT_PHRASES.items():
+    for label, p, bare in _SHOT_PHRASE_INDEX:
         if label == exclude:
             continue
-        for p in phrases:
-            if p in s:
-                if len(p) > best_len:
-                    best_label, best_len = label, len(p)
-            elif p.endswith(" shot"):
-                bare = p[:-5]
-                if len(bare.split()) >= 2 and bare in s and len(bare) > best_len:
-                    best_label, best_len = label, len(bare)
+        if p in s:
+            if len(p) > best_len:
+                best_label, best_len = label, len(p)
+        elif bare and len(bare.split()) >= 2 and bare in s and len(bare) > best_len:
+            best_label, best_len = label, len(bare)
     return best_label
 
 
@@ -384,7 +419,7 @@ def _reference_lighting_flow(image):
     """reference 1장의 조명 흐름맵 (8x8 정규화). 실패 시 None.
 
     왜(Why): 2장 이상 믹스 실행에서 참조 간 조명이 충돌하면(한 장은 좌광,
-    한 장은 우광) 합성 결과 조명이 깨진다. Keeper의 Retinex 근사와 동일
+    한 장은 우광) 합성 결과 조명이 깨진다. Retinex 근사와 같은
     원리를 IMAGE 텐서/배열에 적용한다 (numpy만 사용).
     """
     try:
@@ -479,17 +514,15 @@ def rules(topic: str):
     t = (topic or "").lower()
     for cat in ("shot", "lens", "angle", "lighting", "motion"):
         table = _TABLES[cat]
-        for entry in KEYWORDS.get(cat, []):
-            val = entry.get("value")
+        for val, keys in _KEYWORDS_LOWER.get(cat, ()):
             if val not in table:
                 continue
-            if any(str(k).lower() in t for k in entry.get("keywords", [])):
+            if any(k in t for k in keys):
                 cam[cat] = val
                 matched.add(cat)
                 break
-    for entry in KEYWORDS.get("speed", []):
-        val = entry.get("value")
-        if val in SPEED and any(str(k).lower() in t for k in entry.get("keywords", [])):
+    for val, keys in _KEYWORDS_LOWER.get("speed", ()):
+        if val in SPEED and any(k in t for k in keys):
             cam["speed"] = val
             matched.add("speed")
             break

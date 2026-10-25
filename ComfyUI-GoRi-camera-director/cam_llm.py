@@ -545,6 +545,12 @@ def llm_system() -> str:
         ' "composition": "<label>", "lighting": "<label>", "grade": "<label>",'
         ' "motion": "<label>", "motion2": "<label>", "speed": "<label>", "amplitude": "<label>"},'
         ' "negative": "<optional extra English negative phrases>",'
+        ' "outfit": "<English description of the visible garments worn by the'
+        ' main person in the attached person reference image (top, bottom, dress),'
+        ' with concrete colour, material, pattern and cut,'
+        ' e.g. \'a cream knit cardigan over a floral-print dress\'.'
+        ' EXCLUDE footwear (shoes are governed separately).'
+        ' OMIT this key when no person reference image is attached>",'
         ' "anatomy": "<ONLY if you see wrong limb counts in the attached image(s):'
         ' e.g. three feet, extra hand, six fingers, missing leg. Otherwise OMIT this key>",'
         ' "references": [{"slot": <image number>, "role":'
@@ -587,7 +593,11 @@ def llm_system() -> str:
         "you actually see, and direct the replacement from that reference. The "
         "replacement MUST happen — do not fall back to the original outfit.\n"
         "  2. If NO explicit outfit change was requested (or no clothing reference): "
-        "the person keeps their original outfit.\n"
+        "the person keeps their original outfit. When a person reference image is "
+        "attached, ALSO copy that person's visible garments into outfit with "
+        "concrete colour, material, pattern and cut, EXCLUDING footwear — the "
+        "outfit is re-rendered from this text, so a vague description makes the "
+        "garments disappear.\n"
         "  3. In either case NEVER leave meta placeholders like '(insert "
         "description here)' — write a real description or no replacement at all.\n"
         "- The scene prose MUST agree with the camera labels you return (shot, lens, "

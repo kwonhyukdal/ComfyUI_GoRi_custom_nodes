@@ -17,13 +17,14 @@
 (실측: 인물 8장 전부 검출, 가구·의상·소품·배경 11장 전부 미검출,
 숲 사진 1장은 검출됐지만 bbox 0.09x0.30 이라 게이트에서 탈락).
 
-모델은 이 폴더에 없다. 키퍼 폴더의 번들 모델을 빌려 쓴다(두 노드는 세트).
+포즈 모델(pose_landmarker_lite.task)은 **이 폴더에 동봉**한다. 왜(Why): 배포본은
+카메라 단독이라 모델을 둘 다른 노드 폴더가 없다.
 없으면 분류를 끄고 기존 동작(첫 연결 = 주 피사체)으로 돌아간다 — 조용히
 실패하지 않고 한 번 로그를 남긴다.
 
-사물 검출은 EfficientDet-Lite0(ObjectDetector)로 한다. 이 모델은 반대로
-**이 폴더에 동봉**한다 — 배포본에 키퍼 폴더가 없어서 키퍼에 두면 배포본에서
-사물 검출이 조용히 꺼지기 때문이다. 없으면 사물 목록만 비고 사람·픽셀 판정은
+사물 검출은 EfficientDet-Lite0(ObjectDetector)로 한다. 이 모델도 **이 폴더에
+동봉**한다 — 배포본은 카메라 단독이라 다른 폴더에 두면 사물 검출이 조용히
+꺼지기 때문이다. 없으면 사물 목록만 비고 사람·픽셀 판정은
 그대로 돈다. `detect_objects` 는 **사람을 내보내지 않는다** — 사람의 근거는
 포즈 모델이다.
 """
@@ -71,9 +72,10 @@ _ITEM_MIN_BORDER_DOM = 0.90
 _ITEM_MAX_SKIN = 0.12
 
 # 동봉 사물 검출 모델 (EfficientDet-Lite0, Apache-2.0). 왜(Why) 이 폴더인가:
-# 배포본에는 Comfyui-GoRi-Consistency-Keeper/ 가 없다. 포즈 모델(.task)은
-# 두 노드가 항상 세트라 키퍼에서 빌려 쓰지만, 이 모델을 키퍼에 두면
-# 배포본에서 사물 검출이 **조용히** 꺼진다. 고지 문서는 같은 폴더의
+# 배포본은 카메라 단독 팩이라 모델을 둘 다른 노드 폴더가 없다. 동봉 모델을
+# 다른 폴더에 두면 배포본에서 사물 검출이 **조용히** 꺼진다. 포즈 모델
+# (pose_landmarker_lite.task)과 그 고지(POSE_MODEL_LICENSE.txt)도 같은
+# 이유로 이 폴더에 함께 둔다. 사물 고지 문서는 같은 폴더의
 # OBJECT_MODEL_LICENSE.txt 이고 R183 테스트가 파일과 서로 대조한다.
 _OBJECT_MODEL = "efficientdet_lite0.tflite"
 _OBJECT_ENV = "GORI_OBJECT_MODEL"
@@ -120,15 +122,13 @@ _OBJECT_NOTE = ""
 def _model_path() -> str:
     """포즈 모델 경로. 없으면 "".
 
-    순서: 환경변수 > 이 폴더 > 키퍼 폴더(같은 팩). 두 노드는 항상 세트로
-    쓰이므로 키퍼 번들 모델을 빌리는 것이 중복 배포보다 낫다.
+    순서: 환경변수 > 이 폴더. 이 팩은 카메라 단독이라 포즈 모델을 카메라
+    폴더에 동봉한다(배포본과 동일).
     """
     here = os.path.dirname(os.path.realpath(__file__))
     cands = [
         (os.environ.get("GORI_POSE_MODEL") or "").strip(),
         os.path.join(here, "pose_landmarker_lite.task"),
-        os.path.join(here, os.pardir, "Comfyui-GoRi-Consistency-Keeper",
-                     "pose_landmarker_lite.task"),
     ]
     for p in cands:
         if p and os.path.isfile(p):
@@ -146,7 +146,7 @@ def _landmarker():
         path = _model_path()
         if not path:
             _LOAD_NOTE = ("포즈 모델이 없어 참조 자동 분류를 끕니다 "
-                          "(GORI_POSE_MODEL 또는 키퍼 폴더의 .task)")
+                          "(GORI_POSE_MODEL 또는 이 폴더의 .task)")
             _note_once("classify_no_model", "[Camera Director] " + _LOAD_NOTE)
             return None
         try:
@@ -194,7 +194,20 @@ def _u8_rgb(image):
             return None
         step = max(1, -(-max(h, w) // _MAX_SIDE))
         a = a[::step, ::step]
-        return (np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8)
+        # 항상 연속(C-contiguous)으로 돌려준다 (2026-10-25 실측).
+        # 왜(Why) 반드시 필요한가: 소비자 둘(_probe·detect_objects)이 이 배열을
+        # `mp.Image(image_format=..., data=arr)` 로 넘긴다. 그 생성자는
+        # `data.strides` 를 **읽지 않고** 원시 버퍼 포인터(data.ctypes.data)와
+        # width/height/size 만 C 쪽에 넘기며, docstring 에도 "stores the pixel
+        # data continuously" 를 전제로 적어 두었다. 그래서 비연속 배열을
+        # 넘기면 예외 하나 없이 **다른 픽셀**을 읽고 검출이 조용히 0 이 된다.
+        # 실제 발생 경로: ResizeImageMaskNode 의 "scale to multiple" 이
+        # 업스케일을 생략하면 movedim 뷰가 그대로 나와 비연속이 된다(#19).
+        # 실측: 같은 픽셀을 연속으로 복사하면 _probe 가 0 에서 1 로 살아났고
+        # (bbox 0.410 x 0.816), 픽셀 값은 하나도 바뀌지 않았다. 솎기 자체는
+        # 그대로라 위 임계값들도 그대로 쓴다.
+        return np.ascontiguousarray(
+            (np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8))
     except Exception:  # noqa: BLE001
         return None
 

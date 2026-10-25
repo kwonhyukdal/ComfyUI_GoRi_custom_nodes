@@ -14,7 +14,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"MAX_REFERENCE_IMAGES", "VISION_DETAIL", "VISION_DETAIL_DEFAULT", "vision_detail_px", "build_identity_anchor", "build_single_person_anchor", "build_duo_person_anchor", "reference_guard", "build_secondary_role_anchor", "auto_reference_roles_positive"
+"MAX_REFERENCE_IMAGES", "VISION_DETAIL", "VISION_DETAIL_DEFAULT", "vision_detail_px", "GARMENT_RETENTION_POSITIVE", "build_identity_anchor", "build_single_person_anchor", "build_duo_person_anchor", "reference_guard", "build_secondary_role_anchor", "auto_reference_roles_positive"
 ]
 
 
@@ -40,6 +40,25 @@ def vision_detail_px(label: str) -> int:
         return int(VISION_DETAIL.get((label or "").strip(), 768))
     except (ValueError, TypeError, AttributeError):
         return 768
+
+
+# 의상 보존 상용구 (2026-10-25 C1 실측). 왜(Why) 이 문구가 필요한가:
+# denoise 1.0 합성에서 모델이 참조 1번의 **겉옷(카디건)** 을 지우는 실패가
+# 실측됐다. 부드러운 유지 문구("의상은 참조 그대로 유지한다")는 3/3 실패해
+# 카디건이 사라졌다. 실패 모드는 옷을 *바꾸는* 것이 아니라 *지우는* 것이었다.
+# 그래서 "지우지 말라(remove/omit/drop)" 와 "없는 옷을 더하지 말라(add)" 를
+# 옷 이름 없이 지시한다. 실측: 이 강한 일반 문구는 옷 이름을 적지 않고도
+# 카디건을 3/3 보존했다(seed 42/7/999 — 한국어 2 · 영어 1). 슬롯을 박지 않는
+# 이유: 이 문구를 붙이는 앵커가 앞에서 이미 주 참조 슬롯을 지목하므로, 여기서
+# 다시 지목하면 오히려 슬롯 하드코딩이 된다. 규칙(C) 경로 전용이며 LLM(A)은
+# 이 문구 위에 자신이 읽은 옷 이름을 더한다.
+GARMENT_RETENTION_POSITIVE = (
+    "Copy the top and bottom garments from the reference image exactly as "
+    "they appear. Keep every garment visible on the person in the reference "
+    "image, including outer layers such as cardigans, jackets and coats; do "
+    "not remove, omit, drop or replace any garment, and do not add clothing "
+    "that is not in the reference."
+)
 
 
 def build_identity_anchor(image_count: int, topic: str, image_labels=None) -> str:
@@ -82,9 +101,33 @@ def build_identity_anchor(image_count: int, topic: str, image_labels=None) -> st
                 "and keep every other garment, shoe, and accessory exactly as in "
                 "the reference image. "
                 + tail)
+    # 선언된 신발 참조 슬롯 (2026-10-24, R225). 왜(Why) 신발만 돌리나: `3번:
+    # 하이 힐` 처럼 신발 참조를 선언한 실행에서 아래 기본 문장은 "exact shoes …
+    # from the reference image" 로 **주 피사체(1번)** 의 신발을 지목하고, 그
+    # 문장과 신발 가드(`FOOTWEAR_POSITIVE_SLOT`, 3번 지목)가 정면 충돌한다.
+    # 옷·장신구는 주 피사체 참조에서 오는 것이 맞으므로 신발만 선언 슬롯으로
+    # 돌린다. 선언이 없으면 **아래 기본 문장 그대로**(바이트 동일).
+    _fw_decl = sorted(_footwear_slots(topic or ""))
+    if _fw_decl and str(_fw_decl[0]) != first:
+        # 2026-10-24 (R227): `other than the shoes` 를 명시한다. 왜(Why):
+        # 종전 문장은 "every garment from reference image 1"(1번의 모든 옷)과
+        # "the exact shoes from reference image 3"(3번의 신발)를 나란히 두어,
+        # 1번의 신발(흰 슬립온)이 "garment" 로 다시 새어 들어왔다 — 실측
+        # 생성물에서 색은 3번(검정)을 따랐지만 구조는 두 참조의 절충이 됐다.
+        return (head
+                + f", exact outfit including every garment other than the shoes "
+                f"from reference image {first}, "
+                "exact accessories and jewelry, and the exact shoes from "
+                f"reference image {_fw_decl[0]}, unless the instruction explicitly "
+                "changes them. "
+                + GARMENT_RETENTION_POSITIVE + " "
+                "Do not change, replace, or alter any clothing, accessory, or shoe "
+                f"other than the shoes from reference image {_fw_decl[0]}. "
+                + tail)
     return (head
             + ", exact outfit including every garment, exact shoes, exact accessories and jewelry "
             "unless the instruction explicitly changes them. "
+            + GARMENT_RETENTION_POSITIVE + " "
             "Do not change, replace, or alter any clothing, shoe, or accessory from the reference image. "
             + tail)
 
@@ -128,11 +171,13 @@ def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> 
     plan = _person_object_plan(topic, labels)
     main, wanted, objects = plan["main"], plan["persons"], plan["objects"]
     if (not wanted and _second_person_slots(topic) and len(labels) >= 2
-            and int(labels[1]) not in (9, 10) and int(labels[1]) not in objects
+            and int(labels[1]) not in appearance_ref_slots(topic, labels)
+            and int(labels[1]) not in objects
             and int(labels[1]) != main):
         # "두 번째 사람"처럼 슬롯 번호 없이 지칭하면 두 번째 연결 이미지를 쓴다.
-        # 9·10번은 외양 참조 전용, 사물 명시 슬롯은 사물, 이미 주 피사체인 슬롯은
-        # 중복 지정 대상이 아니다.
+        # 외양 참조로 남은 9·10번(선언이 없는 슬롯)은 제외, 사물 명시 슬롯은 사물,
+        # 이미 주 피사체인 슬롯은 중복 지정 대상이 아니다. 선언된 9·10번은
+        # 1~8번과 같이 두 번째 인물이 될 수 있다 (2026-10-23, AC-19).
         wanted = [int(labels[1])]
     # 슬롯 번호 없이 "두 명 / couple / two people" 만 말한 경우.
     # 왜(Why) 이 폴백이 없으면: duo 앵커가 빈 문자열로 빠져서 reference_guard 가
@@ -141,7 +186,8 @@ def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> 
     # 나간다 — 가장 흔한 표현에서 가장 큰 오작동이다.
     _multi_fallback = False
     if (not wanted and len(labels) >= 2 and _is_multi_person_request(topic)
-            and int(labels[1]) not in (9, 10) and int(labels[1]) not in objects
+            and int(labels[1]) not in appearance_ref_slots(topic, labels)
+            and int(labels[1]) not in objects
             and int(labels[1]) != main):
         wanted = [int(labels[1])]
         _multi_fallback = True
@@ -234,6 +280,23 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
     # 언급만 본다. 오탐보다 누락이 안전하다 (누락이면 기존 동작 그대로).
     if _is_empty_scene(topic or ""):
         return ""
+    # 사람도 동물도 아닌 주제(풍경·사물)이면서, 참조 어느 칸에도 사람이 없고
+    # 힌트가 사물/제품 슬롯을 하나라도 찾았으면 사람 신원 조항을 내지 않는다
+    # (2026-10-25 감사). 왜(Why) 위의 유령 인물 실측과 같은 이유다: 사람이
+    # 없는 참조에 "same facial structure, same hairstyle, same exact outfit" 을
+    # 내보내면 모델이 그 사물에서 사람을 만들어낸다. 실측 재현 — 토픽
+    # "나무 의자 제품 샷" + 단색 배경 참조 1장에서, 사물 보존을 맡는 자동 역할
+    # 문장("is an isolated item") 과 사람 신원 조항이 한 프롬프트에 나란히 붙어
+    # 서로 모순됐다. **사람이 검출된 참조(_hint_person_slots 가 비어 있지 않음)
+    # 나 사람·동물 주제는 그대로 둔다** — R147·R172·R210 은 참조에 사람이 있고,
+    # R82 는 힌트가 없어(사물 판정이 아님) 종전 동작이 유지된다. 사물 보존
+    # 문장은 auto_reference_roles_positive 가 따로 담당하므로 여기서는 빈
+    # 문자열이 맞다.
+    if (not _is_human_subject(topic or "")
+            and not _is_animal_subject(topic or "")
+            and not _hint_person_slots()
+            and _hint_object_slots()):
+        return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
     plan = _person_object_plan(topic, labels)
     main = str(plan["main"])
@@ -265,6 +328,7 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
                 "same facial structure, same hairstyle, same exact outfit including every garment, "
                 "same exact shoes, same exact accessories and jewelry, "
                 "same body proportions, same overall color identity. "
+                + GARMENT_RETENTION_POSITIVE + " "
                 "Do not change, replace, or alter any clothing, shoe, or accessory "
                 "unless the user explicitly requests a clothing change.")
     duo = build_duo_person_anchor(image_count, topic, image_labels=image_labels)
@@ -275,7 +339,8 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
     secondary = _secondary_role_labels(labels, main=plan["main"],
                                        persons=plan["persons"],
                                        poses=plan["poses"],
-                                       clothing=plan["outfits"])
+                                       clothing=plan["outfits"],
+                                       appearance=appearance_ref_slots(topic, labels))
     head = f"use reference image {main} as the only main human identity, "
     if secondary:
         head += ("use reference image(s) " + ", ".join(secondary)
@@ -315,7 +380,8 @@ def build_secondary_role_anchor(image_count: int, topic: str, image_labels=None)
     secondary = _secondary_role_labels(labels, main=plan["main"],
                                        persons=plan["persons"],
                                        poses=plan["poses"],
-                                       clothing=plan["outfits"])
+                                       clothing=plan["outfits"],
+                                       appearance=appearance_ref_slots(topic, labels))
     head = f"Use reference image {plan['main']} as the only main subject, "
     if secondary:
         head += ("use reference image(s) " + ", ".join(secondary)

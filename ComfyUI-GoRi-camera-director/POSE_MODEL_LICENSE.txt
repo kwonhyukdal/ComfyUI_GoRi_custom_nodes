@@ -12,15 +12,14 @@ MediaPipe Pose Landmarker (lite) 모델 파일.
 사용 목적
 --------
 
-Consistency Keeper 가 결과 이미지에서 **관절 33점** 좌표와 **분할 마스크**를
-뽑는 데 쓴다. 여기서 나오는 정보로 세 가지가 돈다.
+이 노드(GoRi Camera Director)가 참조 이미지에서 **관절 33점** 좌표를 뽑아
+**사람이 있는 칸**을 픽셀로 찾는 데 쓴다. 슬롯 번호가 아니라 픽셀 근거로
+주 피사체를 정하기 위한 것이며, 바운딩박스 크기 게이트와 함께 써서 오탐
+(침대 베개·가을 숲)을 걸러낸다.
 
-    부위별 강도 조절   어깨·팔·손가락 등 부위마다 denoise 를 다르게 준다
-    인물 마스크        강도를 인물 영역에 집중시킨다
-    프레이밍 판정      기준 이미지와 결과물의 인물 위치·크기를 비교한다
-
-이 파일이 없으면 위 세 기능이 **에러 없이 조용히 꺼진다.** 그래서 함께
-배포한다 — 설치하면 따라오는 쪽이 맞다.
+이 파일이 없으면 참조 이미지 자동 분류가 **에러 없이 조용히 꺼지고** 기존
+동작(첫 연결 = 주 피사체)으로 돌아간다. 그래서 함께 배포한다 — 설치하면
+따라오는 쪽이 맞다.
 
 대체 모델
 --------
@@ -45,58 +44,3 @@ Consistency Keeper 가 결과 이미지에서 **관절 33점** 좌표와 **분�
   (d) 원본에 NOTICE 파일이 있으면 함께 제공한다
 
 전체 라이선스: https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE
-
-hand_landmarker.task
-====================
-
-MediaPipe Hand Landmarker 모델 파일.
-
-    출처   https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
-    크기   7,819,105 bytes (7.46 MB)
-    sha256 fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1
-    라이선스 Apache License 2.0 (google-ai-edge/mediapipe)
-    형식   .task = ZIP 컨테이너 (TFLite + 메타데이터)
-
-사용 목적
---------
-
-Consistency Keeper 가 결과 이미지에서 **손 21점 × N개** 좌표를 뽑는 데 쓴다.
-포즈 33점은 손가락 끝 3점(새끼·검지·엄지)만 주므로 손가락 개수·분리를 판정할
-수 없다. 손 모델은 손마다 21점(손가락 끝 5개 포함)을 주어 개수와 뭉개짐을 본다.
-
-이 파일이 없으면 손가락 판정만 조용히 꺼지고 나머지는 그대로 돈다.
-환경변수로 경로를 지정할 수 있다:
-
-    setx GORI_HAND_MODEL "C:\어딘가\hand_landmarker.task"
-
-환경변수가 동봉본보다 우선한다.
-
-face_landmarker.task
-====================
-
-MediaPipe Face Landmarker 모델 파일.
-
-    출처   https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
-    크기   3,758,596 bytes (3.58 MB)
-    sha256 64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff
-    라이선스 Apache License 2.0 (google-ai-edge/mediapipe)
-    형식   .task = ZIP 컨테이너 (TFLite + 메타데이터)
-
-사용 목적
---------
-
-Consistency Keeper 가 결과 이미지에서 **얼굴 478점** 좌표를 뽑는 데 쓴다.
-얼굴·눈·코·입·귀 부위 판독과 콧구멍 좌우 기하 판독에 쓴다. 콧구멍은 고정
-인덱스가 얼굴마다 흔들려(실측: 125/354 vs 97/94 vs 19/20) 비강 기지 밴드에서
-매 실행 기하로 찾는다.
-
-이 파일이 없으면 얼굴 부위 판독만 조용히 꺼지고(face_count=None, 얼굴·
-콧구멍 부위 absent) 나머지는 그대로 돈다. 환경변수로 경로를 지정할 수 있다:
-
-    setx GORI_FACE_MODEL "C:\어딘가\face_landmarker.task"
-
-환경변수가 동봉본보다 우선한다.
-
-라이선스는 위 pose/hand 와 같은 Apache License 2.0 이며 고지는 Section 4
-요구사항을 그대로 따른다 (미수정 원본이므로 (b)는 해당 없음, 출처·라이선스
-고지를 여기에 보존).

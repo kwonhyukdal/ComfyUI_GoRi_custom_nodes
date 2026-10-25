@@ -544,7 +544,7 @@ def chat(provider: str, model: str, api_key: str,
         if not (model or "").strip():
             raise LLMError(
                 "Custom (OpenAI 호환): model 칸이 비어 있음 — 엔드포인트가 제공하는 "
-                "모델명을 입력하세요 (예: qwen2.5-vl)")
+                "vision 모델명을 입력하세요 (서버의 /v1/models 목록에서 확인).")
         # 왜(Why) 여기서 막는가 (2026-10-01 실측): `and not is_custom` 때문에
         # 키 검사를 통째로 건너뛰고 **빈 키로 외부 서버에 요청을 보냈다.**
         # 실측 로그:

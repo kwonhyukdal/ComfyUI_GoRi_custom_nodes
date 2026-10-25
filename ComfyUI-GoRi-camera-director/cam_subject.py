@@ -14,9 +14,22 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "HUMAN_PRONOUN_KEYWORDS", "_human_pronoun_present", "ANIMAL_SUBJECT_KEYWORDS", "_animal_keyword_present", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
-"_hint_person_slots", "_hint_pose_slots", "_text_names_slots", "intent_core",
-"footwear_noun_mismatch"
+"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "HUMAN_PRONOUN_KEYWORDS", "_human_pronoun_present", "ANIMAL_SUBJECT_KEYWORDS", "_animal_keyword_present", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_clothing_declared_slots", "_CLOTHING_COLON_PATTERN", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_wants_barefoot", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
+"_hint_person_slots", "_hint_pose_slots", "_hint_object_slots", "_text_names_slots", "intent_core",
+"_normalize_slots",
+"footwear_noun_mismatch", "_KO_WEAR_ITEMS", "_KO_CLOTHING_ROLE_WORDS",
+"_KO_WEAR_BASIC_WORDS", "_KO_WEAR_ACCESSORIES", "_WEAR_NOUN_KO",
+"_WEAR_GENERIC_KO", "_loose_alt", "verb_stem_present", "_WEAR_STEMS",
+"_VERB_ENDINGS_CHANGE", "_VERB_ENDINGS_STATE", "scene_text",
+"_SCENE_MARKER_RE", "_EN_SLOT_DECL_RE", "_person_role_slots", "_subject_decl_slots",
+"_HUMAN_WORDS_KO", "_HUMAN_WORDS_EN", "guess_pos",
+"_axis_consults_role_lexicon", "_decl_verb_slots",
+"_declared_role_slots", "appearance_ref_slots",
+"colon_less_role_hint",
+"_footwear_slots", "_KO_FOOTWEAR_WORDS", "_EN_FOOTWEAR_WORDS",
+"_FOOTWEAR_ROLE_PATTERNS",
+"_KO_SEAT_WORDS", "_EN_SEAT_WORDS", "SEAT_WORDS", "_SEAT_VERBS",
+"_SEAT_ROLE_PATTERNS", "_seat_slots",
 ]
 
 
@@ -33,60 +46,184 @@ __all__ = [
 # "2번 의상" 이라고 적었으면 그 판정이 언제나 이긴다.
 # ---------------------------------------------------------------------------
 _KIND_HINT = threading.local()
+# 픽셀 검출 인물 슬롯 (2026-10-23). 왜(Why) kind 지도와 **따로** 두나: `_KIND_HINT`
+# 는 LLM 역할까지 병합된 지도라, 그 안의 "person" 만 보면 "픽셀이 사람을 찾았다"
+# 와 "LLM 이 사람이라고 분석했다" 를 가를 수 없다. 그 둘은 9·10번에서 결론이
+# 다르다 — 픽셀은 자세 랜드마크 + 몸 크기 게이트를 통과한 실측이고, LLM 의
+# person 은 몸 근접 참조까지 사람으로 볼 수 있다(작업 9 의 경계). 그래서 픽셀
+# 근거만 따로 심는다.
+_PIXEL_HINT = threading.local()
 
 
-def set_reference_kinds(kinds) -> None:
-    """{슬롯번호: 'person'|'unknown'} 을 이번 실행의 힌트로 심는다."""
+def set_reference_kinds(kinds, persons=None) -> None:
+    """{슬롯번호: 'person'|'unknown'|...} 을 이번 실행의 힌트로 심는다.
+
+    `persons` 는 **픽셀이** 사람을 찾은 슬롯이다. 넘기지 않으면 `kinds` 에서
+    person 인 슬롯을 그대로 쓴다(분류 직후처럼 픽셀 근거뿐인 호출). LLM 역할을
+    병합한 **뒤** 다시 부를 때는 앞서 구한 집합을 반드시 넘긴다 — 안 넘기면
+    LLM 의 person 이 픽셀 근거로 둔갑해 9·10번 경계가 풀린다.
+    """
     try:
         clean = {int(k): str(v) for k, v in (kinds or {}).items()}
     except (TypeError, ValueError):
         clean = {}
     _KIND_HINT.kinds = clean or None
+    if persons is None:
+        _PIXEL_HINT.persons = {k for k, v in clean.items() if v == "person"} or None
+    else:
+        try:
+            _PIXEL_HINT.persons = {int(x) for x in persons} or None
+        except (TypeError, ValueError):
+            _PIXEL_HINT.persons = None
 
 
 def clear_reference_kinds() -> None:
     """실행이 끝나면 지운다 (다음 실행에 새지 않게)."""
     _KIND_HINT.kinds = None
+    _PIXEL_HINT.persons = None
+
+
+def _pixel_person_slots() -> set:
+    """**픽셀이** 사람을 찾은 슬롯(근거 종류를 가르는 내부용)."""
+    return set(getattr(_PIXEL_HINT, "persons", None) or ())
 
 
 def _hint_person_slots() -> list:
-    """힌트가 말하는 인물 슬롯. 9·10번은 외양 참조라 제외한다."""
+    """힌트가 말하는 인물 슬롯 — 9·10번은 **픽셀 근거가 있을 때만** 든다.
+
+    왜(Why) 9·10번만 근거를 나누나 (2026-10-23 실측, README 5-1·5-5 대조):
+    공개 사용설명서는 "어느 칸이든 주 피사체가 될 수 있고, 역할은 번호가 아니라
+    내용으로 정해지며, **사람이 있는 칸은 픽셀로 찾아** 주 피사체 후보로 삼는다"
+    고 약속한다. 실측: 의자 1번 + 한국 여성 9번 + 빈 topic 에서 프롬프트가
+    `use reference image 1 as the only main human identity` 를 내보냈다 —
+    의자가 사람 신원이 됐다(같은 실행의 콘솔 로그는 `인물 슬롯 9` 라고 말하고
+    있었다: 로그와 프롬프트가 서로 달랐다).
+
+    반대로 **LLM 분석만으로** 승격하지는 않는다: 몸 근접 외양 참조를 LLM 이
+    person 이라고 보는 일이 흔하고(작업 9 의 경계), 그 값으로 승격하면 사용자
+    전용 기능이 조용히 주 피사체를 바꾼다. 몸 근접은 자세 랜드마크가 안 잡혀
+    픽셀로는 person 이 아니다 — 그래서 픽셀 근거를 기준으로 삼는다.
+    """
     kinds = getattr(_KIND_HINT, "kinds", None) or {}
+    px = _pixel_person_slots()
     return sorted(int(k) for k, v in kinds.items()
-                  if v == "person" and int(k) not in (9, 10))
+                  if v == "person" and (int(k) not in (9, 10) or int(k) in px))
+
 
 
 def _hint_pose_slots() -> list:
-    """힌트가 말하는 포즈 슬롯 (2026-10-19). 9·10번은 외양 참조라 제외한다.
+    """힌트가 말하는 포즈 슬롯 (2026-10-19 · 9·10번 포함 2026-10-23).
 
     왜(Why) topic 전용이던 것을 여는가: LLM 이 이미지를 보고 "이 칸은 포즈"라고
     알려 줘도 plan 의 pose_slots 는 topic 텍스트(_pose_role_slots)만 봐서
     포즈 가드가 안 나갔다 — topic 을 비운 사용자에게만 해당하던 구멍이다.
+
+    **9·10번 제외를 2026-10-23 에 풀었다 (사용자 결정 "이제 빼면 안 되지").**
+    제외의 근거는 "외양 참조 기본값이 남은 슬롯을 포즈로 읽으면 두 가드가 반대
+    지시를 낸다" 였는데, 그 근거가 이미 사라져 있었다:
+      1) pose kind 는 픽셀이 못 만든다(어휘 person/item/unknown). LLM 역할이 만든다.
+      2) 그 LLM 역할이 같은 실행에서 외양 참조 기본값을 **이미 해제**한다
+         (appearance_ref_slots 는 비-person 역할을 버린다).
+    실측: appearance_ref_slots("", [9,10], {9:"pose",10:"pose"}) == set().
+    게다가 `_person_object_plan` 은 같은 kinds 를 읽으면서 9·10번을 빼지 않는다
+    (poses=[9] 를 돌려주고 그 값이 제외 집합·보조 역할 계산에 들어간다) — 포즈
+    가드만 그 값을 안 봐서 **한쪽 가드만 꺼진** 상태였다. 이 변경은 새 동작을
+    만드는 것이 아니라 있던 판정을 끝까지 보낸다(실측: gori_pose9_plan_probe.txt).
+    남는 위험: 몸 근접 크롭을 LLM 이 pose 로 오라벨하면 그 슬롯이 포즈 참조가
+    된다 — 다만 외양 기본값은 **같은 라벨로 이미 꺼져** 있으므로 이 변경이 새로
+    만드는 차이는 "포즈 지시가 붙는 것" 하나다(design 4).
     """
     kinds = getattr(_KIND_HINT, "kinds", None) or {}
-    return sorted(int(k) for k, v in kinds.items()
-                  if v == "pose" and int(k) not in (9, 10))
+    return sorted(int(k) for k, v in kinds.items() if v == "pose")
+
+
+def _hint_object_slots() -> list:
+    """힌트가 사물/제품으로 분류한 슬롯 (2026-10-25 감사).
+
+    왜(Why) 필요한가: reference_guard 가 "참조에 사람이 없고 주 슬롯이 사물이면
+    사람 신원 조항을 내지 않는다" 를 판정하려면 힌트의 object/item 슬롯을 직접
+    봐야 한다. `_person_object_plan` 은 main 을 objects 에서 **빼 버려서**(주
+    슬롯이 사물일 때 objects 가 빈 리스트가 된다) 그 값만으로는 가를 수 없다.
+    """
+    kinds = getattr(_KIND_HINT, "kinds", None) or {}
+    return sorted(int(k) for k, v in kinds.items() if v in ("object", "item"))
 
 
 def _text_names_slots(text: str) -> bool:
-    """토픽이 슬롯 번호를 직접 지목했는가 ("2번", "image 3", "이미지 4")."""
-    return bool(re.search(r"(?:이미지|image|img)\s*_?\d+|\d+\s*번", text or "",
-                          re.IGNORECASE))
+    """토픽이 슬롯 번호를 직접 지목했는가 ("2번", "image 3", "이미지 4", "No. 2:").
+
+    2026-10-24: 영어 선언도 같은 입구(`_normalize_slots`)를 지나 `N번:` 이 되므로
+    **새 목록을 만들지 않는다** — 목록이 둘이면 또 갈린다(역할 어휘 드리프트와 같은 이유).
+    """
+    return bool(re.search(r"(?:이미지|image|img)\s*_?\d+|\d+\s*번",
+                          _normalize_slots(text or ""), re.IGNORECASE))
 
 
 # 의상 어휘의 **단일 출처** (2026-10-11 검토). OUTFIT_RELATION_PATTERNS 와
-# CLOTHING_ROLE_PATTERNS(아래)가 같은 목록을 써야 한다 — 두 곳에 따로 적어
-# 두면 한쪽만 늘어나 드리프트한다. 실측: 패턴 쪽에 "의장·생활복" 이 없어
-# "이미지 2의 생활복으로 갈아입혀" 가 outfit_transfer=False 로 떨어졌고,
-# 그 결과 _is_human_subject 가 False 가 되어 **인물 가드가 전부 사라졌다**.
-# 그래서 정의를 여기(첫 사용처 앞)로 올리고 두 곳이 이 상수를 참조한다.
-_KO_CLOTHING_WORDS = (
-    "의상|옷|옷차림|의장|생활복|패션|드레스|셔츠|블라우스|바지|원피스"
-    "|코트|아우터|재킷|자켓|슈트|정장|한복|웨딩드레스|구두|신발"
+def _loose_alt(words) -> str:
+    """낱말 목록 -> 정규식 대안 문자열. 한글 낱말은 음절 사이에 `\\s*` 를 넣는다.
+
+    왜(Why) (2026-10-23 실측): 사용자가 "3번: 하이 힐" 처럼 띄어 쓴다. 음절 간
+    간격을 허용하지 않으면 품목을 등록해도 표기가 어긋나면 미인식이다.
+    영어는 건드리지 않는다 — 쪼개면 패턴만 길어지고 단어 경계(`\\b`) 판정이 흔들린다.
+    """
+    out = []
+    for _w in words:
+        if len(_w) > 1 and all("\uac00" <= _c <= "\ud7a3" for _c in _w):
+            out.append(r"\s*".join(_w))
+        else:
+            out.append(_w)
+    return "|".join(out)
+
+
+# 의상 **개념** 어휘(역할 판정용)와 착용 **품목**(물건)을 나눠 둔다. 품목은
+# 착용 교체 사전(_WEAR_NOUN_KO, 아래)과 **한 목록**을 공유한다 — 두 목록이 따로
+# 자라면 한쪽에만 품목이 생겨 슬롯 인식과 교체 판정이 어긋난다(아래 참조).
+#
+# 왜(Why) 역할 어휘에 의장·생활복이 있어야 하나: CLOTHING_ROLE_PATTERNS(아래)가
+# 같은 목록을 써야 한다. 실측: 패턴 쪽에 "의장·생활복" 이 없어 "이미지 2의
+# 생활복으로 갈아입혀" 가 outfit_transfer=False 로 떨어졌고, 그 결과
+# _is_human_subject 가 False 가 되어 **인물 가드가 전부 사라졌다.**
+_KO_CLOTHING_ROLE_WORDS = "의상|옷|옷차림|의장|생활복|패션|아우터"
+
+
+# 착용 품목 단일 목록 (2026-10-23). 왜(Why) 한 곳으로 모으나: 역할 사전과 착용
+# 의도 사전이 따로 자라면서 드리프트가 났다 — 실측: 착용 쪽에만 하이힐·부츠·
+# 샌들·운동화·플랫·로퍼·웨지·뮬·하이탑·단화·치마·스커트가 있어 "3번: 하이힐" 이
+# 의상 역할로 인식되지 않았다(구두로 시험하면 통과해 구멍이 가려졌다).
+# 품목을 추가할 때는 **여기 한 줄만** 늘리면 역할 사전과 교체 사전이 함께 받는다.
+_KO_WEAR_ITEMS = (
+    "드레스", "셔츠", "블라우스", "바지", "원피스", "코트", "재킷", "자켓",
+    "슈트", "정장", "한복", "웨딩드레스",
+    "구두", "신발", "샌들", "단화", "운동화", "하이힐", "부츠", "슬리퍼",
+    "플랫", "로퍼", "웨지", "뮬", "하이탑", "치마", "스커트",
 )
 
 
-_EN_CLOTHING_WORDS = "outfit|clothing|wardrobe|dress|shirt|coat|garment|apparel"
+# 착용 교체 판정(_WEAR_NOUN_KO)에서 "일반 명사" 로 보는 낱말과, 옷이 아니지만
+# 착용 교체로 읽어야 하는 소품. 역할 사전에는 넣지 않는다 — 가방은 사물 슬롯이다.
+_KO_WEAR_BASIC_WORDS = ("의상", "옷차림", "옷")
+_KO_WEAR_ACCESSORIES = ("모자", "가방")
+
+
+_KO_CLOTHING_WORDS = (
+    _KO_CLOTHING_ROLE_WORDS + "|" + _loose_alt(_KO_WEAR_ITEMS)
+)
+
+
+# 영어 의상 **품목**의 단일 출처 (2026-10-24). 왜(Why) 한 곳인가: 역할 패턴용
+# 목록(`_EN_CLOTHING_WORDS`)과 텍스트 단독 교체 목록(`_EN_GARMENT_WORDS`)이 따로
+# 자라면서 갈렸다 — 실측: 영어 선언 `No. 3: High heels` 가 역할 목록에 heels 가
+# 없어 **의상 슬롯으로 인식되지 않았다**(한국어 `하이힐` 은 등록돼 있었다).
+# 이제 이름 하나(`_EN_GARMENT_WORDS`)만 늘리면 역할 사전과 교체 사전이 함께 받는다.
+_EN_GARMENT_WORDS = (
+    r"high\s*heels?|outfit|clothing|clothes|dress|gown|sweater|skirt|shirt|blouse|"
+    r"pants|trousers|jeans|jacket|coat|suit|uniform|wardrobe|garment|"
+    r"apparel|top|bottoms|knit|denim|shoe|shoes|sandal|sandals|boot|boots|"
+    r"heel|heels|sneaker|sneakers|slipper|slippers|loafers?|flats|footwear"
+)
+
+_EN_CLOTHING_WORDS = _EN_GARMENT_WORDS
 
 
 CLOTHING_WORDS = _KO_CLOTHING_WORDS + "|" + _EN_CLOTHING_WORDS
@@ -158,9 +295,41 @@ HUMAN_SUBJECT_KEYWORDS = (
     "woman", "women", "female", "girl", "lady", "human", "person", "people",
     "man", "men", "male", "boy", "actor", "actress",
     "fashion model", "portrait", "character", "characters",
+    # 가족·연령·직업 명사 (2026-10-25 감사 F1). 왜(Why) 추가하나: 이 함수
+    # 하나로 게이트되는 사람 가드가 12종인데, "a baby lying on a blanket" 처럼
+    # 흔한 명사가 목록에 없어 **가드가 통째로 사라졌다**(실측 5157자 -> 762자).
+    # "model" 은 넣지 않는다(위 주석의 "3D model" 오탐). "kid" 는
+    # _ASCII_AMBIGUOUS 라 단어 경계로만 본다("kidney" 오탐 방지).
+    "baby", "child", "kid", "toddler", "teenager", "infant",
+    "grandmother", "grandfather", "guy", "bride", "groom",
+    "nun", "dancer", "soldier", "nurse", "chef",
     "캐릭터", "인물", "여성", "남성", "여자", "남자", "사람", "아이",
     "소년", "소녀", "남아", "여아", "주인공", "인물체", "모델", "아이돌",
+    "아기", "할머니", "할아버지", "노인", "청년", "어린이",
+    "여자아이", "남자아이",
 )
+
+
+# 동물 종이 함께 명시되면 **양보하는** 사람 명사 (2026-10-25 감사 F1).
+# 왜(Why) 필요한가: "baby elephant" 는 사람이 아니라 새끼 코끼리다. "kid goat"
+# 는 새끼 염소다(영어 "kid" 자체가 새끼 염소다). 이 낱말들이 동물 종 명사와
+# 함께 나오면 사람 신호로 세지 않는다 — 대명사 단계의 동물 양보(아래 ③)와
+# 같은 판단이다. 반대로 "a baby"(단독)·"a baby girl" 은 그대로 사람이다.
+_HUMAN_WEAK_KEYWORDS = frozenset({
+    "baby", "child", "kid", "toddler", "infant", "아기",
+})
+
+
+# 사람이 아닌 관용구 — "baby blue"(색) 처럼 사람 명사를 색·분위기 수식으로
+# 쓰는 표기. 마스킹해 오탐을 막는다(2026-10-25 감사 F1). "baby blue 배경의
+# 제품샷" 에 사람 해부 가드(손가락 다섯 개 등)가 붙으면 **없던 손을 그린다**.
+_BABY_COLOR_IDIOM_RE = re.compile(
+    r"\bbaby\s+(?:blue|pink|green|blue-?gr[ae]y)\b")
+
+
+def _mask_human_false_friends(text: str) -> str:
+    """사람으로 오인되는 관용구를 같은 길이 공백으로 가린다."""
+    return _BABY_COLOR_IDIOM_RE.sub(lambda m: " " * len(m.group(0)), text)
 
 
 # "3D model of a car"처럼 사물 모형을 가리키는 표기. 왜(Why): 영어 "model"
@@ -219,6 +388,9 @@ def _is_human_subject(text: str) -> bool:
 
 @lru_cache(maxsize=64)
 def _is_human_subject_cached(t: str) -> bool:
+    # 사람으로 오인되는 관용구("baby blue" 등)를 먼저 가린다 (2026-10-25 F1).
+    # 순수 함수이고 길이를 바꾸지 않으므로 다른 판정에 영향이 없다.
+    t = _mask_human_false_friends(t)
     # **의상 교체** 표현은 사람을 함의한다(2026-09-29 실측 결함 수정).
     # "1 의상, 2 교체" 에는 인물 키워드가 하나도 없어서 이 함수가 False 였다.
     # 결과적으로 identity 앵커·해부·발란스 등 **인물 가드가 전부 조용히
@@ -252,22 +424,28 @@ def _is_human_subject_cached(t: str) -> bool:
     for keyword in HUMAN_SUBJECT_KEYWORDS:
         if keyword in _ASCII_AMBIGUOUS:
             # 원자(holder) 후보: 단어 경계가 없으면 오탐
-            if _ascii_word_present(t, keyword):
-                return True
+            hit = _ascii_word_present(t, keyword)
         elif _ascii_only(keyword):
             # 영문은 종전대로 부분 일치. 왜(Why) \b 로 바꾸지 않나:
             # "girlfriend" 안의 "girl" 처럼 합성어가 사람 장면인 경우가
             # 있어 단어 경계로 좁히면 오히려 가드가 사라진다.
-            if keyword in t:
-                return True
+            hit = keyword in t
         else:
             # 한국어는 _is_animal_subject 와 같은 경계 판정을 쓴다.
             # raw `in` 이면 "아이스크림/아이패드" 가 "아이" 로 잡혀
             # 제품 샷에 인물 가드가 전부 붙었다. "아이돌" 은 원래 "아이"
             # 부분 일치에 우연히 걸리던 것을 경계 판정 도입과 함께
             # 명시 키워드로 유지한다.
-            if _ko_word_present(t, keyword):
-                return True
+            hit = _ko_word_present(t, keyword)
+        if not hit:
+            continue
+        # 약한 사람 명사는 **동물 종이 함께 명시되면 양보한다** (2026-10-25 F1).
+        # "baby elephant" / "kid goat" 는 사람 장면이 아니다 — 여기서 사람으로
+        # 세면 코끼리·염소에 사람 해부 가드가 붙는다. 동물 스캔은 약한 명사가
+        # 실제로 맞았을 때만 돈다(매 호출 비용을 늘리지 않는다).
+        if keyword in _HUMAN_WEAK_KEYWORDS and _animal_keyword_present(t):
+            continue
+        return True
     # ③ 대명사 단계 (2026-10-22, R193). 명사가 없어도 사람을 가리키는 대명사가
     #    있으면 사람으로 본다 — 단, **동물 종이 명시됐으면 양보한다.**
     #    왜(Why) 양보인가(실측): "The cat is licking his paw" 를 사람으로 보면
@@ -288,11 +466,33 @@ ANIMAL_SUBJECT_KEYWORDS = (
     "monkey", "panda", "penguin", "eagle", "duck", "swan", "seagull",
     "snake", "turtle", "frog", "fish", "shark", "whale", "dolphin",
     "hamster", "guinea pig", "ferret", "chameleon", "gecko", "parrotlet",
+    # 새끼·품종 (2026-10-25 감사 F2). 왜(Why) 추가하나: 종 보존·인간화 방어
+    # 가드가 이 함수 하나로 게이트되는데, 새끼 동물은 부모 낱말을 포함하지
+    # 않아("calf" 에 "cow" 가 없다) 전부 놓쳤다(실측: "a calf" animal=False).
+    # 새끼 개·고양이("puppy"/"kitten")는 이미 있었다 — 그 목록을 새끼
+    # 소·양·말·닭·오리·돼지·야생동물로 넓힌다. "goldfish" 는 "fish" 를
+    # 포함하지만 \b 경계라 종전엔 놓쳤다(단어 경계의 부작용).
+    "calf", "lamb", "foal", "chick", "duckling", "piglet", "cub", "joey",
+    "fawn", "goldfish", "collie",
     "고양이", "강아지", "애완동물", "반려동물", "동물", "말", "새", "앵무새",
     "독수리", "앵무", "토끼", "다람쥐", "여우", "사슴", "소", "양", "염소",
     "돼지", "곰", "호랑이", "사자", "원숭이", "판다", "펭귄", "오리", "백조",
     "거북이", "뱀", "개구리", "물고기", "고래", "돌고래", "햄스터",
+    "송아지", "새끼양", "어린양", "망아지", "병아리", "새끼오리", "새끼돼지",
+    "금붕어",
 )
+
+
+# 동물 낱말이지만 **사람 신체**로도 쓰는 표기 (2026-10-25 감사 F2).
+# 왜(Why) 필요한가: "calf" 는 새끼 소이자 종아리 근육이다. "the runner's
+# calf muscles" 를 동물 장면으로 보면 사람 장면에 동물 가드가 붙는다.
+# 뒤에 muscle 이 붙은 표기만 가린다("a calf in the meadow" 는 그대로 동물).
+_ANIMAL_FALSE_FRIEND_RE = re.compile(r"\b(?:calf|calves)\s+muscles?\b")
+
+
+def _mask_animal_false_friends(text: str) -> str:
+    """동물로 오인되는 사람 신체 표기를 같은 길이 공백으로 가린다."""
+    return _ANIMAL_FALSE_FRIEND_RE.sub(lambda m: " " * len(m.group(0)), text)
 
 
 def _animal_keyword_present(text: str) -> bool:
@@ -308,7 +508,7 @@ def _animal_keyword_present(text: str) -> bool:
     "wear the outfit from image 2, a dogmatic pose" → human=False 이고 animal 도
     False 라 어느 가드도 안 붙었다. 형제 함수와 같은 `_ascii_word_present` 를 쓴다.
     """
-    t = (text or "").lower()
+    t = _mask_animal_false_friends((text or "").lower())
     for keyword in ANIMAL_SUBJECT_KEYWORDS:
         if _ascii_only(keyword):
             if _ascii_word_present(t, keyword):
@@ -416,6 +616,12 @@ _ASCII_AMBIGUOUS = frozenset({
     "goat", "rat", "ram", "ape", "fox", "elk", "gnu", "imp", "kid", "nut",
     "pet", "cod", "boa", "carp", "sole", "hart", "crane", "newt", "toad",
     "lady", "boy", "person", "character", "characters",
+    # 2026-10-25 감사 F1 — 부분 일치하면 다른 낱말에 걸리는 사람 명사.
+    #   groom  -> "grooming"(손질) / "groomed"
+    #   nurse  -> "nursery"(육아방)
+    #   nun    -> "nunchaku" 등
+    #   baby   -> "babysitter" 는 사람이지만 경계로 좁혀도 잃지 않는다
+    "groom", "nurse", "nun", "baby",
 })
 
 
@@ -566,11 +772,37 @@ _EN_OBJECT_WORDS = (
 OBJECT_WORDS = _KO_OBJECT_WORDS + "|" + _EN_OBJECT_WORDS
 
 
+# 슬롯 간격: 줄바꿈을 넘지 않는 공백. 왜(Why) `\s` 를 안 쓰나: 문자 클래스의 `\s`
+# 는 `\n` 을 포함해 "피사체: 1번 이미지\n배경: 2번 이미지" 에서 줄을 넘어 매칭한다
+# (2026-10-19 실측: 배경 슬롯이 {1} 로 오검출). 역할 패턴과 배경 패턴이 **같은
+# 상수 하나**를 쓴다 — 두 벌로 두면 한쪽만 좁아지는 드리프트가 난다.
+_S = r"[^\S\n]*"
+
+
+# 의상 어휘 **뒤에** 착용 동사가 붙으면 그 슬롯은 의상 소스가 아니라 사람이다
+# ("2번 드레스를 입은 여성" -> 2번은 사람. 2026-09-29 실측 위험: 그 사람이 신원
+# 소스에서 빠져 사라진다). 상수로 뽑은 이유(2026-10-23): 콜론 선언 패턴에도 같은
+# 보호가 필요해졌는데, 같은 정규식 조각을 두 곳에 손으로 두면 한쪽만 고친다.
+_WEAR_VERB_AFTER = (
+    r"(?!\s*(?:을|를|이|가)?\s*(?:입은|입고|입혀|입히|착용|신은|신고))"
+    r"(?![^,，]{0,4}(?:wearing|wears|dressed)\b)"
+)
+
+
 # 어휘가 앞 → 슬롯이 뒤인 순서의 창 차단. 사람 단어가 창 안에 있으면 그 슬롯은
 # 사람 절에 속한다 -- 왜(Why): "원피스로 갈아입은 여성과 이미지 3"에서 원피스가
 # 3번(남성)을 옷 슬롯으로 침범하는 오검출이 실측 확인됐다(정밀 검토 R23).
-_TEMPERED_GAP = (r"(?:(?!남성|남자|여성|여자|인물|사람"
-                 r"|man|woman|male|female|person)[^,，.。;；!！?？\n]){0,24}?")
+# 사람 낱말 — **한 곳에서만** 정의한다 (2026-10-23, AC-4). 두 곳이 같은 목록을
+# 써야 한다: ① 아래 `_TEMPERED_GAP`(창 차단 — 사람 단어가 창 안에 있으면 그 슬롯은
+# 사람 절에 속한다) ② `_person_role_slots`(역할 선언 `1번: 한국 여성`). 목록이
+# 갈리면 같은 문장을 한쪽만 사람으로 읽는 조용한 불일치가 생긴다.
+# **목록을 넓히지 않은 이유**: 넓히면 창이 더 일찍 끊겨 기존 판정이 바뀐다(회귀).
+# SECOND_PERSON_PATTERNS 의 넓은 목록(신랑·아버지·소년·신부…)은 이미지 표기
+# 판정 전용이라 여기 합치지 않는다.
+_HUMAN_WORDS_KO = ("남성", "남자", "여성", "여자", "인물", "사람")
+_HUMAN_WORDS_EN = ("man", "woman", "male", "female", "person")
+_TEMPERED_GAP = ("(?:(?!" + "|".join(_HUMAN_WORDS_KO + _HUMAN_WORDS_EN)
+                 + r")[^,，.。;；!！?？\n]){0,24}?")
 
 
 # 의상 역할 어휘 + 슬롯 검출. 왜(Why): outfit 게이트가 "의상 의도 = 모든 duo 소멸"
@@ -579,8 +811,11 @@ _TEMPERED_GAP = (r"(?:(?!남성|남자|여성|여자|인물|사람"
 # 모듈 위쪽 OUTFIT_RELATION_PATTERNS 앞에서 한 번만 정의한다(2026-10-11 드리프트 수정).
 
 
-def _role_patterns(words: str, en_words: str):
-    """역할(사물/의상) 슬롯 검출 5패턴 골격. 단어만 주입한다.
+def _role_patterns(words: str, en_words: str, colon_guard: str = ""):
+    """역할(사물/의상) 슬롯 검출 6패턴 골격. 단어만 주입한다. (5패턴 + 콜론 1)
+
+    colon_guard: 6번(콜론) 패턴 뒤에 붙일 제외 조각. 의상은 착용 동사 제외를
+    넘겨 "2번: 옷을 입혀"(사람)를 의상 소스로 잡지 않는다.
 
     왜(Why): 사물·의상 패턴은 절 차단 규칙이 동일하다. 형태:
     1) "이미지 2의 핸드백" (조사 혼용 대응)
@@ -599,6 +834,16 @@ def _role_patterns(words: str, en_words: str):
         r"\b(?:" + en_words + r")\b" + _TEMPERED_GAP + r"\b(?:from|in|on|as|using|reference)\s+(?:reference\s+)?(?:image|img)\s*_?\s*(\d+)(?![0-9])",
         r"\b(?:image|img)\s*_?\s*(\d+)(?![0-9])\b" + _TEMPERED_GAP + r"\b(?:is|as|shows|contains)\s+(?:a|an|the)?\s*(?:" + en_words + r")\b",
         r"(\d{1,2})\s*(?:번|번째)?\s*(?:image|img|이미지)\s*(?:의|에|에서)?\s*(?:" + words + r")",
+        # 6) "2번: 의자" — 줄 선언 표기(2026-10-23 사용자 실측). 왜(Why) 콜론이
+        #    있어야 하나: 콜론 없이 "2번 의자" 까지 열면 의상 패턴의 착용 동사
+        #    제외를 우회해 "2번 의상을 입혀"(사람)를 의상 소스로 잘못 잡는다
+        #    -> 그 사람이 신원 소스에서 빠져 사라진다. 콜론은 "이 번호는 이
+        #    역할" 이라는 명시 표지이므로 그때만 번호를 역할에 묶는다.
+        #    주의(Why) `(?:번|번째)` 를 **필수**로 둔다: 선택으로 두면 "16:9"
+        #    같은 비율 표기가 슬롯 16 으로 오인된다 (R203-9 가 막는다).
+        (r"(\d{1,2})" + _S + r"(?:번|번째)" + _S + r"[:：]" + _S
+         + r"(?:의|에|에서|은|는|이|가)?" + _S + r"(?:" + words + r")"
+         + colon_guard),
     )
 
 
@@ -615,10 +860,19 @@ OBJECT_ROLE_PATTERNS = _role_patterns(OBJECT_WORDS, _EN_OBJECT_WORDS)
 # 잡으면 그 사람이 신원 소스에서 제외돼 사람이 사라진다(2026-09-29 실측 위험).
 # 주의(Why): 동사는 어휘에서 **직접** 붙어야 한다. "을/ 를" 까지 보면
 # "2번 의장을 1번에 입혀"(= 의상 소스 2번 + 대상 1번)까지 삼켜서 놓친다.
-CLOTHING_ROLE_PATTERNS = _role_patterns(CLOTHING_WORDS, _EN_CLOTHING_WORDS) + (
+_CLOTHING_BASE_PATTERNS = _role_patterns(
+    CLOTHING_WORDS, _EN_CLOTHING_WORDS, _WEAR_VERB_AFTER)
+
+
+# 콜론 선언 조각(`3번: 하이 힐`) — `_role_patterns` 6번째(마지막) 패턴이다.
+# 왜(Why) 이름을 주나: `_clothing_declared_slots` 가 **같은 조각**을 써야 한다.
+# 인덱스로 꺼내면 패턴 순서가 바뀔 때 조용히 어긋난다.
+_CLOTHING_COLON_PATTERN = _CLOTHING_BASE_PATTERNS[-1]
+
+
+CLOTHING_ROLE_PATTERNS = _CLOTHING_BASE_PATTERNS + (
     r"(\d{1,2})\s*(?:번|번째)?\s*(?:은|는|의|에|에서|으로)?\s*(?:" + CLOTHING_WORDS
-    + r")(?!\s*(?:을|를|이|가)?\s*(?:입은|입고|입혀|입히|착용|신은|신고))"
-      r"(?![^,，]{0,4}(?:wearing|wears|dressed)\b)",
+    + r")" + _WEAR_VERB_AFTER,
     # 역순: "1번에 2번 의장을 입혀" — 의상 소스 뒤에 **대상** 슬롯이 온다.
     r"(?:\d{1,2}\s*(?:번|번째)?\s*(?:에|에게|한테|의|은|는)\s*)"
     r"(\d{1,2})\s*(?:번|번째)?\s*(?:은|는|의|으로)?\s*(?:" + CLOTHING_WORDS + r")",
@@ -745,16 +999,152 @@ POSE_ROLE_PATTERNS = (
     r"(\d{1,2})\s*(?:번|번째)?\s*(?:은|는|이|가|의)?\s*(?:"
       + _KO_POSE_STATE
       + r")",
+    # "2번: 포즈" / "No. 2: Pose" — 줄 선언 표기(2026-10-24 사용자 실측).
+    # 왜(Why) 역할명사만 받나: `1번: 앉아 있는 여성` 은 **인물 선언**이다. 상태
+    # 어휘까지 받으면 그 슬롯이 포즈 참조로 오분류돼 신원 소스에서 빠진다(패턴 2
+    # 와 같은 이유). `2번: 앉은 자세` 처럼 상태어 **뒤에** 역할명사가 오는 형태만
+    # 상태어 한 낱말을 허용한다. `번` 을 필수로 두어 `16:9` 비율 표기를 막는다.
+    r"(\d{1,2})" + _S + r"(?:번|번째)" + _S + r"[:：]" + _S
+    + r"(?:의|에|에서|은|는|이|가)?" + _S
+    + r"(?:(?:" + _KO_POSE_STATE + r")" + _S + r")?"
+    + r"(?:" + _POSE_ROLE_NOUNS + r")",
 )
+
+
+# 한글 수사 슬롯 표기 (2026-10-23). 왜(Why) 입력을 바꾸나: 역할 패턴 15개가
+# 슬롯 번호를 **숫자 캡처**로 수집한다(_collect_role_slots 계약 — int(grp) 가
+# 실패하면 조용히 버려진다). "둘째: 의자" 가 그래서 미인식이었다. 캡처 그룹을
+# 한글 수사로 넓히면 패턴 15개를 전부 고치고 int() 변환도 곳곳에 붙여야 한다.
+# 입구에서 표준 표기로 한 번 바꾸면 사물·의상·배경·포즈가 함께 혜택을 받는다.
+_SLOT_ORDINAL_MAP = (
+    ("첫번째", "1번"), ("첫 번째", "1번"), ("첫째", "1번"),
+    ("두번째", "2번"), ("두 번째", "2번"), ("둘째", "2번"),
+    ("세번째", "3번"), ("세 번째", "3번"), ("셋째", "3번"),
+    ("네번째", "4번"), ("네 번째", "4번"), ("넷째", "4번"),
+    ("다섯번째", "5번"), ("다섯 번째", "5번"), ("다섯째", "5번"),
+)
+
+
+# 영어 선언 표기 -> 표준형 (2026-10-24). 왜(Why) 입구에서 하나: 역할 패턴 15개가
+# 전부 "N번:" 을 본다. 워크플로가 토픽을 **영어로 미리 번역**해 넣으면
+# `No. 2: Chair` · `Number 1: Korean woman` · `#4: Background` 가 되어 사물·인물·
+# 배경·의상 슬롯이 **전부** 사라졌다(실측: 같은 실행에서 배경 가드 3종 소실,
+# 신발 유지가 신발 교체로 역전, 사진 평균색 오지시).
+# 콜론을 **필수**로 둔다 — 없으면 "no. 5 is missing" · "number of people is 2" 를
+# 선언으로 오인한다(실측 오탐 후보). `#` 는 앞에 `\b` 가 성립하지 않아 분리한다.
+# 간격은 `_S`(줄바꿈 제외) — 배경 패턴과 같은 이유로 줄을 넘지 않는다.
+_EN_SLOT_DECL_RE = re.compile(
+    r"(?:#|(?:\bno\.?|\bnumber\b))" + _S + r"_?" + _S + r"(\d{1,2})"
+    + _S + r"(?:번|번째)?" + _S + r"(?:image|img|이미지)?" + _S + r"[:：]",
+    re.IGNORECASE,
+)
+
+
+@lru_cache(maxsize=256)
+def _normalize_slots(text: str) -> str:
+    """슬롯 표기만 표준형("N번")으로 바꾼다. 다른 글자는 건드리지 않는다.
+
+    한글 수사(`둘째`)와 영어 선언(`No. 2:`)을 같은 표준형으로 모은다(2026-10-24).
+    """
+    t = text or ""
+    for _ko, _std in _SLOT_ORDINAL_MAP:
+        t = t.replace(_ko, _std)
+    return _EN_SLOT_DECL_RE.sub(r"\1번:", t)
+
+
+# 비율 표기(`16:9` · `4:3`)를 역할 판정 전에 가린다 (2026-10-23, 작업 14).
+# 왜(Why): 포즈·의상 패턴은 "숫자 + 낱말" 형태를 받는다(자연스러운 표기를 살리려고).
+# 그래서 `16:9 구도` 의 `9 구도` 가 "9번 구도" 로 읽혀 9번이 포즈 참조가 되고, 선언이
+# 기본값을 이기므로 그 슬롯이 외양 참조에서도 빠졌다. 콜론은 막지 못한다 — 콜론이
+# 앞에 있고 패턴은 뒤 조각을 본다. 실측: `16:9 구도` -> {9} · `4:3 구도` -> {3} ·
+# `16:9 옷` -> 의상 {9}. 진짜 선언(`9번 구도` · `9번 자세`)은 그대로 살아야 하므로
+# 낱말 목록을 좁히지 않고 **비율 토큰만** 가린다.
+_RATIO_TOKEN_RE = re.compile(r"(?<![0-9])\d{1,3}\s*:\s*\d{1,3}(?![0-9])")
+
+
+@lru_cache(maxsize=256)
+def _mask_ratio_tokens(text: str) -> str:
+    """비율 표기를 같은 길이의 공백으로 바꾼다. 다른 글자는 건드리지 않는다.
+
+    같은 길이인 이유: 역할 패턴에는 자유 구간 길이를 제한하는 조각이 있어 길이를
+    줄이면 그 창의 거리 계산이 밀린다. 문자 위치를 그대로 두면 그 위험이 없다.
+
+    캐시(2026-10-25 최적화): 순수 함수이고 입력은 문자열 하나뿐이라 결과가
+    결정적이다. 실측 2.06us -> 0.05us (약 40배). 역할 슬롯 판정이 실행당
+    여러 번 이 함수를 지나므로 마진이 쌓인다. 출력은 완전히 동일하다.
+    """
+    return _RATIO_TOKEN_RE.sub(lambda m: " " * len(m.group(0)), text or "")
+
+
+# 장면 표지 — 이 낱말 뒤가 **그림 내용**이다. 사용자 표기와 R189 원문이 실제로
+# 쓴다: "피사체: 1번 이미지\n배경: 2번 이미지\n\n연출: \n\n<문장>".
+# 영어 표지(2026-10-24): 워크플로가 토픽을 영어로 미리 번역하면 `연출:` 이
+# `Directed by:` 가 된다. 표지가 없으면 선언 줄이 장면 문장으로 남아 최종
+# 프롬프트에 그대로 실린다(한국어 경로는 걷어낸다 — 실측). `scene`·`setting`
+# 같은 일반 낱말은 넣지 않는다: 산문에서 흔해 표지 없는 문장을 잘라낸다.
+# `director` 는 실측한 번역형이다(2026-10-24): prompt_in 에 한국어를 넣으면
+# tc-big 이 `연출:` 을 `Director:` 로 옮기고 줄바꿈까지 공백으로 합쳤다 —
+# 이 낱말이 없으면 그 경로에서만 `No. 1: ... No. 4: Background` 가 남았다.
+_SCENE_MARKER_RE = re.compile(
+    r"(?:연출|장면|상황|분위)\s*[:：]|(?:directed\s+by|directing|director)\s*[:：]",
+    re.IGNORECASE)
+# 역할 선언 — "N번: <역할어>" · "피사체: N번 이미지" · "배경: N번". 장면이 아니다.
+# `번` 을 필수로 둔다(2026-10-23 T1 과 같은 이유): 없으면 "16:9 비율" 을 삼킨다.
+_LABEL_DECL_RE = re.compile(
+    r"\d{1,2}\s*(?:번|번째)\s*[:：]\s*[^\n/;,]*"
+    r"|(?:피사체|주인공|인물|사물|의상|배경|포즈)\s*[:：]\s*[^\n/;,]*")
+
+
+@lru_cache(maxsize=128)
+def scene_text(topic: str) -> str:
+    """역할 선언 줄을 걷어낸 **장면 서술**을 돌려준다 (2026-10-23, AC-10~AC-12).
+
+    왜(Why) 필요한가: 사용자 표기 `1번: 한국 여성 / 2번: 의자 / 연출: <장면>` 에서
+    선언부는 슬롯 배정용이지 그림 내용이 아니다. 그대로 번역·조립하면 번역기가
+    "1번:" 을 문장으로 읽는다(실측: R189 원문이 이 표기다).
+
+    규칙 — ① 장면 표지(`연출:` 등)가 있으면 그 **뒤**가 장면이다(선언 줄 제거).
+    ② 표지가 없으면 **종전과 완전히 동일**해야 한다(AC-11): 원문 그대로.
+    ③ 잘라낸 결과가 비면 원문으로 되돌린다(spec 미해결 3).
+
+    영어 선언 줄은 `_normalize_slots` 로 `N번:` 표준형이 된 뒤 한국어 패턴 하나로
+    걷힌다(2026-10-24) — 패턴을 언어별로 두 벌 두면 또 갈린다.
+
+    **판정·보정 근거에는 이 함수를 쓰지 않는다.** `fix_background_clause` 가
+    `배경: 2번` 선언을 한국어 원문에서 읽어 배경 절을 복원한다(design 4절, AC-18).
+    """
+    t = (topic or "").strip()
+    if not t:
+        return t
+    m = _SCENE_MARKER_RE.search(t)
+    if not m:
+        return t
+    rest = _LABEL_DECL_RE.sub(" ", _normalize_slots(t[m.end():]))
+    rest = re.sub(r"[ \t\r\n]+", " ", rest).strip(" /;,·")
+    return rest or t
+
+
+@lru_cache(maxsize=256)
+def _compile_re(pattern):
+    """문자열(또는 이미 컴파일된) 정규식을 컴파일해 캐시한다 (2026-10-25 최적화).
+
+    왜(Why): _collect_role_slots 는 모듈 상수 패턴(문자열)을 매 호출
+    re.finditer 에 그대로 넘긴다. re 모듈에도 내부 캐시가 있지만 그 경로
+    (캐시 딕셔너리 조회 + 인자 검증)를 없애면 역할 슬롯 수집이
+    실측 26.6us -> 22.5us (약 15%) 빨라진다. re.compile 은 이미 컴파일된
+    패턴을 받으면 그대로 돌려주므로 문자열/컴파일 객체 둘 다 안전하다.
+    """
+    return re.compile(pattern)
 
 
 def _collect_role_slots(text: str, patterns) -> set:
     """패턴 집합에서 번호(1~10) 수집. 사물·의상 슬롯 검출 공용 루프."""
-    t = (text or "").lower()
+    # 여덟 역할이 모두 이 입구를 지난다 — 가리기도 여기 한 곳에 둔다(작업 14).
+    t = _mask_ratio_tokens(_normalize_slots((text or "").lower()))
     slots = set()
     for pattern in patterns:
         try:
-            for m in re.finditer(pattern, t):
+            for m in _compile_re(pattern).finditer(t):
                 # 캡처 그룹이 여러 개인 패턴(나열형)이 있으므로 전부 수집한다.
                 # 기존 4패턴은 그룹이 하나뿐이라 동작이 달라지지 않는다.
                 for grp in m.groups():
@@ -796,9 +1186,25 @@ def _clothing_source_slots(text: str) -> set:
     return set(_clothing_source_slots_cached(text))
 
 
+def _clothing_declared_slots(text: str) -> set:
+    """콜론으로 **참조 지정**된 의상 슬롯(예: `3번: 하이 힐`). 없으면 set().
+
+    왜(Why) `_clothing_source_slots` 를 쓰지 않나: 그쪽은 `이미지 2의 옷` 처럼
+    이미지 슬롯 참조까지 포함한다. 그 형태는 **교체 지시**다(`wear the outfit from
+    image 2` -> 교체, R164 계약). 반면 `N번: <품목>` 은 토픽이 참조 슬롯을
+    **선언**한 것이므로, 같은 품목을 서술하는 문장은 참조 재진술이지 교체가 아니다
+    (2026-10-24 실측: 선언이 있는데도 `wearing heels` 가 교체로 읽혀 신발 보존
+    가드가 꺼지고 하이힐이 바뀌었다). 판정은 `_wear_nouns_mean_change` 가 쓴다.
+    """
+    return _collect_role_slots(text, (_CLOTHING_COLON_PATTERN,))
+
+
 @lru_cache(maxsize=64)
 def _clothing_source_slots_cached(text: str) -> frozenset:
-    slots = _collect_role_slots(text, CLOTHING_ROLE_PATTERNS)
+    # 품사 게이트(2026-10-23, AC-16): 선언 자리에 동사가 온 슬롯은 의상이
+    # 아니다(`_decl_verb_slots`). 오늘 사전에서는 이 뺄셈이 항상 빈 집합이다.
+    slots = (_collect_role_slots(text, CLOTHING_ROLE_PATTERNS)
+             - _decl_verb_slots(text))
     # 구버전 결함 교정(2026-09-29 실측): 골격 패턴 2번은
     # "이미지 2 의상을 이미지 1에 적용" 에서 "의상을 이미지 1" 을 잡아
     # **1번(주인물)까지 의상 소스로** 밀어 넣었다. 의상 슬롯이 늘어나면
@@ -818,12 +1224,7 @@ def _has_outfit_apply_verb(text: str) -> bool:
 # `_clothing_role_slots` 는 "이미지 N 의 옷" 처럼 슬롯 번호를 요구한다.
 # 그런데 "red evening dress 로 교체" 처럼 **옷 자체를 지목**하는 경우는
 # 슬롯이 없다. 슬롯을 요구하면 텍스트 단독 교체를 영영 못 잡는다.
-_EN_GARMENT_WORDS = (
-    r"outfit|clothing|clothes|dress|gown|sweater|skirt|shirt|blouse|"
-    r"pants|trousers|jeans|jacket|coat|suit|uniform|wardrobe|garment|"
-    r"apparel|top|bottoms|knit|denim|shoe|shoes|sandal|sandals|boot|boots|"
-    r"heel|heels|sneaker|sneakers|slipper|slippers|loafer|flats|footwear"
-)
+# 목록 자체는 위쪽 `_EN_GARMENT_WORDS` 한 곳에 있다(2026-10-24 단일 출처).
 
 
 # ---------------------------------------------------------------------------
@@ -904,14 +1305,14 @@ def intent_core(text: str) -> str:
 # _is_text_outfit_change 가 True 가 되어 FOOTWEAR_CHANGE_POSITIVE 가 나가고
 # 1.9.58 신발 보존 가드가 우회됐다). 구체 품목(단화·구두)이나 색·재질
 # 수식어가 붙으면 사용자가 그 신발을 지정한 것이므로 교체로 본다.
-_WEAR_GENERIC_KO = re.compile(r"(?:신발|옷차림|옷|의상)")
+_WEAR_GENERIC_KO = re.compile(
+    r"(?:" + _loose_alt(_KO_WEAR_BASIC_WORDS + ("신발",)) + r")")
 _WEAR_GENERIC_EN = re.compile(
     r"\b(?:shoes?|footwear|outfit|clothing|clothes|garment|apparel|"
     r"wardrobe)\b")
 _WEAR_NOUN_KO = re.compile(
-    r"(?:의상|옷차림|옷|드레스|셔츠|블라우스|바지|원피스|코트|재킷|자켓|"
-    r"슈트|정장|한복|신발|구두|샌들|단화|운동화|하이힐|부츠|슬리퍼|플랫|"
-    r"로퍼|웨지|뮬|하이탑|치마|스커트|모자|가방)")
+    r"(?:" + "|".join(_KO_WEAR_BASIC_WORDS + _KO_WEAR_ACCESSORIES)
+    + r"|" + _loose_alt(_KO_WEAR_ITEMS) + r")")
 _WEAR_NOUN_EN = re.compile(r"\b(?:" + _EN_GARMENT_WORDS + r")\b")
 _WEAR_MATERIAL_KO = (
     "가죽", "스웨이드", "새틴", "실크", "린넨", "니트", "벨벳", "시폰",
@@ -923,6 +1324,242 @@ _WEAR_MATERIAL_EN = re.compile(
     r"lace|mesh|canvas|rubber|patent|cashmere|tweed|corduroy|fur)\b")
 _WEAR_IMPERATIVE_KO = re.compile(
     r"(?:입는다|신는다|입어라|신어라|입으세요|신으세요|입어|신어)")
+
+
+# 착용 동사 **어간** + 허용 어미 (2026-10-23). 왜(Why) 어간으로 보나: 완전형을
+# 나열하면("신어"·"입혀") 자연스러운 활용을 놓친다 — 실측: "3번 하이힐을 신겨"
+# 가 미인식이었다. 어간 `신` 을 그냥 찾으면 "신발·신원·신체·신경" 이 전부 걸리므로
+# 어미를 제한한다. 어미 집합에 발·원·체·경이 없어 그 낱말들은 걸리지 않는다.
+_WEAR_STEMS = ("입", "신", "착용")
+# 상태·관형 어미 — **교체 판정에 쓰지 않는다**. "신발을 신고 앉아" 를 교체로
+# 뒤집으면 2026-10-20 규칙(일반 명사만 있으면 상태)이 깨진다.
+_VERB_ENDINGS_STATE = ("고", "은", "을", "는", "던", "며", "면", "다", "지")
+# 교체성 어미 — 명령·청유·과거·연결. 접두가 겹치는 긴 형태는 넣지 않는다
+# ("혀서" 는 "혀" 가 이미 덮는다). 짧은 어미의 오탐은 착용 명사 요구가 막는다.
+_VERB_ENDINGS_CHANGE = ("혀", "혔", "히", "겨", "겼", "기고",
+                        "어", "었", "게", "으세요", "으라", "하", "해", "했")
+_VERB_ENDINGS_ALL = _VERB_ENDINGS_STATE + _VERB_ENDINGS_CHANGE
+
+# --- 품사 라우터 (2026-10-23, AC-14~AC-16) ------------------------------------
+# 왜(Why) 이 자리인가: 설계 3절은 품사 규칙을 `_KO_SUFFIX_CHARS` 옆에 두라고
+# 정했고 그 뜻은 "조사·어미 지식이 한 파일에 있다" 였다. 실제로는 **공유하는
+# 표**(`_KO_SUFFIX_CHARS`·`_VERB_ENDINGS_*`·역할 사전)보다 뒤에 와야 해서 어미
+# 표 바로 뒤에 둔다. 파일은 설계대로 `cam_subject.py` 하나다(편차 기록).
+#
+# 품사가 정하는 것은 **축**뿐이다. 역할은 사전이 정한다(설계 2절):
+#   명사·수사          -> 역할 사전 조회 (사물·의상·배경·인물)
+#   동사               -> 상태/지시 판정 (착용·교체·자세·응시)
+#   형용사·부사·관형사  -> 수식 판정 (색·재질·크기·방향, 같은/다른)
+#   대명사·감탄사·미상  -> 판정하지 않는다. 종전 경로 그대로 (AC-16)
+# 한계(정직하게 남긴다): 어미만으로 동사와 형용사를 가를 수 없다. `-다` 로 끝나는
+# 형태는 `predicate` 로 돌려주고 구분은 어휘가 한다. 그래서 형용사는 **목록 +
+# 특징 접미(스럽다·롭다·답다)** 로만 잡는다.
+_POS_NOUN = "명사"
+_POS_PRONOUN = "대명사"
+_POS_NUMERAL = "수사"
+_POS_PARTICLE = "조사"
+_POS_VERB = "동사"
+_POS_ADJECTIVE = "형용사"
+_POS_DETERMINER = "관형사"
+_POS_ADVERB = "부사"
+_POS_INTERJECTION = "감탄사"
+_POS_PREDICATE = "predicate"
+_POS_UNKNOWN = "미상"
+
+# 조사 — 낱말 하나가 조사인 경우. `_KO_SUFFIX_CHARS` 는 **낱말 뒤에 붙는 조각**
+# 이라 여기서는 홀로 쓰인 형태를 나열한다. `이`·`가`·`나` 는 관형사·접속과
+# 겹쳐 뺐다(`guess_pos("이")` 는 관형사다 — 동형은 한 축으로 고정한다).
+_POS_PARTICLES = frozenset((
+    "은", "는", "을", "를", "의", "에서", "에게", "한테", "으로", "로",
+    "와", "과", "도", "부터", "까지", "보다", "처럼", "만큼", "밖에", "뿐",
+    "이나", "이며", "하고", "께", "께서",
+))
+# 수사 — 숫자(`isdigit`), 한글 수사, 서수 표기(`_SLOT_ORDINAL_MAP` 의 키).
+# `한·두·세` 는 수량 관형사와 동형이라 수사 한 축으로 고정한다.
+_POS_NUMERALS = frozenset((
+    "하나", "둘", "셋", "넷", "다섯", "여섯", "일곱", "여덟", "아홉", "열",
+    "한", "두", "세",
+))
+_POS_ORDINALS = frozenset(_ko for _ko, _std in _SLOT_ORDINAL_MAP)
+# 관형사 — 명사를 수식한다. `같은`(유지)/`다른`(교체) 판정이 여기 산다.
+_POS_DETERMINERS = frozenset((
+    "이", "그", "어떤", "무슨", "어느", "새", "헌", "옛", "같은", "다른",
+    "모든", "온갖", "각", "여러", "몇", "웬", "첫", "다음", "지난", "요",
+    "어떠한", "온",
+))
+# 대명사 — 지시 대상이 낱말 밖에 있어 역할 사전 조회로 이어지지 않는다(통과).
+_POS_PRONOUNS = frozenset((
+    "나", "너", "우리", "저", "저희", "너희", "당신", "그녀", "그들",
+    "이것", "그것", "저것", "여기", "거기", "저기", "누구", "무엇", "어디",
+    "언제", "얼마", "자기", "여러분",
+))
+# 부사 — 목록 + 특징 접미. 조사 검사가 **먼저**라 `에게` 같은 조사가 접미
+# `게` 로 새지 않는다.
+_POS_ADVERBS = frozenset((
+    "매우", "아주", "너무", "정말", "진짜", "잘", "못", "더", "덜", "가장",
+    "조금", "약간", "많이", "빨리", "천천히", "살짝", "살며시", "이미", "아직",
+    "벌써", "다시", "또", "함께", "같이", "서로", "곧", "방금", "항상", "자주",
+    "가끔", "드디어", "마침내", "점점", "훨씬", "거의", "바로", "일부러",
+    "무심코", "함부로", "살그머니",
+))
+_POS_ADVERB_SUFFIXES = ("히", "게", "씩", "도록")
+# 감탄사 — 문장 밖의 느낌. 판정하지 않는다(통과).
+_POS_INTERJECTIONS = frozenset((
+    "아", "어", "오", "와", "우와", "아이고", "어머", "어머나", "헉", "음",
+    "아하", "예", "네", "야", "얏", "호", "쉿", "글쎄", "아니", "천만에",
+    "자", "얘", "이봐", "어이",
+))
+# 형용사 — 어미로 동사와 가를 수 없어 **목록 + 특징 접미**로만 잡는다.
+_POS_ADJECTIVES = frozenset((
+    "예쁜", "밝은", "어두운", "귀여운", "큰", "작은", "긴", "짧은", "붉은",
+    "푸른", "하얀", "검은", "맑은", "따뜻한", "차가운", "좋은", "나쁜",
+    "높은", "낮은", "넓은", "좁은", "깊은", "얇은", "두꺼운", "가벼운",
+    "무거운", "조용한", "고요한", "잔잔한", "아름다운", "우아한", "단정한",
+    "화려한", "수수한", "엷은", "짙은", "옅은", "새로운", "젊은", "늙은",
+    "조그만", "큼직한",
+))
+_POS_ADJ_SUFFIXES = ("스러운", "스럽다", "롭다", "로운", "답다", "답게")
+# 동사 어간 — 착용 어간(`_WEAR_STEMS`)에 자세·시선 어간을 더한다. 어미는 T3 의
+# 표에 구어 어미(아·어·워·여)를 더한 것을 쓴다 — 어간 + 어미 조합이라야
+# "신발·신원·신체" 가 걸리지 않는다(AC-15). 어간 목록이 좁은 것은 의도다:
+# 놓친 동사는 게이트가 안 서는 것뿐이고 판정을 뒤집지 않는다.
+_POS_VERB_STEMS = _WEAR_STEMS + (
+    "앉", "누", "걷", "달리", "기대", "바라보", "응시", "쳐다보", "웃", "울",
+)
+_POS_VERB_ENDINGS = _VERB_ENDINGS_ALL + ("아", "어", "워", "여")
+# 이 축만 역할 사전을 조회한다. 동사·형용사·부사·관형사는 동작·수식이라 사물·
+# 의상 사전을 볼 이유가 없고, 대명사·감탄사는 지시 대상이 없다. **미상은 종전
+# 경로**(AC-16) — 모르면 예전과 똑같이 사전을 본다.
+_POS_ROLE_AXES = frozenset((_POS_NOUN, _POS_NUMERAL, _POS_UNKNOWN))
+
+
+def _hangul_only(word: str) -> bool:
+    """한글로만 된 낱말인지 (영문은 사전 조회로만 명사가 된다)."""
+    return bool(word) and all("가" <= c <= "힣" for c in word)
+
+
+@lru_cache(maxsize=1)
+def _pos_role_nouns() -> frozenset:
+    """역할 사전에 등록된 낱말을 한 집합으로 모은 것.
+
+    왜(Why) 함수로 두나: 배경 어휘가 파일 **아래쪽**에 있어 모듈 상수로 묶으면
+    정의 위치가 강제된다. 한 번만 계산해 캐시한다.
+    """
+    words = set()
+    for _src in (_KO_OBJECT_WORDS, _EN_OBJECT_WORDS, BACKGROUND_ROLE_WORDS,
+                 _EN_BACKGROUND_WORDS):
+        words.update(_w for _w in _src.split("|") if _w)
+    words.update(_KO_WEAR_ITEMS)
+    words.update(_KO_WEAR_BASIC_WORDS)
+    words.update(_KO_WEAR_ACCESSORIES)
+    words.update(_HUMAN_WORDS_KO)
+    words.update(_HUMAN_WORDS_EN)
+    return frozenset(words)
+
+
+def guess_pos(token) -> str:
+    """낱말 하나의 품사 **축**을 어미·조사 규칙으로 추정한다 (2026-10-23, AC-14).
+
+    돌려주는 축은 9품사(명사·대명사·수사·조사·동사·형용사·관형사·부사·감탄사)
+    에 `predicate`(서술어 — 동사/형용사 구분 불가)와 미상을 더한 11종이다.
+    검사 순서가 곧 결정 규칙이다(동형 낱말을 한 축으로 고정한다):
+    조사 -> 수사 -> 관형사 -> 대명사 -> 부사 -> 감탄사 -> 동사 -> 형용사
+    -> `-다`(predicate) -> 명사 -> 미상.
+    `명사` 는 "역할 사전에 있거나 한글로만 된 낱말" 이다 — 한글 낱말 대부분이
+    명사이고 어미·조사 신호가 없으면 그 판단이 맞다. 영문은 사전에 있을 때만
+    명사이고 아니면 미상이다(모르면 종전 경로 — AC-16).
+    """
+    tok = (token or "").strip().lower()
+    if not tok:
+        return _POS_UNKNOWN
+    if tok in _POS_PARTICLES:
+        return _POS_PARTICLE
+    if tok.isdigit() or tok in _POS_NUMERALS or tok in _POS_ORDINALS:
+        return _POS_NUMERAL
+    if tok in _POS_DETERMINERS:
+        return _POS_DETERMINER
+    if tok in _POS_PRONOUNS:
+        return _POS_PRONOUN
+    if tok in _POS_ADVERBS or tok.endswith(_POS_ADVERB_SUFFIXES):
+        return _POS_ADVERB
+    if tok in _POS_INTERJECTIONS:
+        return _POS_INTERJECTION
+    if verb_stem_present(tok, _POS_VERB_STEMS, _POS_VERB_ENDINGS):
+        return _POS_VERB
+    if tok in _POS_ADJECTIVES or tok.endswith(_POS_ADJ_SUFFIXES):
+        return _POS_ADJECTIVE
+    if tok.endswith("다"):
+        return _POS_PREDICATE
+    if tok in _pos_role_nouns() or _hangul_only(tok):
+        return _POS_NOUN
+    return _POS_UNKNOWN
+
+
+def _axis_consults_role_lexicon(axis: str) -> bool:
+    """이 품사 축이 역할 사전을 조회하는가 (라우터의 게이트)."""
+    return axis in _POS_ROLE_AXES
+
+
+# 선언 자리의 낱말 — `N번:` 뒤 첫 낱말. 창을 좁게(한 낱말) 잡는다: 넓히면
+# 선언 뒤 **문장**의 동사를 끌어와 물건 선언을 동사로 오인한다.
+_DECL_TOKEN_RE = re.compile(
+    r"(?<![0-9])(\d{1,2})\s*(?:번|번째)\s*[:：]\s*"
+    r"([^\s\n/;,，.。|·]{1,16})")
+
+
+def _decl_verb_slots(text: str) -> set:
+    """선언 자리에 **동사 활용형**이 온 슬롯 (`2번: 신겨`). 없으면 set().
+
+    왜(Why) 게이트로 두나: 선언은 "이 슬롯이 무엇인가" 를 말한다. 자리에 동사가
+    오면 그것은 물건이 아니라 동작이다. 오늘 사전(사물 39 · 착용 26)에는 동사
+    축 낱말이 하나도 없어 이 게이트가 **판정을 바꾸지 않는다**(R208-13 drift).
+    목적은 사전이 커질 때 동형 동사가 사물·의상으로 새지 않게 하는 것이다.
+    **포즈는 예외다**: `앉은`·`기대는` 처럼 동사 활용형이 정식 등록어라 포즈
+    사전에는 이 게이트를 걸지 않는다.
+    """
+    t = _normalize_slots(text or "").lower()
+    slots = set()
+    for m in _DECL_TOKEN_RE.finditer(t):
+        tok = m.group(2)
+        if not tok or guess_pos(tok) != _POS_VERB:
+            continue
+        # 창 안에 물건·사람 낱말이 있으면 그 선언은 그 낱말의 선언이다
+        # ("2번: 걸린 소파" 는 소파 선언이지 동사 선언이 아니다).
+        if any(w in t[m.start(2):m.start(2) + 16] for w in _pos_role_nouns()):
+            continue
+        try:
+            n = int(m.group(1))
+        except ValueError:
+            continue
+        if 1 <= n <= 10:
+            slots.add(n)
+    return slots
+
+
+def verb_stem_present(text, stems=_WEAR_STEMS, endings=None) -> bool:
+    """동사 어간이 허용 어미와 붙어 있는가 (기본은 상태+교체 전체 어미).
+
+    왜(Why) 어미를 제한하나: 어간 `신` 을 그냥 찾으면 "신발"·"신원"·"신체"·
+    "신경" 이 전부 동사로 걸린다. 어미 집합에 `발|원|체|경` 이 없으므로
+    걸리지 않는다(2026-10-23 실측).
+    """
+    t = text or ""
+    ends = _VERB_ENDINGS_ALL if endings is None else endings
+    for _stem in stems:
+        for _end in ends:
+            if _stem + _end in t:
+                return True
+    return False
+
+
+def _wear_stem_change(text: str) -> bool:
+    """착용 동사 어간 + **교체성** 어미 + 착용 명사면 교체 지시다.
+
+    상태 어미(고·은)는 여기서 보지 않는다 — 그 경우는 아래 착용 묘사 분기가
+    일반 명사/구체 품목을 가려 판정한다(2026-10-20 규칙 유지).
+    """
+    return (verb_stem_present(text, _WEAR_STEMS, _VERB_ENDINGS_CHANGE)
+            and bool(_WEAR_NOUN_KO.search(text or "")))
 
 
 def _wear_cue_ko(window: str) -> bool:
@@ -945,9 +1582,14 @@ def _wear_nouns_mean_change(text, noun_re, generic_re, cue) -> bool:
     일반 명사(옷·신발·outfit)만 있으면 상태 묘사로 보고 참조를 유지한다.
     구체 품목이거나 색·재질 수식어가 명사 앞뒤에 붙으면 교체로 본다.
     이미지 슬롯 참조("image 2", "이미지 2")가 있으면 명시 참조이므로 교체다.
+    다만 토픽이 `3번: 하이 힐` 처럼 그 품목을 **참조 슬롯으로 선언**했으면 서술은
+    참조 재진술이므로 교체가 아니다 — 위 이미지 슬롯 참조(교체)보다 **뒤**에
+    두어, 둘이 함께 오면 교체가 이기게 한다(R164 계약 보존).
     """
     if re.search(r"(?:image|img)\s*_?\d+|이미지\s*_?\d+", text):
         return True
+    if _clothing_declared_slots(text):
+        return False
     for m in noun_re.finditer(text):
         if not generic_re.match(text, m.start()):
             return True
@@ -1011,6 +1653,12 @@ def _is_text_outfit_change_cached(t: str) -> bool:
     # 교체 지시다.
     if _WEAR_IMPERATIVE_KO.search(t) and _WEAR_NOUN_KO.search(t):
         return True
+    # 한국어: 착용 동사 어간 + 교체성 어미 (2026-10-23). 위 두 분기가 명시 동사와
+    # 완전형(신어·입혀)을 보고, 여기서 **자연스러운 활용**(신겨·입혀서)을 받는다.
+    # 상태 어미는 보지 않으므로 "신발을 신고 앉아" 는 여기서 안 잡히고 아래
+    # 묘사 분기가 2026-10-20 규칙대로 판정한다.
+    if _wear_stem_change(t):
+        return True
     # 한국어: 착용 묘사("입고", "신고") + 의류·신발. 영어와 같은 규칙으로
     # 일반 명사만 있으면 상태 묘사로 보고 참조를 유지한다. 구체 품목이나
     # 수식어가 있으면 교체다(2026-10-13 흰샌 단화 지시는 구체 품목이라 유지).
@@ -1036,6 +1684,98 @@ _SHOE_TOPIC_EN = (r"shoes|shoe|sandals|sandal|boots|boot|heels|heel|"
 _SHOE_TOPIC_KO = r"단화|구두|샌들|운동화|신발|하이힐|부츠|슬리퍼|플랫"
 
 
+# 신발 **품목**의 단일 출처 (2026-10-24, R225). 왜(Why) 의상 목록에서 파생하지
+# 않나: `_KO_WEAR_ITEMS` 에는 치마·원피스가 함께 있어 "이 선언이 신발인가" 를
+# 그 목록만으로 가릴 수 없다. 위 `_SHOE_TOPIC_*` 는 신발 **교체 판정**용으로
+# 이미 있으므로 그것을 출처로 삼는다. 다만 아래 두 형태는 실측으로 고정한
+# 것이다(프로브 14건, 한영 동등):
+#   ① 콜론 패턴은 한영을 **합친** 목록(`FOOTWEAR_WORDS`)을 봐야 한다 — 콜론
+#      패턴(6번)은 `words` 만 보는데 `_normalize_slots` 가 `No. 3:` 을 `3번:`
+#      으로 바꾸므로, 한국어 목록만 넘기면 `3번: High heels` 가 빈 집합이 된다.
+#   ② `high\s*heels?` 를 **먼저** 둔다 — 콜론 뒤는 낱말이 바로 와야 하므로
+#      `High heels` 는 `heels` 단독 대안으로는 잡히지 않는다(앞 낱말 때문에
+#      매칭 시작 위치가 어긋난다). 실측: 이 항이 없으면 빈 집합, 있으면 {3}.
+# 목록이 의상 목록과 갈리지 않게 하는 검사가 테스트에 있다(R225 AC-7):
+# `_KO_FOOTWEAR_WORDS` 는 `_KO_WEAR_ITEMS` 의 부분집합이어야 한다.
+_KO_FOOTWEAR_WORDS = ("구두", "신발", "샌들", "단화", "운동화", "하이힐",
+                      "부츠", "슬리퍼", "플랫", "로퍼", "웨지", "뮬", "하이탑")
+_EN_FOOTWEAR_WORDS = r"high\s*heels?|" + _SHOE_TOPIC_EN
+FOOTWEAR_WORDS = _loose_alt(_KO_FOOTWEAR_WORDS) + "|" + _EN_FOOTWEAR_WORDS
+# 역할 패턴 6종(사물·의상과 **같은 골격**). 착용 동사 제외를 그대로 넘겨
+# "2번: 하이힐을 신은 여성"(그 슬롯은 사람이다)을 신발 슬롯으로 잡지 않는다.
+_FOOTWEAR_ROLE_PATTERNS = _role_patterns(
+    FOOTWEAR_WORDS, _EN_FOOTWEAR_WORDS, _WEAR_VERB_AFTER)
+
+
+def _footwear_slots(text: str) -> set:
+    """신발 참조로 **선언된** 슬롯(예: `3번: 하이 힐`). 없으면 set().
+
+    왜(Why) 의상 슬롯(`_clothing_declared_slots`)과 따로 두나: 그쪽은 "무엇을
+    입는가" 를 말하고 이쪽은 "**신발이 어느 참조인가**" 를 말한다. 신발 가드가
+    지목할 대상을 알려면 후자가 필요하다(2026-10-24 실측: 선언이 있는데도 신발
+    가드가 1번 인물 참조를 지목해 참조 3번의 힐이 쓰이지 않았다).
+
+    산문("힐을 신고 앉아 있다")만으로는 묶지 않는다 — 슬롯 근거가 없다.
+    """
+    return _collect_role_slots(text, _FOOTWEAR_ROLE_PATTERNS)
+
+
+# 좌석 어휘 (2026-10-24, R226). 왜(Why) 사물 어휘와 따로 두나: 착석 관계는
+# "좌석 위에 앉는다" 는 **관계**다. 사물 어휘(`OBJECT_WORDS`)에 의자가 있어도
+# "앉는다" 는 동사와의 결합은 판정하지 않는다. 형태·접촉·방향을 요구하는 사물
+# DNA 와 달리 좌석에는 **접촉점**(체중이 좌석 쿠션에)과 **좌석 방향**(개구부가
+# 앉는 사람을 향한다)이 별도로 필요하다.
+# 범위: 의자·소파·벤치·스툴·안락의자 계열만. 바닥·침대·계단 착석은 범위 밖이다.
+_KO_SEAT_WORDS = ("의자", "소파", "벤치", "스툴", "안락의자", "암체어", "좌석")
+# `seat(?!t)` 로 "seats" 는 잡되 "seated" 는 잡지 않는다 — "seated" 는 착석
+# **동사**(아래 `_SEAT_VERBS`)로만 본다. 좌석 명사와 착석 동사를 갈라야
+# "2번: 의자"(빈 의자)와 "여성이 앉아 있다"(좌석 없음)를 구분할 수 있다.
+_EN_SEAT_WORDS = r"chair|sofa|couch|bench|stool|armchair|seat(?!t)"
+SEAT_WORDS = _loose_alt(_KO_SEAT_WORDS) + "|" + _EN_SEAT_WORDS
+
+
+# 착석 동사 — 좌석 어휘와 **함께** 있어야 관계가 성립한다. 한국어는 어미가
+# 다양해 "앉" 어간 하나로 앉아·앉은·앉는다·걸터앉다를 모두 잡는다. 영문은
+# `sits?\b`("sit"/"sits") 와 `sitting`/`seated`/`sit on` 을 따로 둔다.
+_SEAT_VERBS = (r"앉|걸터앉|앉히|sits?\b|sitting|seated|sit on|sitting on")
+
+
+# 좌석 역할 패턴 6종(사물·의상·신발과 **같은 골격**). 착용 동사 제외를 그대로
+# 넘겨 "2번: 의자를 입은 여성" 같은 오검출을 막는다.
+_SEAT_ROLE_PATTERNS = _role_patterns(
+    SEAT_WORDS, _EN_SEAT_WORDS, _WEAR_VERB_AFTER)
+
+
+def _seat_slots(text: str) -> set:
+    """좌석 어휘 + 착석 동사가 함께 있는 절의 사물 슬롯. 없으면 set().
+
+    왜(Why) 둘 다 요구하나 (2026-10-24, R226): "2번: 의자" 만으로는 착석이
+    아니다(빈 의자 제품샷). "여성이 앉아 있다" 만으로는 좌석 참조가 아니다.
+    둘이 함께 있어야 "그 좌석에 앉는다" 는 관계다. 배경 슬롯은 제외한다 —
+    의자를 배경으로만 쓴 입력에 접촉점 문구를 내면 없는 사물을 요구한다.
+
+    반환은 좌석 **어휘** 슬롯이다. 호출자(`resolve_guard_plan`)가 사물 DNA 대상
+    (`furniture_slots`)과 교집합을 내 최종 좌석 슬롯으로 좁힌다.
+    """
+    slots = _collect_role_slots(text, _SEAT_ROLE_PATTERNS)
+    if not slots:
+        return set()
+    try:
+        # 착석 동사 판정에는 비율 토큰 가리기가 필요 없다(`16:9` 에 "앉"/"sit" 이
+        # 들어갈 수 없다). 가리기는 역할 슬롯 입구(`_collect_role_slots`) 한 곳에만
+        # 두는 불변식(R213-13)을 지키려고 여기서는 `_mask_ratio_tokens` 를 부르지
+        # 않는다 — 두 번째 입구를 만들면 한쪽만 갱신되는 드리프트가 난다.
+        _nt = _normalize_slots((text or "").lower())
+        if not re.search(_SEAT_VERBS, _nt):
+            return set()
+        return slots - _background_role_slots(text)
+    except (ValueError, re.error):
+        return set()
+    except Exception:
+        # 배경 슬롯 판정 실패는 좌석 관계를 뒤집지 않는다 — 어휘 슬롯만 유지.
+        return slots
+
+
 def _topic_changes_shoes(text: str) -> bool:
     """텍스트가 신발을 바꾸는 지시인지 (의상 교체 의도 + 신발 어휘).
 
@@ -1051,6 +1791,30 @@ def _topic_changes_shoes(text: str) -> bool:
         return False
     return bool(re.search(_SHOE_TOPIC_KO, t)
                 or re.search(r"\b(?:" + _SHOE_TOPIC_EN + r")\b", t.lower()))
+
+
+# 맨발 표현 (2026-10-25 감사 F3). 왜(Why) 새로 두나: 신발 유지 가드
+# (FOOTWEAR_POSITIVE)는 "참조 신발을 그대로 유지하라"고 지시하고, 짝인
+# FOOTWEAR_NEGATIVE 는 "bare feet, barefoot" 를 **금지**한다. 그런데 사용자가
+# "A barefoot woman standing on the beach" 라고 쓰면 두 지시가 그 문장과 정면
+# 충돌한다(실측: 같은 실행에서 신발 유지 문구와 bare feet 금지가 동시에 나갔다).
+# 맨발 주제에서는 신발 잠금을 끄고 맨발을 지시하는 가드로 갈아탄다.
+_BAREFOOT_EN_RE = re.compile(
+    r"\b(?:bare\s?feet|bare\s?foot|barefoot|shoeless|without\s+shoes|"
+    r"no\s+shoes)\b")
+_BAREFOOT_KO_RE = re.compile(r"맨발|맨\s*발|발이\s*맨|신발\s*없이|신발을\s*벗")
+
+
+def _topic_wants_barefoot(text: str) -> bool:
+    """주제가 맨발을 요구하는지. 신발 교체 지시(단화 등)면 양보한다."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if not (_BAREFOOT_EN_RE.search(t.lower()) or _BAREFOOT_KO_RE.search(t)):
+        return False
+    # 신발을 **명시적으로 바꾸라**는 지시가 함께 있으면 그쪽이 구체적이다
+    # ("맨발 대신 단화를 신겨" 같은 문장). 그때는 맨발 가드를 켜지 않는다.
+    return not _topic_changes_shoes(t)
 
 
 # 신발 형용사가 **신발이 아닌** 옷 명사에 붙은 입력 감지 (2026-10-22 실측).
@@ -1293,13 +2057,65 @@ def _is_second_person_request(text: str) -> bool:
     return bool(_second_person_slots(text))
 
 
-def _secondary_role_labels(labels, main=None, persons=(), poses=(),
-                           clothing=()):
-    """보조 역할 목록(주 슬롯·추가 인물·포즈 슬롯 제외)에서 9·10번(외양 참조 전용)을 제외한다.
+# 역할 선언 — 사용자가 실제로 쓰는 표기 (2026-10-23, AC-4). 두 형태를 읽는다.
+#   ① `1번: 한국 여성` — 슬롯 + 콜론 + **사람 낱말**. 콜론을 필수로 둔다: 없으면
+#      산문("여성 2명")을 선언으로 오인할 수 있고, 사물 편에서 콜론 없는 형을
+#      일부러 열지 않은 것과 같은 이유다(T1 편차 기록).
+#   ② `인물: 3번` · `사람: 3번` — 사람 낱말 + 콜론 + 슬롯.
+# 사람 낱말은 위 `_HUMAN_WORDS_KO`/`_HUMAN_WORDS_EN` 을 그대로 쓴다(한 곳 정의).
+# 창(12자)은 `한국 여성`·`젊은 여성` 정도를 담고, 줄·구분자를 넘지 않는다 —
+# 넘으면 다음 선언의 낱말을 끌어온다.
+_PERSON_DECL_GAP = r"[^\n/;,，.。|·]{0,12}?"
+_PERSON_DECL_PATTERNS = (
+    r"(\d{1,2})\s*(?:번|번째)\s*[:：]\s*" + _PERSON_DECL_GAP
+    + r"(?:" + "|".join(_HUMAN_WORDS_KO) + r")",
+    r"(\d{1,2})\s*(?:번|번째)\s*[:：]\s*" + _PERSON_DECL_GAP
+    + r"\b(?:" + "|".join(_HUMAN_WORDS_EN) + r")\b",
+    r"(?:인물|사람|person|model)\s*[:：]\s*(?:image|img|이미지)?\s*_?\s*"
+    r"(\d{1,2})\s*(?:번|번째)?(?![0-9])",
+)
+# 주 피사체 선언 — `피사체: 2번 이미지` · `주인공: 2번` (AC-5). 슬롯 번호를 이렇게
+# 직접 밝히면 첫 식별 규약보다 그 선언이 이긴다(`_person_object_plan` 참조).
+_SUBJECT_DECL_PATTERNS = (
+    r"(?:피사체|주인공|subject)\s*[:：]\s*(?:image|img|이미지)?\s*_?\s*"
+    r"(\d{1,2})\s*(?:번|번째)?(?![0-9])",
+)
 
-    왜(Why): 9·10번의 역할은 외양 참조 가드(APPEARANCE_REF_POSITIVE / LLM
-    image_note)가 전담한다. 일반 보조 역할 목록("배경·의상·소품…")에 9·10번이
-    섞이면 외양 참조 지시와 충돌해 LLM·생성 모델이 외양을 무시하게 된다.
+
+def _subject_decl_slots(text: str) -> set:
+    """주 피사체로 **선언**한 슬롯 집합 (`피사체: 2번`). 없으면 set()."""
+    return _collect_role_slots(text, _SUBJECT_DECL_PATTERNS)
+
+
+def _person_role_slots(text: str) -> set:
+    """인물로 **선언**한 슬롯 집합 (2026-10-23, AC-4 · AC-5).
+
+    왜(Why) 필요한가: 기존 인물 판정(`_second_person_slots`)은 `2번 이미지의 여성`
+    처럼 **이미지 표기**를 요구한다. 선언 표기에는 그 낱말이 없어서
+    `1번: 의자 / 2번: 한국 여성` 이 주 피사체를 1번(의자) 으로 남겼다(실측).
+    주 피사체 선언(`피사체: 2번`)도 그 슬롯은 사람이므로 함께 센다.
+    """
+    return (_collect_role_slots(text, _PERSON_DECL_PATTERNS)
+            | _subject_decl_slots(text))
+
+
+def _secondary_role_labels(labels, main=None, persons=(), poses=(),
+                           clothing=(), appearance=None):
+    """보조 역할 목록(주 슬롯·추가 인물·포즈 슬롯·외양 참조 슬롯 제외).
+
+    왜(Why) 9·10번을 빼나: 9·10번의 **기본값**은 외양 참조 가드
+    (APPEARANCE_REF_POSITIVE / LLM image_note)가 전담한다. 일반 보조 역할
+    목록("배경·의상·소품…")에 9·10번이 섞이면 외양 참조 지시와 충돌해
+    LLM·생성 모델이 외양을 무시하게 된다.
+
+    2026-10-23 정정 (AC-19·AC-22): 9·10번도 **선언하면** 1~8번과 똑같은 슬롯이다.
+    그래서 "무조건 9·10번 제외"가 아니라 **외양 참조로 남은 슬롯만 제외**한다.
+    appearance 인자가 그 집합이다(cam_subject.appearance_ref_slots 로 계산).
+
+    appearance 기본값은 `None` = 종전과 같다(연결된 9·10번 전부 제외). 왜(Why)
+    보수적으로 두나: 이 함수 호출부가 인자를 빠뜨렸을 때 9·10번이 외양 가드와
+    보조 역할 목록에 **동시에** 들어가면 같은 프롬프트가 서로 반대 지시를 낸다.
+    빠뜨림은 조용한 충돌이 아니라 종전 동작이 되게 한다.
 
     main을 넘기면 주 피사체를 명시로 제외한다 -- 왜(Why): 첫 연결이 반드시
     주 피사체인 것은 아니다(첫 연결이 핸드백 + 다음이 여성). 넘기지 않으면
@@ -1332,6 +2148,21 @@ def _secondary_role_labels(labels, main=None, persons=(), poses=(),
             person_ns.add(int(str(p)))
         except (ValueError, TypeError):
             continue
+    label_ns = set()
+    for x in (labels or []):
+        try:
+            label_ns.add(int(str(x)))
+        except (ValueError, TypeError):
+            continue
+    if appearance is None:
+        appearance_ns = {n for n in label_ns if n in (9, 10)}
+    else:
+        appearance_ns = set()
+        for a in appearance:
+            try:
+                appearance_ns.add(int(str(a)))
+            except (ValueError, TypeError):
+                continue
     result = []
     for x in (labels or []):
         try:
@@ -1339,7 +2170,7 @@ def _secondary_role_labels(labels, main=None, persons=(), poses=(),
         except (ValueError, TypeError):
             n = None
         if n is not None:
-            if n in (9, 10):
+            if n in appearance_ns:
                 continue
             if n in person_ns:
                 continue
@@ -1349,13 +2180,166 @@ def _secondary_role_labels(labels, main=None, persons=(), poses=(),
     return result
 
 
+def _declared_role_slots(text: str) -> set:
+    """토픽이 역할을 **선언**한 슬롯 전부 (`1번: 의자` · `피사체: 2번` …).
+
+    왜(Why) 한 곳에 모으나 (2026-10-23, AC-19): 9·10번만 역할 판정에서 빠져
+    있었다. "선언이 이긴다"를 한 함수로 표현해 두면 그 예외를 다시 심을 자리가
+    줄어든다 -- 예외는 규칙이 아니라 목록으로 남겨야 눈에 띈다.
+
+    인물·사물·의상·배경·포즈·교체 대상(의상을 입는 사람)을 모두 센다. 이 집합에
+    든 슬롯은 외양 참조 **기본값**이 아니라 선언된 역할로 판정된다.
+    """
+    return (_object_role_slots(text) | _clothing_role_slots(text)
+            | _person_role_slots(text) | _background_role_slots(text)
+            | _pose_role_slots(text) | _outfit_target_slots(text))
+
+
+# ---------------------------------------------------------------------------
+# 콜론 없는 역할 표기 **안내** (2026-10-23, 사용자 지시).
+#
+# 왜(Why) 판정을 안 바꾸나: 콜론은 "이 번호는 이 역할" 이라는 **표지**다. 없으면
+# `2번 의자`(선언)와 `2번 여성이 웃는다`(문장)를 가를 근거가 사라진다 — 열면
+# 문장이 선언으로 읽히고 그 사람이 신원 소스에서 빠진다(2026-09-29 실측 결함
+# 경로: "2번 드레스를 입은 여성" -> 2번이 사람이어야 하는데 옷으로 읽혔다).
+# 그래서 **읽지 못한 표기를 읽지 못한 채로** 콘솔에만 알려 준다. 사용자 지시:
+# "분류는 건드리지 않는 길".
+#
+# 왜(Why) 사물·인물만 보나 (2026-10-23 실측, 표기 21종 전수 —
+# gori_colon2_probe.py):
+#   "3번 하이힐" -> 의상 [3]      "4번 배경" -> 배경 [4]
+#   "2번 앉은 자세" -> 포즈 [2]
+#   위 셋은 **콜론 없이도 이미 읽힌다.** 여기서 안내하면 거짓 안내가 된다.
+#   "2번 의자" -> 빈 집합        "1번 한국 여성" -> 빈 집합
+#   실제로 읽히지 않는 표기는 이 둘뿐이다(의상·배경·포즈는 각자의 숫자 패턴이
+#   이미 숫자만으로 슬롯을 잡는다). 그래서 안내 어휘 = 사물 + 사람.
+#
+# 알려진 한계(거짓 안내): 사람 낱말은 문장의 **주어**로도 온다
+# ("2번 여성이 웃는다"). 그래서 판정이 아니라 안내이고(프롬프트가 안 바뀐다),
+# 문구도 조건부("역할로 쓰려면")로 적는다. 아래 두 조건이 그 문장들을 걸러 낸다.
+_COLON_LESS_ROLE_WORDS = (OBJECT_WORDS + "|" + "|".join(_HUMAN_WORDS_KO)
+                          + "|" + "|".join(_HUMAN_WORDS_EN))
+# 역할 낱말 **앞** 수식어 창 (2026-10-23 실측 보정): `1번 한국 여성` 처럼 수식어가
+# 한 낱말 끼는 것이 실제 사용 표기다. 창은 같은 줄 안에서 12자까지 열되 ① 문장부호·
+# `/` 를 넘지 않고(선언 단위를 지킨다) ② 착용 동사 형태를 품지 않는다.
+# 왜(Why) ② 가 필요한가: `2번 드레스를 입은 여성` 은 **문장**이고, 창이 열리면서
+# 그 문장의 "여성" 이 걸린다 — 그것이 2026-09-29 실측 결함의 모양이다(그 사람이
+# 옷으로 읽혀 신원 소스에서 빠졌다). 안내만 하는 함수라도 그 문장을 안내하면
+# "여기서는 콜론을 붙여라" 는 잘못된 조언이 된다.
+_WEAR_FORM_IN_GAP = r"입은|입고|입혀|입히|착용|신은|신고|신겨|신어|벗겨"
+_COLON_LESS_GAP = ("(?:(?!(?:" + _WEAR_FORM_IN_GAP
+                   + r"))[^,，.。;；!！?？\n/]){0,12}?")
+# 역할 낱말 **뒤**는 그 줄(조각)의 끝이어야 한다 (2026-10-23 실측 보정).
+# 왜(Why) 필요한가: 콜론 없는 선언은 줄이나 `/` 단위로 적는다(`2번 의자`,
+# `1번 한국 여성`). 이 조건이 목적어·주어 문장을 통째로 걸러 낸다 —
+# `2번 의자를 밀어`(문장) · `2번 여성이 웃는다`(주어) · `2번 의자에 앉아` 가 조용해진다.
+_COLON_LESS_SEGMENT_END = r"(?=" + _S + r"(?:$|[\n/;,]))"
+_COLON_LESS_ROLE_PATTERN = re.compile(
+    # 왜(Why) `번째` 를 `번` 보다 **앞**에 두나: 교대는 순서대로 시도하므로
+    # `번` 이 먼저면 "2번째 소파" 에서 남은 "째 소파" 가 수식어 창으로 샌다
+    # (2026-10-23 프로브 실측: 제안이 "2번: 째 소파" 로 나왔다).
+    r"(\d{1,2})" + _S + r"(?:번째|번)" + _S
+    + r"(?!" + _S + r"[:：])"                  # 콜론 표기 = 이미 읽힌다
+    + r"(?!" + _S + r"(?:image|img|이미지))"    # "2번 이미지 의자" 도 읽힌다
+    + r"(?:의|에|에서|은|는|이|가|을|를)?" + _S
+    + r"(" + _COLON_LESS_GAP + r"(?:" + _COLON_LESS_ROLE_WORDS + r"))"
+    + r"(?![A-Za-z])"                           # "2번 manager" 의 man 오검출 방지
+    + _COLON_LESS_SEGMENT_END
+)
+# 숫자 **앞**에 이미지 표기가 있으면("이미지 2번 의자") 그쪽 패턴이 읽는다.
+# 가변 길이 lookbehind 를 못 쓰므로 접두를 잘라 확인한다. 여기만 `\s`(줄바꿈 포함)
+# 인 이유: 역할 패턴 1번은 `\s*` 로 줄을 넘어 "이미지\n2번 의자" 도 읽는다 —
+# 이 검사만 좁히면 그 형태가 거짓 안내가 된다.
+_IMAGE_MARKER_BEFORE = re.compile(r"(?:image|img|이미지)\s*$")
+
+
+def colon_less_role_hint(text: str) -> str:
+    """콜론 없이 적힌 역할 표기를 찾으면 안내 문장을, 없으면 `""` 을 돌려준다.
+
+    **판정에는 쓰지 않는다** (R211-5 가 그 계약을 고정한다). 이 함수가 하는 일은
+    로그 문장 하나를 만드는 것뿐이고, 슬롯 분류 결과는 이 함수가 있든 없든 같다.
+
+    걸러 내는 것(전부 실측): 콜론 표기 · `N번 이미지 <말>` · `이미지 N <말>` ·
+    콜론 없이도 읽히는 의상·배경·포즈 · 착용 동사가 붙은 문장 · 역할 낱말 뒤로
+    줄이 이어지는 문장. 남는 것이 "선언처럼 보이는데 읽히지 않은 표기" 다.
+
+    문구를 조건부("역할로 쓰려면")로 쓰는 이유는 위 모듈 주석 참조 — 사람 낱말은
+    문장의 주어일 수 있으므로, 안내가 틀려도 읽는 사람이 한 줄로 판단할 수 있다.
+    """
+    t = text or ""
+    for m in _COLON_LESS_ROLE_PATTERN.finditer(t):
+        if _IMAGE_MARKER_BEFORE.search(t[:m.start()]):
+            continue
+        return ('[Camera Director] 콜론 없는 역할 표기 "' + m.group(0).strip()
+                + '" — 역할로 읽지 않습니다. '
+                + "그 칸을 역할로 쓰려면 " + m.group(1) + "번: "
+                + m.group(2).strip()
+                + " 처럼 콜론을 붙여 주세요 (문장의 일부였다면 그대로 두세요)")
+    return ""
+
+
+def appearance_ref_slots(text: str, labels, llm_roles=None) -> set:
+    """외양 참조 **기본값**이 남는 슬롯 = {9,10} ∩ labels - 선언/분석된 슬롯.
+
+    왜(Why) 필요한가 (2026-10-23, AC-19·AC-21·AC-24): 9·10번은 사용자 전용
+    '외양 참조' 기능이라 연결만으로 가드가 섰다. 그래서 사용자가 `9번: 의자`
+    라고 선언해도 그 선언이 조용히 사라지고(실측: plan objects=[]) 외양 가드가
+    그대로 붙었다 — 같은 프롬프트가 "이 칸은 몸 외양" 과 "이 칸은 소품" 을
+    동시에 말했다. 규칙을 하나로 접는다:
+
+        선언이 있으면 선언이 이기고, 없을 때만 외양 참조 기본값이다.
+
+    llm_roles 는 **검증을 통과한** LLM 역할 분석(`_reference_roles_from_llm` —
+    연결된 슬롯 + 6단어 화이트리스트)이다. 사용자 지시(2026-10-23)대로
+    "분석은 LLM, 반영은 우리 규칙" 이므로 역할 분석은 선언과 같은 무게로
+    반영하되, `person` 은 해제하지 않는다: 몸 근접 참조도 사람으로 보이므로
+    그 값으로 기본값을 끄면 사용자 전용 기능이 조용히 꺼진다.
+
+    **픽셀 item/unknown 은 해제 근거로 쓰지 않는다.** 픽셀로는 옷과 사물을 가를
+    수 없다(실측 기록). 픽셀이 몸 근접을 item 으로 보면 기능이 꺼진다.
+
+    다만 **픽셀이 사람을 찾은 슬롯은 해제한다** (2026-10-23 실측 추가). 왜(Why):
+    그 슬롯은 `_hint_person_slots` 를 통해 주 피사체·보조 인물이 된다. 같은
+    슬롯을 몸 외양 참조로도 남기면 한 프롬프트가 "이 칸이 신원" 과 "이 칸은 몸
+    부위" 를 동시에 말한다. 실측(의자 1번 + 여성 9번 + 빈 topic): 픽셀은
+    `인물 슬롯 9` 를 찾았는데 그 값이 여기서 빠지지 않아 9번이 승격되지 못했고,
+    1번(의자)이 `the only main human identity` 가 됐다. 픽셀 person 은 자세
+    랜드마크 + 몸 크기 게이트를 통과한 실측이므로 이 한 가지에는 근거로 쓴다.
+    """
+    slots = set()
+    for x in (labels or []):
+        try:
+            n = int(str(x))
+        except (ValueError, TypeError):
+            continue
+        if n in (9, 10):
+            slots.add(n)
+    if not slots:
+        return set()
+    slots -= _declared_role_slots(text)
+    # 픽셀이 사람을 찾은 슬롯은 인물로 쓰이므로 외양 참조가 아니다 (위 설명).
+    slots -= _pixel_person_slots()
+    for k, v in (llm_roles or {}).items():
+        try:
+            n = int(str(k))
+        except (ValueError, TypeError):
+            continue
+        role = str(v or "").strip().lower()
+        if n in slots and role and role != "person":
+            slots.discard(n)
+    return slots
+
+
 def _object_role_slots(text: str) -> set:
     """사물/소품 역할이 명시된 번호(1~10) 집합. 없으면 set().
 
     왜(Why): "이미지 2의 핸드백" 같은 사물 지시가 인물 지시와 섞이는 씬에서
     사물 슬롯을 사람으로 오인하는 것을 막는다(다중 인물 자동 분류).
+    품사 게이트(2026-10-23, AC-16): 선언 자리에 동사가 온 슬롯은 사물이
+    아니다(`_decl_verb_slots`). 오늘 사전에서는 이 뺄셈이 항상 빈 집합이다.
     """
-    return _collect_role_slots(text, OBJECT_ROLE_PATTERNS)
+    return (_collect_role_slots(text, OBJECT_ROLE_PATTERNS)
+            - _decl_verb_slots(text))
 
 
 # 배경 역할 어휘 (2026-10-19 사용자 제보). 왜(Why) 사물과 분리하나:
@@ -1380,8 +2364,7 @@ _BACKGROUND_WORDS = BACKGROUND_ROLE_WORDS + "|" + _EN_BACKGROUND_WORDS
 # 에서 1번을 배경 슬롯으로 잘못 잡았다(실측: background_role_slots == {1}).
 # 줄바꿈을 넘지 않도록 간격을 `[ \t]*` 로 좁히고, 배경 어휘가 **앞**에 오는
 # 형태("배경: 2번 이미지")와 **뒤**에 오는 형태("2번 이미지 배경")를 모두 잡는다.
-_BG_GAP = r"[^\S\n]{0,8}"          # 줄바꿈 제외한 좁은 간격
-_S = r"[^\S\n]*"                    # 줄바꿈 제외 간격 (문자 클래스에 \s 는 \n 포함이라 따로 둔다)
+_BG_GAP = r"[^\S\n]{0,8}"          # 줄바꿈 제외한 좁은 간격 (`_S` 는 위쪽 공용 정의)
 # 슬롯 표기 두 형태: "N번 이미지"(숫자 먼저) 또는 "이미지 N"(단어 먼저).
 _BG_SLOT_A = r"(\d{1,2})" + _S + r"(?:번|번째)?" + _S + r"(?:의|에|에서)?" + _S
 _BG_SLOT_B = r"(?:image|img|이미지)" + _S + r"_?" + _S + r"(\d+)(?![0-9])"
@@ -1434,8 +2417,14 @@ def _person_object_plan(text, labels):
 
     왜(Why): 1번이 반드시 주 피사체인 것은 아니라는 실행(1번 핸드백 + 2번 여성)
     을 지원한다. 명시 근거가 없으면 기존 규약(첫 식별 = 주 피사체)을 유지해
-    기존 실행과 결과가 완전히 동일하다. 9·10번(외양 참조 전용)은
-    인물·사물 번호에서 모두 제외한다 -- 외양 참조는 인물도 사물도 아니다.
+    기존 실행과 결과가 완전히 동일하다.
+
+    2026-10-23 정정 (AC-19·AC-23): 9·10번의 `- {9, 10}` 하드코딩을 제거했다.
+    그 제외 때문에 `9번: 의자` 선언이 조용히 사라졌다(실측: `_object_role_slots`
+    는 {9} 인데 여기 objects 는 []). 선언이 있으면 1~8번과 **같은 사다리**를
+    탄다. 외양 참조 기본값은 이 함수가 아니라 `appearance_ref_slots` 가
+    판정한다 — 역할 판정과 가드 판정을 분리한다.
+
     포즈 지정 슬롯도 인물·사물에서 제외하고 주 피사체 후보에서도 뺀다 --
     자세만 빌려오는 슬롯을 신원 소스로 쓰면 참조의 얼굴이 섞인다.
     """
@@ -1447,9 +2436,15 @@ def _person_object_plan(text, labels):
     # 의상 소스 슬롯(교체 대상은 제외됨). 옷은 사람이 아니라 의상 소스이므로
     # 신원 소스 후보가 아니다 -- 아래 주 피사체 교정에서 함께 쓴다.
     outfits = _clothing_role_slots(text) & set(label_ns)
-    objects = _object_role_slots(text) & set(label_ns) - {9, 10} - poses
-    persons = (set(_second_person_slots(text)) & set(label_ns)
-               - objects - {9, 10} - poses)
+    objects = _object_role_slots(text) & set(label_ns) - poses
+    # 역할 선언(`1번: 한국 여성` · `피사체: 2번`)도 인물 근거다 (2026-10-23,
+    # AC-4·AC-5). 위 `_second_person_slots` 는 **이미지 표기**를 요구하므로
+    # 선언 표기를 놓친다 — 그 결과 `1번: 의자 / 2번: 한국 여성` 이 주 피사체를
+    # 1번(의자) 으로 남겼다(실측). 아래 `main in objects and persons` 가지가
+    # 그때 첫 인물을 주 피사체로 올린다(기존 규칙 그대로).
+    declared_persons = _person_role_slots(text) & set(label_ns)
+    persons = (((set(_second_person_slots(text)) | declared_persons)
+                & set(label_ns)) - objects - poses)
     # **교체 대상**은 이쪽에 의상을 입는 사람이므로 인물이다(실측 결함 수정).
     # "1 의상, 2 교체" 에서 2번이 persons 에 없으면 main 이 1번(주피사체=옷)으로
     # 남아 프롬프트가 "use reference image 1 as the only main human identity"
@@ -1457,6 +2452,14 @@ def _person_object_plan(text, labels):
     targets = _outfit_target_slots(text) & set(label_ns)
     persons = (persons | targets) - objects - outfits
     main = label_ns[0] if label_ns else 1
+    # `피사체: 2번` 처럼 **주 피사체를 직접 선언**하면 그 슬롯이 주 피사체다
+    # (2026-10-23, AC-5). 선언이 없으면 종전 규약(첫 식별 = 주 피사체) 그대로라
+    # 기존 실행과 결과가 완전히 동일하다. 기존 교정 사다리(대상·사물·의상·포즈·
+    # 힌트)는 손대지 않는다 — 이 가지는 그 앞에 서는 선언 전용이다.
+    _decl_main = _subject_decl_slots(text) & set(label_ns)
+    if _decl_main:
+        main = min(_decl_main)
+        persons = persons - {main}
     # **교체 대상이 첫 슬롯이면 그 사람이 곧 주 피사체다**(2026-09-29 실측).
     # 라벨 순서와 topic 을 무관하게 일관되게 하려면 여기서 먼저 확정한다.
     if main in targets:

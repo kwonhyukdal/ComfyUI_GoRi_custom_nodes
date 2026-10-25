@@ -1601,18 +1601,56 @@ function openMultiPopup(node, widget) {
     "box-shadow:0 4px 12px rgba(0,0,0,.5)", "user-select:none",
   ].join(";");
 
-  // 헤더 = 위젯 이름. 어떤 기능을 설정하는지 알아야 한다 (사용자 요구).
-  // '자동 (auto)' 는 노드 본체 위젯이 값으로 표시하므로 팝업에서는 두지 않는다.
+  // 헤더 = 위젯 이름(좌) + 새로고침 버튼(우). 어떤 기능을 설정하는지 알아야
+  // 한다 (사용자 요구). '자동 (auto)' 는 노드 본체 위젯이 값으로 표시하므로
+  // 팝업에서는 두지 않는다.
   const head = document.createElement("div");
   head.className = "gori-multi-head";
-  head.textContent = String(widget.name || "");
   head.style.cssText = [
+    "display:flex", "align-items:center", "justify-content:space-between",
     "padding:3px 6px", "margin-bottom:2px", "font-weight:bold",
     "color:#cfe8ff", "border-bottom:1px solid #444", "cursor:default",
   ].join(";");
+  const headName = document.createElement("span");
+  headName.textContent = String(widget.name || "");
+  head.appendChild(headName);
+  // 새로고침 버튼 (우측 상단, 사용자 지정 2026-10-23): 프리셋바의 ↻ 와 같은
+  // 모양·호버 동작 — 평소에는 ↻ 아이콘만, 마우스를 올리면 사각 박스
+  // (#3a3a3a 채움 + #7ea6ff 테두리). 누르면 **이 팝업의 위젯 하나만**
+  // 현재 프리셋 기본값으로 되돌린다 — 사용자가 체크로 바꾼 부분만 리셋되고
+  // 프리셋이 제공하는 값은 유지된다(runPresetWidgetReset 참조).
+  const headReset = document.createElement("span");
+  headReset.textContent = "↻";
+  headReset.title = "이 항목을 프리셋 기본값으로 되돌리기";
+  headReset.style.cssText = [
+    "margin-left:auto", "cursor:pointer", "color:#8ab4ff",
+    "font-weight:normal", "padding:0 6px", "line-height:1.4",
+    "border:1px solid transparent", "border-radius:4px",
+  ].join(";");
+  headReset.addEventListener("mouseenter", () => {
+    headReset.style.background = "#3a3a3a";
+    headReset.style.borderColor = "#7ea6ff";
+  });
+  headReset.addEventListener("mouseleave", () => {
+    headReset.style.background = "transparent";
+    headReset.style.borderColor = "transparent";
+  });
+  headReset.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!runPresetWidgetReset(node, widget.name)) return;
+    // 팝업 체크 상태를 리셋된 값에 맞춘다 — 행을 다시 만들지 않고 같은
+    // 체크박스를 그대로 두므로 스크롤 위치도 유지된다.
+    const fresh = splitMultiValue(widget.value);
+    selected.clear();
+    fresh.forEach((v2) => selected.add(v2));
+    for (const r of checkRows) r.cb.checked = selected.has(r.value);
+  });
+  head.appendChild(headReset);
   menu.appendChild(head);
 
   // 항목: '자동 (auto)' 은 제외한다 (헤더가 그 자리를 대신한다).
+  // checkRows 는 리셋 버튼이 체크 상태를 되돌릴 때 쓴다.
+  const checkRows = [];
   values.filter((v) => v !== MULTI_AUTO_LABEL).forEach((v) => {
     const row = document.createElement("div");
     row.className = "gori-multi-row";
@@ -1633,6 +1671,7 @@ function openMultiPopup(node, widget) {
     row.appendChild(cb);
     row.appendChild(lb);
     menu.appendChild(row);
+    checkRows.push({ value: v, cb });
   });
 
   document.body.appendChild(menu);
@@ -1782,6 +1821,670 @@ function installMultiSelectWidgets(node) {
   return n;
 }
 
+/* ------------------------------------------------------------------ */
+/* 프리셋 기억 + 프리셋바 우측 끝 리셋 버튼 (2026-10-22 R200)           */
+/* ------------------------------------------------------------------ */
+/* 왜(Why) 이 구조인가 (사용자 제보): 자동 프리셋에서 기능을 체크하고
+ * 시네마틱 인물로 갔다가 자동으로 돌아오면 체크가 사라졌다. 새로고침·
+ * ComfyUI 재시작 뒤에도 사라졌다. 기존 코드는 (1) 프리셋 전환마다 미러
+ * 값을 덮어써 사용자 편집을 지우고, (2) 자동으로 돌아오면 전 필드를 강제
+ * '자동 (auto)' 로 바꿨고, (3) 로드 뒤 첫 틱에도 같은 강제 초기화를
+ * 돌렸다. 지금은 프리셋별 기억을 두고 전환 시에만 값을 옮긴다.
+ *
+ * 전부 지우는 일(초기화)은 프리셋바 우측 끝의 리셋 버튼만 한다 —
+ * 브라우저 새로고침 아이콘 모양. 버튼은 **현재 선택된 프리셋**의
+ * 기본값으로 되돌린다: 자동이면 전 필드 자동, 이름 프리셋이면 미러 값.
+ * 프리셋이 제공하는 값은 리셋의 대상이 아니라 복원의 기준이다. */
+
+/** 리셋 버튼이 차지하는 폭 (px). 프리셋바 오른쪽 끝에서 한 칸 안쪽에 붙는다. */
+const PRESET_RESET_STRIP_W = 26;
+
+/** 리셋 버튼과 프리셋바 오른쪽 끝 사이의 간격 — 위젯 한 칸. 사용자 지정
+ * (2026-10-22): 버튼을 오른쪽 끝에서 한 칸 안쪽으로 옮긴다. 한 칸의 폭은
+ * 위젯 한 줄 높이(H)이며 그릴 때 정해진다 — H 를 모를 때의 폴백 값은
+ * litegraph 기본 행 높이 20. */
+const PRESET_RESET_SLOT_FALLBACK_H = 20;
+
+/** 노드의 프리셋별 기억 저장소. 키 = 프리셋 위젯 값, 값 = {필드: 값}. */
+function presetMemoryOf(node) {
+  if (!node || typeof node !== "object") return {};
+  if (!node._goriPresetMemory || typeof node._goriPresetMemory !== "object") {
+    node._goriPresetMemory = {};
+  }
+  return node._goriPresetMemory;
+}
+
+/** 현재 기능 필드 값의 스냅샷. 순수하게 읽기만 한다. */
+function snapshotPresetFields(node) {
+  const snap = {};
+  for (const name of MULTI_WIDGET_NAMES) {
+    const w = (node?.widgets || []).find((x) => x && x.name === name);
+    if (w) snap[name] = w.value;
+  }
+  return snap;
+}
+
+/** 기능 필드에 값을 적용한다. null 은 건드리지 않는다. */
+function applyPresetFields(node, values) {
+  let changed = false;
+  for (const name of MULTI_WIDGET_NAMES) {
+    const w = (node?.widgets || []).find((x) => x && x.name === name);
+    if (w && values && values[name] != null && w.value !== values[name]) {
+      w.value = values[name];
+      changed = true;
+    }
+  }
+  if (changed) {
+    try {
+      app.canvas?.setDirty?.(true, true);
+    } catch (_) {
+      /* 캔버스 갱신 실패는 값 반영에 영향이 없다 */
+    }
+  }
+  return changed;
+}
+
+/** 프리셋의 기본값. 자동이면 전 필드 자동, 이름 프리셋이면 미러 값
+ * (미러에 없는 필드는 자동). mirror 를 받는 순수 함수 — 테스트 가능. */
+function presetDefaultFields(presetName, mirror) {
+  const out = {};
+  for (const name of MULTI_WIDGET_NAMES) out[name] = MULTI_AUTO_LABEL;
+  if (presetName === MULTI_AUTO_LABEL || presetName === "auto") return out;
+  const table = mirror !== undefined
+    ? mirror
+    : (typeof CAMERA_PRESETS === "undefined" ? null : CAMERA_PRESETS);
+  const p = table ? table[presetName] : null;
+  if (p) {
+    for (const k of Object.keys(p)) {
+      if (k in out && p[k] != null) out[k] = p[k];
+    }
+  }
+  return out;
+}
+
+/** 첫 관측: 현재 프리셋의 값을 기억만 하고 위젯을 건드리지 않는다.
+ * 왜(Why) 덮어쓰지 않나: 새로고침·재시작 뒤 워크플로가 복원한 체크 값도
+ * 사용자 선택이다. 여기서 프리셋 기본값을 적용하면 R200 제보(새로고침
+ * 초기화)가 그대로 돌아온다. 이름 프리셋인데 필드가 전부 자동이면 아직
+ * 적용된 적 없는 상태라 기억을 남기지 않는다 — 전환·리셋 때 프리셋
+ * 기본값이 적용되도록. */
+function rememberCurrentPresetFields(node) {
+  try {
+    const pw = (node?.widgets || []).find((w) => w && w.name === "preset");
+    const cur = pw ? pw.value : "";
+    if (!cur || node._goriLastPreset !== undefined) return false;
+    const snap = snapshotPresetFields(node);
+    const allAuto = MULTI_WIDGET_NAMES.every(
+      (n) => !snap[n] || snap[n] === MULTI_AUTO_LABEL
+    );
+    if (!allAuto || cur === MULTI_AUTO_LABEL || cur === "auto") {
+      presetMemoryOf(node)[cur] = snap;
+    }
+    node._goriLastPreset = cur;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 리셋: 현재 프리셋의 기본값을 적용하고 기억도 기본값으로 되돌린다.
+ * 프리셋이 제공하는 값은 그대로 살아 있고 사용자가 바꾼 것만 원래대로
+ * 간다 (사용자 지정 2026-10-22). */
+function runPresetReset(node, mirror) {
+  try {
+    const pw = (node?.widgets || []).find((w) => w && w.name === "preset");
+    const presetName = pw ? pw.value : "";
+    const defaults = presetDefaultFields(presetName, mirror);
+    applyPresetFields(node, defaults);
+    presetMemoryOf(node)[presetName] = snapshotPresetFields(node);
+    // 같은 프리셋 재적용으로 오인해 다시 덮어쓰지 않게 현재 값을 맞춘다.
+    node._goriLastPreset = presetName;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 팝업의 새로고침 버튼 — 기능 위젯 **하나만** 현재 프리셋 기본값으로
+ * 되돌린다 (사용자 지정 2026-10-23: "새로 고침을 눌렀을 때 리셋이 되는 건
+ * 그 팝업 창만, 사용자가 체크로 선택한 부분만"). 기준값은 프리셋바 전체
+ * 리셋(runPresetReset)과 같다 — 프리셋이 제공하는 값은 유지되고 사용자가
+ * 체크로 바꾼 부분만 원래대로 간다. 프리셋이 이 칸을 제공하지 않으면
+ * '자동 (auto)'. 현재 프리셋의 기억도 같이 갱신한다 — 리셋 뒤 프리셋을
+ * 나갔다 돌아와도 리셋된 상태가 유지된다(R200 기억 규약과 같다).
+ * 콜백·setDirty 는 commitMultiValue 와 같은 순서로 뒤에서 한 번씩 부른다. */
+function runPresetWidgetReset(node, widgetName) {
+  try {
+    if (!MULTI_WIDGET_NAMES.includes(widgetName)) return false;
+    const widgets = node?.widgets || [];
+    const w = widgets.find((x) => x && x.name === widgetName);
+    if (!w) return false;
+    const pw = widgets.find((x) => x && x.name === "preset");
+    const presetName = pw ? pw.value : "";
+    const target = presetDefaultFields(presetName)[widgetName];
+    if (target == null) return false;
+    w.value = target;
+    const mem = presetMemoryOf(node);
+    const snap = mem[presetName] || snapshotPresetFields(node);
+    snap[widgetName] = target;
+    mem[presetName] = snap;
+    try {
+      w.callback?.(w.value, app.canvas, node, [0, 0], null);
+    } catch (_) {
+      /* 콜백 실패는 값 반영에 영향이 없다 */
+    }
+    try {
+      app.canvas?.setDirty?.(true, true);
+    } catch (_) {
+      /* 캔버스 갱신 실패는 값 반영에 영향이 없다 */
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 리셋 클릭 판정 — 오른쪽 끝에서 한 칸 안쪽 스트립. 순수 함수 — 테스트
+ * 가능. 좌표 규약: 새 litegraph 는 위젯 mouse/onClick 에 노드 로컬 x 를 준다
+ * (코어 bundle 실측: `e.canvasX - node.pos[0]`). 히트 구간은
+ * [폭 - 스트립 - 한칸, 폭 - 한칸) — 그린 버튼 사각형과 정확히 일치한다.
+ * 오른쪽 한 칸 갭은 버튼이 아니며(빈 여백), 그 곳 클릭은 콤보를 따른다. */
+function presetResetHitX(x, width, slotH) {
+  const slot = Number.isFinite(slotH) ? slotH : PRESET_RESET_SLOT_FALLBACK_H;
+  return Number.isFinite(x) && Number.isFinite(width)
+    && width > PRESET_RESET_STRIP_W + slot
+    && x >= width - PRESET_RESET_STRIP_W - slot
+    && x < width - slot;
+}
+
+/** 리셋 아이콘 — 브라우저 새로고침(원형 화살) 모양. 노드 로컬 좌표.
+ * withBox 가 참이면 사각 버튼 배경을 함께 그린다(호버 상태). 기본은 화살만
+ * — 평소에는 ↻ 아이콘만 보이고 호버에서 사각 박스가 나타난다(사용자 지정
+ * 2026-10-22 23:27). 박스 세로 높이는 preset 바 행 높이 h 와 같다. */
+function drawPresetResetIcon(ctx, stripX, y, h, withBox) {
+  try {
+    const cx = stripX + PRESET_RESET_STRIP_W / 2;
+    const cy = y + h / 2;
+    const r = Math.min(PRESET_RESET_STRIP_W, h) * 0.30;
+    ctx.save();
+    if (withBox) {
+      ctx.beginPath();
+      if (typeof ctx.roundRect === "function") {
+        ctx.roundRect(stripX + 1, y, PRESET_RESET_STRIP_W - 2, h, 4);
+      } else {
+        ctx.rect(stripX + 1, y, PRESET_RESET_STRIP_W - 2, h);
+      }
+      ctx.fillStyle = "#3a3a3a";
+      ctx.fill();
+      ctx.strokeStyle = "#7ea6ff";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "#8ab4ff";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, -Math.PI * 0.5 + 0.45, Math.PI * 1.5 - 0.45);
+    ctx.stroke();
+    const tx = cx + r * Math.cos(-Math.PI * 0.5 + 0.45);
+    const ty = cy + r * Math.sin(-Math.PI * 0.5 + 0.45);
+    ctx.beginPath();
+    ctx.moveTo(tx - 1.5, ty - 3.5);
+    ctx.lineTo(tx + 2.5, ty + 0.5);
+    ctx.lineTo(tx - 3.5, ty + 1.5);
+    ctx.closePath();
+    ctx.fillStyle = "#8ab4ff";
+    ctx.fill();
+    ctx.restore();
+  } catch (_) {
+    /* 아이콘 실패는 무시 — 리셋 동작은 클릭 판정으로 돈다 */
+  }
+}
+
+/** 워크플로 저장 — 새 프론트엔드의 저장 경로. 실측(2026-10-23, 실행 중
+ * 페이지 프로브): app.saveGraph / app.storeWorkflow / app.workflowManager 는
+ * 전부 없고, 저장은 extensionManager(pinia 스토어)에 있다 —
+ * `app.extensionManager.workflow.saveWorkflow()` 가 표준 경로이고
+ * `activeWorkflow.save()` 가 같은 프로토 타입에 있다(두 메서드 실측 확인).
+ * 어느 쪽도 없으면(구버전 프론트·비정상 로드) 저장하지 않고 거짓을 돌려준다
+ * — 사용자에게는 조용하되 반환값으로 판정 가능하다(테스트 가능). */
+function runWorkflowSave() {
+  try {
+    const wf = app?.extensionManager?.workflow;
+    if (wf && typeof wf.saveWorkflow === "function") {
+      wf.saveWorkflow();
+      return true;
+    }
+    const active = wf?.activeWorkflow;
+    if (active && typeof active.save === "function") {
+      active.save();
+      return true;
+    }
+  } catch (_) {
+    /* 저장 실패는 조용히 — Ctrl+S 로 언제든 저장할 수 있다 */
+  }
+  return false;
+}
+
+/** 저장 아이콘 — 플로피 디스크 모양. 노드 로컬 좌표. ↻ 아이콘(위 행)과
+ * 크기·색·호버 동작이 같다(사용자 지정 2026-10-23): 평소에는 아이콘만
+ * 보이고 호버에서 사각 박스가 나타난다. 박스 세로 높이는 행 높이 h 와
+ * 같다. 몸통(rect)+셔터(상단 작은 rect)+라벨(하단 rect) — rect 만 써
+ * 그리기 계약을 테스트가 그대로 잡을 수 있게 한다. */
+function drawPresetSaveIcon(ctx, stripX, y, h, withBox) {
+  try {
+    const cx = stripX + PRESET_RESET_STRIP_W / 2;
+    const cy = y + h / 2;
+    const s = Math.min(PRESET_RESET_STRIP_W, h) * 0.32;
+    ctx.save();
+    if (withBox) {
+      ctx.beginPath();
+      if (typeof ctx.roundRect === "function") {
+        ctx.roundRect(stripX + 1, y, PRESET_RESET_STRIP_W - 2, h, 4);
+      } else {
+        ctx.rect(stripX + 1, y, PRESET_RESET_STRIP_W - 2, h);
+      }
+      ctx.fillStyle = "#3a3a3a";
+      ctx.fill();
+      ctx.strokeStyle = "#7ea6ff";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "#8ab4ff";
+    ctx.lineWidth = 1.4;
+    const bw = s * 1.9;
+    const bh = s * 1.9;
+    const bx = cx - bw / 2;
+    const by = cy - bh / 2;
+    ctx.beginPath();
+    ctx.rect(bx, by, bw, bh);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.rect(cx - s * 0.55, by, s * 1.1, s * 0.6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.rect(cx - s * 0.55, by + bh - s * 0.9, s * 1.1, s * 0.9);
+    ctx.stroke();
+    ctx.restore();
+  } catch (_) {
+    /* 아이콘 실패는 무시 — 저장 동작은 클릭 판정으로 돈다 */
+  }
+}
+
+/** 캔버스 위 마우스의 그래프 좌표 — window 캡처 리스너로 추적한다.
+ * 왜(Why) 캔버스 엘리먼트가 아니라 window 캡처인가: 실측(2026-10-22 23:58)
+ * 에서 캔버스 엘리먼트 리스너로는 호버 판정이 늘 거짓이었다 — 같은 이벤트에서
+ * 내 프로브 리스너는 발화했고 순수 판정·좌표 변환·그리기는 전부 정상이었다.
+ * 즉 좌표 공급원이 문제였다. ComfyUI 의 오버레이 UI 가 포인터 이벤트 대상을
+ * 가로채 캔버스 엘리먼트로는 실제 마우스 흐름이 오지 않는다. window 캡처는
+ * 대상과 무관하게 모든 이동을 받는다. 변환식은 코어와 같다:
+ * (캔버스 픽셀)/scale - offset. 신선도 가드: 마우스가 멈추면 값이 오래되니
+ * TTL 을 넘기면 graph_mouse 로 폴백한다(마지막 위치라 값은 동일하다). */
+const PRESET_RESET_HOVER_TTL_MS = 1500;
+let _goriPointerGraphPos = null;
+let _goriPointerPosTs = 0;
+
+/** 리스너를 붙인다 — 창마다 한 번. 그릴 때마다 불려도 가드로 한 번만 걸린다. */
+let _goriTrackerWin = null;
+function attachPointerTracker() {
+  if (_goriTrackerWin === window) return;
+  _goriTrackerWin = window;
+  window.addEventListener("pointermove", (e) => {
+    try {
+      const c = app.canvas;
+      const el = c?.canvas;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX > rect.right
+        || e.clientY < rect.top || e.clientY > rect.bottom) return;
+      const scale = c?.ds?.scale ?? 1;
+      const off = c?.ds?.offset || [0, 0];
+      _goriPointerGraphPos = [
+        (e.clientX - rect.left) / scale - off[0],
+        (e.clientY - rect.top) / scale - off[1],
+      ];
+      _goriPointerPosTs = Date.now();
+      // 새 프론트는 요청 기반 렌더링이다 — 가만히 있다가 마우스만 움직이면
+      // 다시 그리지 않는다(startRendering/stopRendering, bundle 실측
+      // 2026-10-22 23:47). 이동마다 다시 그려야 호버 박스가 뜬다.
+      c?.setDirty?.(true, true);
+    } catch (_) {
+      /* 무시 — 다음 이동에서 다시 시도한다 */
+    }
+  }, { capture: true, passive: true });
+}
+
+/** 호버 판정 — 로컬 마우스가 리셋 버튼 사각형(그린 것과 같은 구간) 위에
+ * 있는가. 순수 함수 — 테스트 가능. y 범위는 행 높이 하나. */
+function presetResetHoveredAt(localX, localY, width, y, H) {
+  try {
+    const slot = (typeof H === "number" && H > 0)
+      ? H
+      : PRESET_RESET_SLOT_FALLBACK_H;
+    if (!presetResetHitX(localX, width, slot)) return false;
+    return typeof localY === "number"
+      && localY >= y && localY <= y + slot;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 호버 판정 — 그릴 때 쓴다. 자체 추적 좌표가 신선하면 우선, 아니면
+ * graph_mouse(코어가 마지막 위치를 보관 — 실측 23:58, 이동 이벤트마다
+ * 갱신을 확인). 그래프 좌표를 노드 로컬로 바꿔 사각형 판정에 넘긴다.
+ * 왜(Why) Array.isArray 로 검사하지 않나: 실측(2026-10-22 23:58 종단)에서
+ * 새 프론트의 node.pos 는 배열이 아니라 객체({0:420, 1:220})였다 — 가드가
+ * 항상 거짓이어서 판정이 호출조차 안 됐고, 이것이 호버가 안 뜬 전부였다.
+ * 그래서 좌표 공급원뿐 아니라 가드도 duck-typing 으로 검사한다. */
+function presetResetHovered(node, width, y, H) {
+  try {
+    attachPointerTracker();
+    const fresh = Array.isArray(_goriPointerGraphPos)
+      && (Date.now() - _goriPointerPosTs) < PRESET_RESET_HOVER_TTL_MS;
+    const m = fresh ? _goriPointerGraphPos : app.canvas?.graph_mouse;
+    if (!m || typeof m[0] !== "number" || typeof m[1] !== "number"
+      || !node?.pos || typeof node.pos[0] !== "number"
+      || typeof node.pos[1] !== "number") {
+      return false;
+    }
+    return presetResetHoveredAt(
+      m[0] - node.pos[0], m[1] - node.pos[1], width, y, H
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 콤보 몸통을 줄인 폭으로 그린다. 콘크리트 뷰의 drawWidget 이 있으면 그걸
+ * 쓰고(뷰가 raw 위젯에 합쳐진 뒤에야 보인다 — adoptConcreteWidget 실측),
+ * 없으면 값 텍스트만 그려 최소 모양을 유지한다. */
+function drawComboBodyShrunk(w, ctx, width, y, H, lowQuality) {
+  let drawn = false;
+  try {
+    if (typeof w.drawWidget === "function") {
+      w.drawWidget(ctx, { width, showText: !lowQuality });
+      drawn = true;
+    }
+  } catch (_) {
+    /* 뷰 몸통 실패 시 아래 최소 드로잉으로 간다 */
+  }
+  if (!drawn) {
+    try {
+      ctx.save();
+      ctx.fillStyle = "#222";
+      ctx.beginPath();
+      if (typeof ctx.roundRect === "function") {
+        ctx.roundRect(15, y, Math.max(0, width - 30), H, 4);
+      } else {
+        ctx.rect(15, y, Math.max(0, width - 30), H);
+      }
+      ctx.fill();
+      ctx.fillStyle = "#ddd";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(w.value ?? ""), width / 2, y + H / 2);
+      ctx.restore();
+    } catch (_) {
+      /* 최소 드로잉 실패도 무시 — 값은 콤보 클릭으로 바꿀 수 있다 */
+    }
+  }
+}
+
+/** 프리셋 위젯에 리셋 버튼을 얹는다 (JS 전용 — 저장되지 않는다).
+ * 그리기: 새 litegraph 는 draw 속성이 있으면 drawWidget 보다 우선한다
+ * (코어 drawWidgets dispatch 실측). 콤보를 폭 - 스트립 - 한 칸으로 그려
+ * 오른쪽에서 한 칸 안쪽 스트립을 버튼에 남긴다 — "프리셋바 우측 끝에서
+ * 한 칸 왼쪽" 배치(사용자 지정 2026-10-22). 한 칸은 위젯 한 줄 높이 H.
+ * 클릭: 새 litegraph 코어 콤보는 onClick 으로, 구버전은 mouse 로 처리한다
+ * (toConcreteWidget 이 있으면 mouse 는 무시된다 — 실측). */
+function installPresetResetButton(node) {
+  const widgets = node?.widgets;
+  if (!Array.isArray(widgets)) return false;
+  const pw = widgets.find((w) => w && w.name === "preset");
+  if (!pw || pw._goriPresetReset) return false;
+  pw._goriPresetReset = true;
+
+  // 그리기: 항상 draw 를 얹는다 — 새 litegraph dispatch 는 draw 속성이
+  // 있으면 콘크리트 뷰의 drawWidget 보다 우선한다(코어 drawWidgets 실측).
+  // (1) 구버전처럼 원본 draw 가 있으면 줄인 폭으로 되돌리고, (2) 없으면
+  // (새 litegraph) 콘크리트 뷰가 맡기던 몸통을 직접 부른다. 몸통 메서드
+  // (drawWidget)는 뷰가 raw 위젯에 합쳐진 뒤에야 보인다(adoptConcreteWidget
+  // 실측) — 합쳐지기 전엔 값 텍스트만 그려 최소 모양을 유지한다.
+  if (typeof pw.draw === "function") {
+    const origDraw = pw.draw;
+    pw.draw = function (ctx, n, width, y, H) {
+      this.y = y;
+      this.last_y = y;
+      const w = (typeof width === "number" && width > 0) ? width
+        : (typeof n?.size?.[0] === "number" ? n.size[0] : 0);
+      const slot = (typeof H === "number" && H > 0) ? H
+        : PRESET_RESET_SLOT_FALLBACK_H;
+      this._goriResetSlotH = slot;
+      const inner = Math.max(0, w - PRESET_RESET_STRIP_W - slot);
+      try {
+        origDraw.call(this, ctx, n, inner, y, H);
+      } catch (_) {
+        origDraw.call(this, ctx, n, width, y, H);
+      }
+      // ↻ 아이콘은 항상 그린다 — 사각 배경만 호버에서 (사용자 지정
+      // 2026-10-22 23:27: 평소에는 화살만, 호버에서 박스).
+      drawPresetResetIcon(ctx, inner, y, H, presetResetHovered(n, w, y, H));
+    };
+  } else {
+    pw.draw = function (ctx, n, width, y, H, lowQuality) {
+      this.y = y;
+      this.last_y = y;
+      const w = (typeof width === "number" && width > 0) ? width
+        : (typeof n?.size?.[0] === "number" ? n.size[0] : 0);
+      const slot = (typeof H === "number" && H > 0) ? H
+        : PRESET_RESET_SLOT_FALLBACK_H;
+      this._goriResetSlotH = slot;
+      const inner = Math.max(0, w - PRESET_RESET_STRIP_W - slot);
+      drawComboBodyShrunk(this, ctx, inner, y, H, lowQuality);
+      // ↻ 아이콘은 항상 그린다 — 사각 배경만 호버에서 (사용자 지정
+      // 2026-10-22 23:27: 평소에는 화살만, 호버에서 박스).
+      drawPresetResetIcon(ctx, inner, y, H, presetResetHovered(n, w, y, H));
+    };
+  }
+
+  const origOnClick = typeof pw.onClick === "function" ? pw.onClick : null;
+  pw.onClick = function (arg) {
+    try {
+      const e = arg?.e;
+      const n = arg?.node || node;
+      if (e && n) {
+        const x = (typeof e.canvasX === "number") ? e.canvasX - n.pos[0] : NaN;
+        const width = (typeof this.width === "number" && this.width > 0)
+          ? this.width
+          : (typeof n.size?.[0] === "number" ? n.size[0] : 0);
+        const slot = Number.isFinite(this._goriResetSlotH)
+          ? this._goriResetSlotH
+          : PRESET_RESET_SLOT_FALLBACK_H;
+        if (width > 0 && presetResetHitX(x, width, slot)) {
+          runPresetReset(n);
+          try {
+            arg?.canvas?.setDirty?.(true, true);
+          } catch (_) {
+            /* 무시 */
+          }
+          return; // 리셋 클릭이었다 — 드롭다운을 열지 않는다
+        }
+      }
+    } catch (_) {
+      /* 판정 실패는 원래 콤보 클릭을 따른다 */
+    }
+    return origOnClick ? origOnClick.call(this, arg) : undefined;
+  };
+
+  const origMouse = typeof pw.mouse === "function" ? pw.mouse : null;
+  if (origMouse) {
+    // 구버전 litegraph: mouse 경로만 있는 프런트엔드용. 새 litegraph 는
+    // onClick 을 우선해 이 래퍼는 호출되지 않는다.
+    pw.mouse = function (event, pos, n) {
+      const t = event?.type;
+      if ((t === "pointerdown" || t === "mousedown") && Array.isArray(pos)) {
+        const width = (typeof this.width === "number" && this.width > 0)
+          ? this.width
+          : (typeof n?.size?.[0] === "number" ? n.size[0] : 0);
+        const slot = Number.isFinite(this._goriResetSlotH)
+          ? this._goriResetSlotH
+          : PRESET_RESET_SLOT_FALLBACK_H;
+        if (width > 0 && presetResetHitX(pos[0], width, slot)) {
+          runPresetReset(n || node);
+          try {
+            app.canvas?.setDirty?.(true, true);
+          } catch (_) {
+            /* 무시 */
+          }
+          return true;
+        }
+      }
+      return origMouse.call(this, event, pos, n);
+    };
+  }
+  return true;
+}
+
+/** automation 바 폭을 preset 바(콤보) 폭과 맞춘다 — 리셋 버튼이 오른쪽에서
+ * 한 칸을 차지하는 만큼 automation 콤보도 같은 폭으로 그려 두 바의 오른쪽
+ * 끝이 나란히 맞는다 (사용자 지정 2026-10-22 23:07, 통일성). */
+function installAutomationBarMatch(node) {
+  const widgets = node?.widgets;
+  if (!Array.isArray(widgets)) return false;
+  const aw = widgets.find((w) => w && w.name === "automation");
+  if (!aw || aw._goriBarMatch) return false;
+  aw._goriBarMatch = true;
+  if (typeof aw.draw === "function") {
+    const origDraw = aw.draw;
+    aw.draw = function (ctx, n, width, y, H) {
+      this.y = y;
+      this.last_y = y;
+      const w = (typeof width === "number" && width > 0) ? width
+        : (typeof n?.size?.[0] === "number" ? n.size[0] : 0);
+      const slot = (typeof H === "number" && H > 0) ? H
+        : PRESET_RESET_SLOT_FALLBACK_H;
+      try {
+        origDraw.call(this, ctx, n, Math.max(0, w - PRESET_RESET_STRIP_W - slot), y, H);
+      } catch (_) {
+        origDraw.call(this, ctx, n, width, y, H);
+      }
+    };
+  } else {
+    aw.draw = function (ctx, n, width, y, H, lowQuality) {
+      this.y = y;
+      this.last_y = y;
+      const w = (typeof width === "number" && width > 0) ? width
+        : (typeof n?.size?.[0] === "number" ? n.size[0] : 0);
+      const slot = (typeof H === "number" && H > 0) ? H
+        : PRESET_RESET_SLOT_FALLBACK_H;
+      drawComboBodyShrunk(this, ctx, Math.max(0, w - PRESET_RESET_STRIP_W - slot), y, H, lowQuality);
+    };
+  }
+  return true;
+}
+
+/** 저장 버튼 — ↻ 아이콘 바로 아래 칸(automation 행의 오른쪽 스트립)에
+ * 저장 아이콘을 얹는다 (JS 전용 — 저장되지 않는다). 크기(폭 26 × 행 높이
+ * H)와 호버 동작(아이콘 항상 표시, 호버 시 사각 박스)은 ↻ 와 동일하다
+ * (사용자 지정 2026-10-23). automation 콤보는 폭 정합 래퍼가 이미
+ * 폭-26-한칸 으로 줄여 그리므로 그 스트립은 비어 있다.
+ *
+ * 왜(Why) 이 래퍼는 몸통을 다시 줄이지 않나: 설치 순서가 폭 정합
+ * (installAutomationBarMatch) **뒤**라 이 래퍼가 바깥이다. 안쪽(폭 정합
+ * 래퍼)이 받은 폭을 그대로 넘겨 몸통을 줄이게 두고, 바깥에서 전체 폭으로
+ * 스트립 x(폭-26-한칸)를 계산해 아이콘을 그린다. 순서가 뒤집히면 두 래퍼가
+ * 각각 줄여 이중 축소가 된다 — afterLifecycle 의 설치 순서를 테스트가
+ * 고정한다(F28 소스 계약). 원본 draw 가 아예 없으면(구버전) 몸통을 스스로
+ * 줄여 그린다. 클릭: preset 리셋 버튼과 같은 판정(presetResetHitX — y 는
+ * 위젯 라우팅이 이미 골라 주므로 x 만 본다)으로 스트립 히트 시
+ * runWorkflowSave 를 부르고 드롭다운을 열지 않는다. */
+function installPresetSaveButton(node) {
+  const widgets = node?.widgets;
+  if (!Array.isArray(widgets)) return false;
+  const aw = widgets.find((w) => w && w.name === "automation");
+  if (!aw || aw._goriPresetSave) return false;
+  aw._goriPresetSave = true;
+
+  const origDraw = typeof aw.draw === "function" ? aw.draw : null;
+  aw.draw = function (ctx, n, width, y, H, lowQuality) {
+    this.y = y;
+    this.last_y = y;
+    const w = (typeof width === "number" && width > 0) ? width
+      : (typeof n?.size?.[0] === "number" ? n.size[0] : 0);
+    const slot = (typeof H === "number" && H > 0) ? H
+      : PRESET_RESET_SLOT_FALLBACK_H;
+    const stripX = Math.max(0, w - PRESET_RESET_STRIP_W - slot);
+    this._goriSaveSlotH = slot;
+    if (origDraw) {
+      try {
+        origDraw.call(this, ctx, n, width, y, H, lowQuality);
+      } catch (_) {
+        origDraw.call(this, ctx, n, width, y, H, lowQuality);
+      }
+    } else {
+      drawComboBodyShrunk(this, ctx, stripX, y, H, lowQuality);
+    }
+    // 저장 아이콘도 항상 그린다 — 사각 배경만 호버에서 (↻ 와 동일 사양).
+    drawPresetSaveIcon(ctx, stripX, y, H, presetResetHovered(n, w, y, H));
+  };
+
+  const origOnClick = typeof aw.onClick === "function" ? aw.onClick : null;
+  aw.onClick = function (arg) {
+    try {
+      const e = arg?.e;
+      const n = arg?.node || node;
+      if (e && n) {
+        const x = (typeof e.canvasX === "number") ? e.canvasX - n.pos[0] : NaN;
+        const width = (typeof this.width === "number" && this.width > 0)
+          ? this.width
+          : (typeof n.size?.[0] === "number" ? n.size[0] : 0);
+        const slot = Number.isFinite(this._goriSaveSlotH)
+          ? this._goriSaveSlotH
+          : PRESET_RESET_SLOT_FALLBACK_H;
+        if (width > 0 && presetResetHitX(x, width, slot)) {
+          runWorkflowSave();
+          try {
+            arg?.canvas?.setDirty?.(true, true);
+          } catch (_) {
+            /* 무시 */
+          }
+          return; // 저장 클릭이었다 — 드롭다운을 열지 않는다
+        }
+      }
+    } catch (_) {
+      /* 판정 실패는 원래 콤보 클릭을 따른다 */
+    }
+    return origOnClick ? origOnClick.call(this, arg) : undefined;
+  };
+
+  const origMouse = typeof aw.mouse === "function" ? aw.mouse : null;
+  if (origMouse) {
+    // 구버전 litegraph: mouse 경로만 있는 프런트엔드용. 새 litegraph 는
+    // onClick 을 우선해 이 래퍼는 호출되지 않는다.
+    aw.mouse = function (event, pos, n) {
+      const t = event?.type;
+      if ((t === "pointerdown" || t === "mousedown") && Array.isArray(pos)) {
+        const width = (typeof this.width === "number" && this.width > 0)
+          ? this.width
+          : (typeof n?.size?.[0] === "number" ? n.size[0] : 0);
+        const slot = Number.isFinite(this._goriSaveSlotH)
+          ? this._goriSaveSlotH
+          : PRESET_RESET_SLOT_FALLBACK_H;
+        if (width > 0 && presetResetHitX(pos[0], width, slot)) {
+          runWorkflowSave();
+          try {
+            app.canvas?.setDirty?.(true, true);
+          } catch (_) {
+            /* 무시 */
+          }
+          return true;
+        }
+      }
+      return origMouse.call(this, event, pos, n);
+    };
+  }
+  return true;
+}
+
 app.registerExtension({
   name: EXT_ID,
   setup() {
@@ -1795,43 +2498,32 @@ app.registerExtension({
     } catch (_) {
       /* 무시 */
     }
-    // Preset sync: poll preset widget and populate other widgets when all auto.
+    // Preset sync: 프리셋별 기억 + 전환 시에만 값 이동 (2026-10-22 R200).
+    // 왜(Why) 덮어쓰지 않게 바꿨나: 프리셋 전환마다 미러 값을 덮어써 사용자
+    // 편집이 사라졌고, 자동 복귀 시 전 필드가 강제 '자동 (auto)' 로 바뀌었고,
+    // 로드 뒤 첫 틱에도 같은 강제 초기화가 돌았다 (R200 제보 — 체크 유실).
+    // 첫 관측은 기억만 남긴다. 전부 지우는 일은 리셋 버튼만 한다.
     try {
-      const _goriPresetFields = ['shot','lens','angle','composition','lighting','grade','motion','speed','amplitude','motion2'];
-      const _goriAllAuto = (node) => _goriPresetFields.every((f) => {
-        const w = (node.widgets || []).find((x) => x && x.name === f);
-        return !w || w.value === '자동 (auto)' || w.value === 'auto' || w.value === '';
-      });
       setInterval(() => {
         try {
           const nodes = app.graph?._nodes || [];
           for (const node of nodes) {
             if (node?.type !== 'GoRi_CameraDirectorEncodeSkills') continue;
+            if (node._goriLastPreset === undefined) {
+              // 첫 관측(로드·새 노드): 복원된 값을 그대로 기억한다.
+              rememberCurrentPresetFields(node);
+              continue;
+            }
             const pw = (node.widgets || []).find((w) => w && w.name === 'preset');
             if (!pw) continue;
             const cur = pw.value;
-            if (!cur || typeof CAMERA_PRESETS === 'undefined') continue;
-            if (cur === '\uc790\ub3d9 (auto)' || cur === 'auto') {
-              if (node._goriLastPreset === cur) continue;
-              for (const f of _goriPresetFields) {
-                const w = (node.widgets || []).find((x) => x && x.name === f);
-                if (w) w.value = '\uc790\ub3d9 (auto)';
-              }
-              node._goriLastPreset = cur;
-              try { app.canvas?.setDirty?.(true, true); } catch (_) {}
-              continue;
-            }
-            if (!CAMERA_PRESETS[cur]) continue;
-            const _first = (node._goriLastPreset === undefined);
-            if (node._goriLastPreset === cur) continue;
-            if (_first && !_goriAllAuto(node)) { node._goriLastPreset = cur; continue; }
-            const p = CAMERA_PRESETS[cur];
-            for (const f of _goriPresetFields) {
-              const w = (node.widgets || []).find((x) => x && x.name === f);
-              if (w && p[f] != null) w.value = p[f];
-            }
+            if (!cur || node._goriLastPreset === cur) continue;
+            // 프리셋 전환: 나가는 프리셋의 현재 값을 기억하고, 들어오는
+            // 프리셋의 기억이 있으면 복원, 없으면 프리셋 기본값을 적용한다.
+            presetMemoryOf(node)[node._goriLastPreset] = snapshotPresetFields(node);
+            const remembered = presetMemoryOf(node)[cur];
+            applyPresetFields(node, remembered || presetDefaultFields(cur));
             node._goriLastPreset = cur;
-            try { app.canvas?.setDirty?.(true, true); } catch (_) {}
           }
         } catch (_) {}
       }, 400);
@@ -1897,6 +2589,28 @@ app.registerExtension({
         installMultiSelectWidgets(node);
       } catch (_) {
         /* 다중 선택 위젯 설치 실패는 조용히 무시 — 기본 드롭다운으로 동작 */
+      }
+      try {
+        // 프리셋바 우측(끝에서 한 칸 안쪽) 리셋 버튼 (2026-10-22 R200)
+        installPresetResetButton(node);
+      } catch (_) {
+        /* 리셋 버튼 설치 실패는 조용히 무시 — 프리셋 동기화는 그대로 */
+      }
+      try {
+        // automation 바 폭을 preset 바와 맞춘다 (2026-10-22 23:07)
+        installAutomationBarMatch(node);
+      } catch (_) {
+        /* 폭 정합 실패는 조용히 무시 — automation 은 원래 폭으로 그려진다 */
+      }
+      try {
+        // ↻ 아래 칸(automation 행 스트립)의 저장 버튼 (2026-10-23).
+        // **나중에 쓰려고 미리 만들어 둔 것 — 지금은 숨긴다**(사용자 지정
+        // 2026-10-23 01:04). 코드는 전부 남아 있고 이 호출만 주석으로 막아
+        // 화면에 나타나지 않는다. 다시 쓸 때 아래 줄의 주석을 푼다.
+        // 폭 정합 뒤에 설치해야 이중 축소가 없다 (F28 소스 계약).
+        // installPresetSaveButton(node);
+      } catch (_) {
+        /* 저장 버튼 설치 실패는 조용히 무시 — Ctrl+S 로 저장할 수 있다 */
       }
       try {
         // ai_llm_setup 헤더 삽입 — motion2 아래, JS 전용(serialize:false)
@@ -2108,6 +2822,14 @@ export {
   computePopupScreenPos, fitPopupBox, POPUP_MIN_VISIBLE_PX, popupContentScale,
   MULTI_WIDGET_NAMES, MULTI_AUTO_LABEL,
   WIDGET_DISPLAY_LABELS, widgetDisplayName,
+  PRESET_RESET_STRIP_W, presetMemoryOf, snapshotPresetFields,
+  applyPresetFields, presetDefaultFields, rememberCurrentPresetFields,
+  runPresetReset, presetResetHitX, drawPresetResetIcon,
+  runPresetWidgetReset,
+  PRESET_RESET_SLOT_FALLBACK_H, presetResetHoveredAt, presetResetHovered,
+  drawComboBodyShrunk, installAutomationBarMatch,
+  installPresetResetButton,
+  runWorkflowSave, drawPresetSaveIcon, installPresetSaveButton,
   findLlmHeaderWidget, llmFoldGroupWidgets, measureLlmFoldFootprint,
   setLlmSectionFolded, toggleLlmSectionFolded, applyLlmFoldFromProperties,
   resolveLlmFolded, installLlmSetupHeader, drawLlmSetupHeader,

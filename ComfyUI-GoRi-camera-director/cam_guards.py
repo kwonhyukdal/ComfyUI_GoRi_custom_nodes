@@ -29,16 +29,30 @@ try:
     from .cam_translate import background_ref_slot
 except ImportError:  # 스탠드얼론/테스트 실행용
     from cam_translate import background_ref_slot
+# 손 배치 표지 판정기는 cam_physics 가 이미 갖고 있다(_kw_hit). 복사하면
+# "한글은 부분 일치 / 영문은 단어 경계 + 어미" 규칙이 두 벌이 되어 한쪽만
+# 고치는 결함을 만든다(tripod→fall 오탐을 막은 그 규칙). cam_physics 는
+# cam_util·cam_subject 만 가져오므로 여기서 가져와도 순환이 없다.
+try:
+    from .cam_physics import _kw_hit
+except ImportError:  # 스탠드얼론/테스트 실행용
+    from cam_physics import _kw_hit
 
 
 __all__ = [
-"QUALITY_GUARD", "QUALITY_GUARD_ANIMAL", "FACE_IDENTITY_GUARD", "SKIN_COLOR_GUARD", "NEGATIVE_ANATOMY_GUARD", "NEGATIVE_COLOR_CONTAMINATION_GUARD", "_NEGATIVE_BASE_COMMON", "OUTFIT_GUARD", "NUDITY_KEYWORDS", "NUDITY_PARTIAL_KEYWORDS", "_is_partial_exposure",
+"QUALITY_GUARD", "QUALITY_GUARD_ANIMAL", "QUALITY_GUARD_SCENE", "quality_guard_text", "FACE_IDENTITY_GUARD", "SKIN_COLOR_GUARD", "NEGATIVE_ANATOMY_GUARD", "NEGATIVE_COLOR_CONTAMINATION_GUARD", "_NEGATIVE_BASE_COMMON", "OUTFIT_GUARD", "NUDITY_KEYWORDS", "NUDITY_PARTIAL_KEYWORDS", "_is_partial_exposure",
     "_is_nudity_request", "nudity_anatomy_guard", "coverage_guard",
     "EXPLICIT_COVER_KEYWORDS", "EXPLICIT_REVEAL_KEYWORDS",
-    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "FINGER_SEPARATION_POSITIVE", "SCENE_FINGER_CUE", "scene_finger_cue", "HAND_INTEGRITY_POSITIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_background_dna_slots", "_furniture_background_guard", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
+    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "FINGER_SEPARATION_POSITIVE", "SCENE_FINGER_CUE", "scene_finger_cue", "HAND_INTEGRITY_POSITIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_background_dna_slots", "_furniture_background_guard", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_POSITIVE_SLOT", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "FOOTWEAR_BARE_POSITIVE", "FOOTWEAR_BARE_NEGATIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
     "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "SCENERY_BACKGROUND_POSITIVE", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
+    "SEAT_OCCUPANCY_POSITIVE", "SEAT_OCCUPANCY_NEGATIVE", "SEAT_ORIENTATION_POSITIVE", "FURNITURE_PLACEMENT_LOCK_NON_SEAT",
     "GROUND_REF_NEGATIVE", "ground_reference_guard",
-    "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio"
+    "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio",
+    "HAND_PLACEMENT_POSITIVE", "HAND_PLACEMENT_NEGATIVE", "HAND_PLACE_MARKERS",
+    "hand_placement_marks",
+    "COMPACT_ANATOMY_POSITIVE", "COMPACT_FOOTWEAR_POSITIVE",
+    "COMPACT_FOOTWEAR_POSITIVE_SLOT", "COMPACT_BOUNDARY_POSITIVE",
+    "compact_footwear_guard"
 ]
 
 
@@ -60,6 +74,37 @@ QUALITY_GUARD_ANIMAL = (
     "detailed fur or feather texture, natural coat pattern, "
     "clear eyes, consistent subject identity"
 )
+
+
+# 사람도 동물도 아닌 주제(풍경·사물) 전용 대체 가드. 왜(Why) 별도 상수인가:
+# QUALITY_GUARD 의 "believable hands with five fingers, natural skin texture"
+# 는 사람 전용인데, 판정이 "동물 전용인가"(_only_animal) 하나뿐이라 풍경·사물
+# 주제에도 손·피부 문구가 붙었다(2026-10-25 감사). 사람 여부로도 갈라 준다.
+QUALITY_GUARD_SCENE = (
+    "high visual quality, "
+    "clear shapes and clean detail, consistent subject identity"
+)
+
+
+def quality_guard_text(topic: str = "") -> str:
+    """주제에 맞는 품질 가드 상수 (사람 / 동물 전용 / 비인간 장면).
+
+    왜(Why) 한 곳에 모으나: 이 분기가 base run(assemble -> add_quality_guard)과
+    Skills(run_prompt) 두 곳에 흩어져 있었다. 게이트가 "동물 전용인가" 하나뿐이라
+    풍경·사물 주제에도 사람 전용 손·피부 문구가 붙었고(2026-10-25 감사),
+    두 사본이 갈리면 한쪽만 고쳐진다. 판정을 이 함수 하나로 모은다.
+    """
+    _topic = topic or ""
+    try:
+        if _is_human_subject(_topic):
+            return QUALITY_GUARD
+        if _is_animal_subject(_topic):
+            return QUALITY_GUARD_ANIMAL
+        return QUALITY_GUARD_SCENE
+    except Exception:  # noqa: BLE001
+        # 판정 실패는 사람 가드로 폴백한다 — 손·피부 문구가 남는 쪽이
+        # 비인간 주제에 붙는 것보다 안전하다(사람 주제 이탈 방지).
+        return QUALITY_GUARD
 
 
 FACE_IDENTITY_GUARD = (
@@ -252,6 +297,89 @@ FURNITURE_ORIENTATION_POSITIVE = (
 )
 
 
+# 좌석 접촉점 (2026-10-24, R226). 왜(Why) 필요한가: 사용자 제보 — 여성이
+# **팔걸이에 걸터앉았다**(좌석이 아님). 실측한 최종 프롬프트(영어 8475자)에
+# 좌석 접촉 문구가 **0개**였다(`seat·seated·thighs·sitting posture` 0건).
+# 기존 body-object boundary 는 "몸이 사물에 녹아들지 말라"는 **경계**일 뿐
+# **어디에 앉는가**를 말하지 않는다. 그래서 좌석 슬롯에만 접촉점을 따로 못박는다.
+# 경계와 접촉점을 한 상수에 섞지 않는 이유: 경계(비융합)와 접촉점(체중이 좌석에)
+# 는 다른 요구라 한쪽만 끌 때 갈라진다.
+SEAT_OCCUPANCY_POSITIVE = (
+    "seated contact: the seated person's weight rests on the seat cushion — the "
+    "pelvis and thighs settle onto the seat surface, the back rests against the "
+    "backrest, and both feet reach the floor in front of the seat. The body is "
+    "never perched on an armrest, on the top edge of the seat back, or on the "
+    "front rail: the seat pan carries the weight, not the frame."
+)
+
+
+SEAT_OCCUPANCY_NEGATIVE = (
+    "sitting on the armrest, perched on the seat back edge, perched on the front "
+    "rail, sitting on the frame instead of the seat, hips above the armrest "
+    "line, floating above the seat, body balanced on an edge of the chair"
+)
+
+
+# 착석 시 좌석 방향 (2026-10-24, R226). 왜(Why) orientation lock 을 갈아 끼우나:
+# 참조 2번이 **빈 의자 제품샷**이라 orientation lock 이 "제품샷에서 카메라를
+# 향한 면이 결과에서도 카메라를 향한다"를 강제했다. 장면은 "여성이 의자에
+# 앉는다"이므로 그 제약이 좌석 개구부와 앉는 사람을 어긋나게 만들었다(실측:
+# 의자가 좌측으로 돌아가고 여성이 팔걸이에 걸침). 좌석에서는 **앉는 사람을 받는
+# 방향**이 맞다. 형태·접촉·개수는 그대로 두고 방향 조항만 바꾼다 — 그래야
+# R158(2026-10-19)·2026-10-22 의 형태 충실 계약이 흔들리지 않는다.
+#
+# R229 (2026-10-24): 위 R226 문장을 **그대로 둔 채** 뒤에 두 가지를 덧붙인다.
+# 왜(Why): R228 뒤 실기에서도 등받이가 인물 **왼쪽 뒤에만** 있고 오른쪽 어깨 뒤에는
+# 벽뿐이었다 — 개구부가 앉는 사람 정면을 안 보고 약 40~60도 돌아가 있었다. R228 로
+# 배치 고정 조항(`same placement in the frame`·`rests exactly where it rests`)을 다
+# 뺐는데도 모델이 참조 2번(3/4 제품샷)의 각도를 붙잡았다. 그래서 방향 지시를
+# **그림에서 확인 가능한 형태**(좌석 앞변·앞다리·등받이·윙의 위치)로 적고, 참조의
+# 제품샷 카메라각은 따라가지 말라고 **명시적 예외**를 둔다. 기존 문장을 건드리지
+# 않으므로 R226/R228 의 부분문자열 검사가 그대로 살아 있다(후보 A).
+SEAT_ORIENTATION_POSITIVE = (
+    "seat orientation: the chair is turned so its seat opening faces the seated "
+    "person — the person sits into the seat, not beside or across it. The chair "
+    "keeps its exact construction, legs, armrests, wings and backrest shape from "
+    "reference image {slots}, only its turn in the room changes so that the seat "
+    "accepts the sitter. The chair faces the seated person squarely: the front "
+    "edge of the seat runs parallel to the bottom of the image, the two front "
+    "legs stand level and side by side at the bottom, and the backrest stands "
+    "directly behind the sitter's back with the wings on both sides of the "
+    "sitter — the chair is never swung around to one side. The camera angle of "
+    "reference image {slots} does not carry over: even if that reference shows "
+    "the chair in a three-quarter product view, the chair here is turned so its "
+    "seat opening faces the seated person directly."
+)
+
+
+# 좌석 슬롯에서 배치·참조 위치 고정 표현을 뺀다 (2026-10-24, R228). 왜(Why):
+# R226 을 실기로 돌린 결과 좌석 개구부가 앉는 사람 쪽으로 **많이** 돌아왔으나
+# 아직 어긋났다(사용자: "많이 좋아졌는데 아직 다른 곳을 보고 있어"). 최종
+# 프롬프트(영어 9043자)를 뽑아 보니 방향을 되돌리는 조항이 셋이었다 —
+#   prop identity guard: … same placement in the frame.
+#   contact lock: … rests exactly where it rests in its reference image …
+#   seat orientation: … only its turn in the room changes …
+# 돌리라는 조항 1개 대 배치를 참조에 묶는 조항 2개라 모델이 타협했다. 좌석
+# 슬롯에서만 **배치·참조 위치 고정 표현을 제거**한다 — 형태·실루엣·재질·개수와
+# 바닥 접촉은 그대로 남는다. 문자열은 원본 상수에서 **파생**해 단일 출처를 지킨다
+# (손으로 복사하면 한쪽만 고치는 사고가 난다 — R225 `_FOOTWEAR_LOCK_TAIL` 교훈).
+_FURNITURE_PLACEMENT_FRAGMENT = (
+    "same proportions and part count, same placement in the frame")
+_FURNITURE_CONTACT_FRAGMENT = (
+    "rests exactly where it rests in its reference image, firmly touching the "
+    "same surface")
+_FURNITURE_CONTACT_SEAT_FRAGMENT = (
+    "stands firmly on the ground on the same legs and supports")
+# 섞인 슬롯(좌석 + 비좌석)에서 **비좌석** 사물의 배치 고정을 되돌려 준다.
+# 좌석만 있는 실행에서는 나가지 않는다. 문장이 갈라지는 이유: 앞의 DNA·contact
+# 문장은 모든 슬롯에 공통이라, 좌석만 면제하려면 비좌석 몫을 따로 적어야 한다.
+FURNITURE_PLACEMENT_LOCK_NON_SEAT = (
+    "Every other object in reference image(s) {slots} also keeps its exact "
+    "placement in the frame and rests exactly where it rests in its reference "
+    "image."
+)
+
+
 # 배경 슬롯의 사물 충실 가드 (2026-10-22 실측, 파란 동그라미).
 # 왜(Why) R158(2026-10-19) 이후에도 필요한가: 그때는 배경 슬롯의 사물 가드를
 # 통째로 껐다(접촉·방향·개수 문구가 없는 사물을 만들어 냈다 — 사용자 제보
@@ -309,13 +437,26 @@ SCENERY_BACKGROUND_POSITIVE = (
 )
 
 
-def _furniture_dna_guard(text: str, object_slots) -> str:
+def _furniture_dna_guard(text: str, object_slots, seat_slots=None) -> str:
     """가구·사물 DNA positive 문구. 사물 슬롯이 없으면 "".
 
     기본값(사용자 지적 반영): topic에 "2번 침대 원본"을 **안 써도** 켜져야 한다.
     사물도 참조가 곧 DNA이므로, 참조로 들어온 사물은 사용자가 별도로 지시하지
     않는 한 형태를 그대로 따라야 한다. 오직 style/mood/lighting 전용으로
     명시된 슬롯만 예외로 뺀다.
+
+    seat_slots (2026-10-24, R226): 좌석 관계인 슬롯(의자에 앉는다). 그 슬롯은
+    **방향 조항 하나만** 좌석 방향 문구(SEAT_ORIENTATION_POSITIVE)로 갈아 끼운다.
+    `prop identity guard`·`contact lock`·`single instance guard` 는 그대로 남겨
+    형태·접촉·개수 충실(R158/2026-10-22)을 지킨다. 기본값 None 이면 종전과
+    **바이트 동일**하다 — 기존 호출·검사(한 인자)는 아무것도 바뀌지 않는다.
+
+    R228 (2026-10-24): 좌석 슬롯에서는 배치·참조 위치 고정 표현도 뺀다. R226 뒤
+    실기에서 좌석 방향이 **부분적으로만** 돌아왔고, 최종 프롬프트에 방향을
+    되돌리는 조항이 둘(`same placement in the frame` · `rests exactly where it
+    rests in its reference image`) 남아 `seat orientation` 과 경쟁했다. 좌석
+    슬롯에서만 그 두 표현을 제거하고 바닥 접촉은 유지한다. 섞인 슬롯이면 비좌석
+    몫의 배치 고정을 별도 문장(FURNITURE_PLACEMENT_LOCK_NON_SEAT)으로 되돌린다.
     """
     try:
         slots = sorted(int(x) for x in set(object_slots or []))
@@ -323,6 +464,12 @@ def _furniture_dna_guard(text: str, object_slots) -> str:
         return ""
     if not slots:
         return ""
+    # 좌석 슬롯은 **대상 사물 슬롯과의 교집합**으로 좁힌다. 좌석 어휘가 있어도
+    # 사물 DNA 대상이 아니면(의상·배경 등) 방향을 바꾸지 않는다.
+    try:
+        seat = set(int(x) for x in set(seat_slots or [])) & set(slots)
+    except (TypeError, ValueError):
+        seat = set()
     # 배경 슬롯은 사물 DNA 대상이 아니다 (2026-10-19 사용자 제보). 배경은 장면
     # 이라 객체 형태·접촉·방향을 강요하면 안 된다. _object_dna_slots 가 이미
     # 배경 슬롯을 제외하지만, 호출자가 직접 넘기는 경우까지 막는다. **넘어온
@@ -349,11 +496,38 @@ def _furniture_dna_guard(text: str, object_slots) -> str:
             "Take only the mood and lighting from it, not the object shape."
         ) + f" This applies specifically to reference image(s) {slots and ', '.join(str(x) for x in slots)}."
     listed = ", ".join(str(x) for x in slots)
-    return (FURNITURE_DNA_POSITIVE
-            + f" This applies specifically to reference image(s) {listed}."
-            + " " + FURNITURE_CONTACT_POSITIVE
-            + " " + FURNITURE_ORIENTATION_POSITIVE
-            + " " + OBJECT_INSTANCE_POSITIVE)
+    # 좌석 슬롯이면 방향 조항만 갈아 끼운다 (2026-10-24, R226). 섞이면 좌석/비좌석
+    # 목록을 나눠 각 문구의 지목을 좁힌다 — orientation lock 은 비좌석 슬롯에만,
+    # seat orientation 은 좌석 슬롯에만 걸리게 한다.
+    _seat_list = ", ".join(str(x) for x in sorted(seat))
+    _non_list = ", ".join(str(x) for x in slots if x not in seat)
+    if seat and not _non_list:
+        orient = SEAT_ORIENTATION_POSITIVE.format(slots=_seat_list)
+    elif seat:
+        orient = (SEAT_ORIENTATION_POSITIVE.format(slots=_seat_list)
+                  + " " + FURNITURE_ORIENTATION_POSITIVE
+                  + f" This applies specifically to reference image(s) "
+                    f"{_non_list}.")
+    else:
+        orient = FURNITURE_ORIENTATION_POSITIVE
+    # 좌석 슬롯은 배치·참조 위치 고정 표현을 뺀다 (2026-10-24, R228). 좌석이
+    # 없으면 원본 상수를 그대로 써서 종전과 바이트 동일하다.
+    if seat:
+        dna = FURNITURE_DNA_POSITIVE.replace(
+            _FURNITURE_PLACEMENT_FRAGMENT, "same proportions and part count")
+        contact = FURNITURE_CONTACT_POSITIVE.replace(
+            _FURNITURE_CONTACT_FRAGMENT, _FURNITURE_CONTACT_SEAT_FRAGMENT)
+    else:
+        dna = FURNITURE_DNA_POSITIVE
+        contact = FURNITURE_CONTACT_POSITIVE
+    parts = [dna + f" This applies specifically to reference image(s) {listed}."]
+    # 섞인 슬롯이면 비좌석 몫의 배치 고정을 되돌린다 (좌석만이면 나가지 않는다).
+    if seat and _non_list:
+        parts.append(FURNITURE_PLACEMENT_LOCK_NON_SEAT.format(slots=_non_list))
+    parts.append(contact)
+    parts.append(orient)
+    parts.append(OBJECT_INSTANCE_POSITIVE)
+    return " ".join(parts)
 
 
 def _furniture_background_guard(text: str, background_slots) -> str:
@@ -559,6 +733,16 @@ def _object_dna_slots(topic: str, image_labels, image_count: int) -> set:
                                        or list(range(1, image_count + 1)))]
         plan = _person_object_plan(topic or "", labels)
         excluded = {plan["main"]} | set(plan["persons"]) | set(plan["poses"])
+        # 선언된 의상 슬롯도 사물 DNA 대상이 **아니다** (2026-10-24, R225).
+        # 왜(Why): `3번: 하이 힐` 처럼 선언된 슬롯은 "입을 옷/신을 신발" 이지
+        # 화면에 놓인 소품이 아니다. 사물 DNA 는 접촉·방향·개수·배치를 고정
+        # 하므로 입는 물건에 붙으면 정반대 지시가 된다 — 실측: 최종 프롬프트에
+        # `prop identity guard … applies specifically to reference image(s) 2, 3`
+        # 이 나가 신발 참조 3번이 제품샷 자세로 고정됐고, 같은 슬롯을 향하는
+        # 문구는 어디에도 없었다. 부수 효과로 사물 표면 대표색 가드도 그 슬롯을
+        # 읽지 않는다(제품샷 색을 사물 표면색으로 굳히던 경로가 함께 사라진다).
+        # 회귀 위험 낮음: 의상 선언이 없는 입력은 plan["outfits"] 가 빈 집합이다.
+        excluded |= set(plan["outfits"])
         # 배경 슬롯은 사물 DNA 대상이 **아니다** (2026-10-19 사용자 제보).
         # 배경은 장면이지 가구·사물이 아니다 — "배경: 2번 이미지" 를 사물로
         # 취급하면 contact lock·seat backs·orientation lock 이 나가 모델이
@@ -628,10 +812,12 @@ def add_quality_guard(prompt: str, image_count: int = 0, topic: str = "", image_
     _intent = intent_core(topic or "")
     _topic = _intent or (topic or "")
     # 동물 전용 주제면 사람 손·피부 품질 문구가 정면 모순이다. 사람/동물
-    # 혼재 장면은 사람 가드를 유지한다(사람이 있으면 필요하다).
-    _only_animal = _is_animal_subject(_topic) and not _is_human_subject(_topic)
-    parts = [p for p in [prompt, QUALITY_GUARD_ANIMAL if _only_animal
-                         else QUALITY_GUARD] if p]
+    # 혼재 장면은 사람 가드를 유지한다(사람이 있으면 필요하다). 풍경·사물
+    # (사람도 동물도 아님) 은 비인간 장면 가드를 쓴다 — 손·피부 문구를 뺀다
+    # (2026-10-25 감사). 판정은 quality_guard_text 한 곳에 모여 있다.
+    _quality = quality_guard_text(_topic)
+    _only_animal = _quality == QUALITY_GUARD_ANIMAL
+    parts = [p for p in [prompt, _quality] if p]
     ref_guard = reference_guard(image_count, image_labels=image_labels, topic=_topic)
     if ref_guard:
         parts.append(ref_guard)
@@ -980,6 +1166,75 @@ HAND_INTEGRITY_POSITIVE = (
     "finger boundaries clear, " + FINGER_SEPARATION_POSITIVE + ", "
     "no fingers merged or blurred together"
 )
+
+
+# 손 배치 가드 (2026-10-24 실측, R220).
+# 왜(Why) 새 문구가 필요한가: 손 계열 상수 네 개가 **전부 "한 손 안에서 손가락
+# 다섯 개·경계 분리"** 만 말한다(FINGER_SEPARATION_POSITIVE, HAND_INTEGRITY_
+# POSITIVE, ANATOMY_COUNT_POSITIVE_UPPER, LEG_FOOT_INTEGRITY_POSITIVE 안의 손
+# 문장). 앉아서 "양 손을 무릎에" 올린 실패는 **두 손 사이**에서 났다 — 좌우 손이
+# 겹치고 한 덩어리로 합쳐지고 손가락이 서로 넘어갔다. 어느 상수도 그 실패를
+# 덮지 않았다.
+# 왜(Why) positive 인가: 이 워크플로의 KSampler 는 cfg=1.0 이라 ComfyUI 샘플러가
+# negative conditioning 을 계산조차 하지 않는다(LEG_FOOT_INTEGRITY_POSITIVE 와
+# 같은 실측). 게다가 denoise=1.0 이라 참조 픽셀이 폐기되어 손의 픽셀 근거가 없다.
+# 그래서 **positive 문구가 유일한 방어**다.
+# 한계(정직): 확률을 올릴 뿐 보장하지 않는다. 효과는 같은 시드 A/B 로만 잴 수
+# 있다(오프라인에서 샘플러 추종을 잴 수 없다).
+HAND_PLACEMENT_POSITIVE = (
+    "hand placement: where the left hand and the right hand rest, each one "
+    "keeps its own place and its own outline, the left hand and the right "
+    "hand never overlap and never stack on top of one another and never "
+    "merge into a single shape, no finger of one hand reaches across onto "
+    "the other hand, the thumbs stay on the outer sides, the palms and the "
+    "backs of the hands stay clearly readable where they rest"
+)
+
+# 짝 negative. cfg=1.0 에서는 전달되지 않지만(샘플러가 계산하지 않는다),
+# cfg>1 워크플로와 식별기 경로를 위해 짝을 함께 둔다 — 한쪽만 붙이면 짝인
+# 방어가 조용히 사라진다(2026-09-28 실측).
+HAND_PLACEMENT_NEGATIVE = (
+    "overlapping hands, one hand stacked on top of the other, the two hands "
+    "merged into a single shape, a finger reaching across onto the other "
+    "hand, extra long fingers, too many fingers on one hand"
+)
+
+# 손 배치 표지 (2026-10-24). 왜(Why) 넓은 "손" 이 아니라 **배치 구문**인가:
+# 손이 화면에 있는 것만으로는 두 손이 붙을 위험이 없다. 위험은 손이 **한 곳에
+# 모이거나 표면에 놓일 때**다. 넓게 잡으면 관계없는 장면의 결과가 함께 흔들린다.
+# 그래서 "손등을·손바닥을" 처럼 위치를 말하지 않는 구문은 넣지 않는다 —
+# "손등을 내밀었다" 는 두 손이 붙는 장면이 아니다.
+HAND_PLACE_MARKERS = (
+    # 한글 — 손이 한 곳에 모이거나 표면에 놓이는 구문
+    "무릎에", "무릎 위", "무릎을", "품에", "품 안", "가슴 앞",
+    "양손을", "양 손을", "두 손을", "두손을", "한 손을",
+    "손을 무릎", "손을 올", "손을 얹", "손을 대", "손을 짚",
+    "손을 포개", "손을 겹", "손을 모",
+    # 영문 — 같은 뜻 (판정은 단어 경계 + 어미라 "hands"·"her knees" 를 잡는다)
+    "on the knees", "on her knees", "on his knees", "on the lap",
+    "on her lap", "on his lap", "in her lap", "in his lap",
+    "hands on", "both hands", "hands resting", "hands folded",
+    "folded hands", "hands together", "hands clasped", "palms down",
+)
+
+
+def hand_placement_marks(text) -> bool:
+    """장면이 손을 한 곳에 모으거나 표면에 놓는가 (사람 판정은 호출부 몫).
+
+    왜(Why) 사람 판정을 여기서 안 하나: `resolve_guard_plan` 이 이미 텍스트
+    판정과 참조 픽셀 힌트를 합쳐 사람 여부를 정한다. 여기서 다시 판정하면 두
+    벌이 갈라져 한쪽만 붙는 사고가 난다(scene_finger_cue 와 같은 규칙).
+    왜(Why) 소문자로 넘기나: `_kw_hit` 의 영문 정규식은 단어 경계 + 어미만
+    허용하고 대소문자를 구분하지 않는다. cam_physics 도 같은 방식이다.
+    """
+    try:
+        t = (text or "").lower()
+        if not t:
+            return False
+        return _kw_hit(t, HAND_PLACE_MARKERS)
+    except Exception:  # noqa: BLE001
+        return False
+
 
 
 # 다리·발·종아리 무결성 positive (2026-10-21 사용자 실측). 왜(Why) positive 인가:
@@ -1336,6 +1591,11 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
         neg.append(FURNITURE_DNA_NEGATIVE)
         neg.append(OBJECT_DRIFT_NEGATIVE)
         neg.append(OBJECT_INSTANCE_NEGATIVE)
+    # 좌석 접촉점 (2026-10-24, R226) — positive(SEAT_OCCUPANCY_POSITIVE)의 짝이다.
+    # cfg=1.0 워크플로에서는 negative 가 무효지만, 다른 cfg 워크플로에서 lever 가
+    # 되도록 저장소 관례대로 짝을 만든다.
+    if flags.get("seat"):
+        neg.append(SEAT_OCCUPANCY_NEGATIVE)
     if flags.get("furniture_bg"):
         # 배경 참조의 사물 충실 가드와 짝 (2026-10-22). 존재를 요구하는
         # OBJECT_INSTANCE_NEGATIVE 는 넣지 않는다 — 우리가 요구하지 않은
@@ -1347,13 +1607,22 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
         _rm = _remove_item_guard(topic)
         if _rm:
             neg.append(_rm)
-    if flags.get("footwear"):
+    if flags.get("footwear_bare"):
+        # 맨발 주제면 신발 negative 가 아니라 **신발 등장**을 막는 짝을 쓴다
+        # (2026-10-25 F3). 종전 FOOTWEAR_NEGATIVE 는 "bare feet, barefoot" 를
+        # 금지하므로 맨발 요구와 정면 충돌한다.
+        neg.append(FOOTWEAR_BARE_NEGATIVE)
+    elif flags.get("footwear"):
         neg.append(FOOTWEAR_NEGATIVE_UPPER if flags.get("footwear_upper") else FOOTWEAR_NEGATIVE)
     if flags.get("body_object_boundary"):
         neg.append(BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER if flags.get("body_object_boundary_upper") else BODY_OBJECT_BOUNDARY_NEGATIVE)
     # 의복 경계 (2026-10-16) — positive 와 짝이다.
     if flags.get("garment_boundary"):
         neg.append(GARMENT_BOUNDARY_NEGATIVE_UPPER if flags.get("garment_boundary_upper") else GARMENT_BOUNDARY_NEGATIVE)
+    # 손 배치 (2026-10-24) — positive(HAND_PLACEMENT_POSITIVE)와 짝이다.
+    # cfg=1.0 이면 전달되지 않지만 cfg>1 워크플로와 식별기 경로를 위해 둔다.
+    if flags.get("hand_placement"):
+        neg.append(HAND_PLACEMENT_NEGATIVE)
     if _needs_scale_guard(topic or "", cam):
         neg.append(SCALE_COHERENCE_NEGATIVE)
     # 얼굴 정체성 negative (2026-10-20). 포즈 지시가 있으면 모델이 인물을
@@ -1385,10 +1654,13 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
                           detail_def_upper: bool = False,
                           footwear: bool = False,
                           footwear_upper: bool = False,
+                          footwear_bare: bool = False,
                           body_object_boundary: bool = False,
                           body_object_boundary_upper: bool = False,
                           garment_boundary: bool = False,
                           garment_boundary_upper: bool = False,
+                          hand_placement: bool = False,
+                          seat: bool = False,
                           aspect_ratio: float = None) -> str:
     """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
     return _assemble_negative(
@@ -1401,10 +1673,12 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
          "anatomy_count_upper": anatomy_count_upper,
          "detail_def_upper": detail_def_upper,
          "footwear": footwear, "footwear_upper": footwear_upper,
+         "footwear_bare": footwear_bare,
          "body_object_boundary": body_object_boundary,
          "body_object_boundary_upper": body_object_boundary_upper,
          "garment_boundary": garment_boundary,
-         "garment_boundary_upper": garment_boundary_upper},
+         "garment_boundary_upper": garment_boundary_upper,
+         "hand_placement": hand_placement, "seat": seat},
         "unwanted color cast", physics_neg=physics_neg, pose_ref=pose_ref,
         prevent_duplicates=prevent_duplicates, aspect_ratio=aspect_ratio)
 
@@ -1605,14 +1879,46 @@ BODY_BALANCE_NEGATIVE = ("disproportionate limbs, elongated arms, shortened legs
 # 신발 유지 가드. 왜(Why): 참조에 신발이 있어도 생성에서 맨발이 됐다.
 # PARTIAL_OBJECT_NEGATIVE 는 벗긴 뒤 반쪽 찌꺼기만 막고, 신발 존재 자체를
 # positive 로 지키는 문구가 없었다. 인물 + 참조 실행에만 붙는다.
+#
+# 2026-10-24 (R225) — 지목 대상 분리. 문구 내용은 그대로 두고 **어느 참조를
+# 가리키는가**만 뗄 수 있게 꼬리를 상수로 뽑았다. 왜(Why) 필요한가: 사용자가
+# `3번: 하이 힐` 로 신발 참조를 선언해도 이 문구가 "the main person reference
+# image"(1번)를 가리켜, 참조 3번의 힐이 쓰이지 않고 1번의 흰 슬립온이 샜다
+# (실측: 최종 프롬프트 8418자에 `… from the main person reference image …`).
+# 2026-10-24 (R227) — 꼬리 내용 자체를 중립화. 왜(Why) R225 로 부족했나:
+# 지목이 3번으로 맞아도 문구가 **참조에 없는 구조를 단정**하고 있었다.
+#  · `same strap style and arrangement` — 펌프스에는 스트랩이 없다. "같은
+#    스트랩"을 요구하면 모델이 스트랩을 만들어낸다.
+#  · `in open-toe shoes all five toes are bare … toes sit clear of the straps`
+#    — 무조건 오픈토를 전제하고, 스트랩이 있다는 가정이 또 들어 있다.
+# 실측(2026-10-24 04:57 생성물, 참조 3번 = 검은 뾰족코 클로즈드토 스틸레토):
+# 결과는 **검은 오픈토 보우 스트랩 샌들**이었다 — 색만 따라왔고 구조는 문구가
+# 이겼다. 같은 실행에서 1번 참조의 흰 슬립온이 나오지 않은 것이 그 증거다
+# (문구 > 이미지). 그래서 앞코 구조를 **조건문**으로 바꾸고(닫힘이면 가려진
+# 게 맞다고 명시해 해부 가드의 "five toes" 와의 충돌을 푼다), 없는 장식 추가
+# 금지와 다른 참조에서의 신발 유입 금지를 더한다. 열린 앞코의 발가락 융합
+# 방지(R165 계약)는 조건문 안에 그대로 남는다.
+_FOOTWEAR_LOCK_TAIL = (
+    "same colour, same silhouette, same toe shape and upper design as the "
+    "reference, same heel height, same material, "
+    "same shoes on both feet, laces and soles intact, do not change the shoe colour, "
+    "do not swap to a different shoe style, do not make the person barefoot, "
+    "take no footwear from any other reference image, "
+    "keep the reference toe construction exactly: if the reference shoes have a "
+    "closed toe the toe is fully covered with no bare toes showing (a closed toe "
+    "hides the toes and that is correct), if they have an open toe all five toes "
+    "are bare, individually outlined and clear of the shoe edge, never fused with "
+    "the shoe upper or wrapped in fabric, "
+    "do not add any strap, buckle, bow or lace that the reference shoes do not have")
+
 FOOTWEAR_POSITIVE = ("footwear identity lock: preserve the exact shoes from the main person reference image — "
-                     "same colour, same silhouette, same strap style and arrangement, same heel height, same material, "
-                     "same shoes on both feet, laces and soles intact, do not change the shoe colour, "
-                     "do not swap to a different shoe style, do not make the person barefoot, "
-                     "toes stay separate from the shoe: in open-toe shoes all five toes are "
-                     "bare, individually outlined and fully visible from tip to base, "
-                     "uniform bare skin across every toe, toes sit clear of the straps "
-                     "and are not tucked under the shoe upper")
+                     + _FOOTWEAR_LOCK_TAIL)
+
+# 선언된 신발 참조 슬롯을 지목하는 변형 (2026-10-24, R225). `_footwear_guard` 가
+# `slots` 를 받았을 때만 `{slot}` 을 채워 쓴다. 꼬리는 위 상수와 **같은 출처**라
+# 두 변형이 갈릴 수 없다 — 문구를 늘릴 때 한쪽만 고치는 사고를 막는다.
+FOOTWEAR_POSITIVE_SLOT = ("footwear identity lock: preserve the exact shoes from reference image {slot} — "
+                           + _FOOTWEAR_LOCK_TAIL)
 
 
 # 신발 교체 가드. 왜(Why) 별도 상수인가 (2026-10-15 실측): FOOTWEAR_POSITIVE 는
@@ -1623,20 +1929,34 @@ FOOTWEAR_POSITIVE = ("footwear identity lock: preserve the exact shoes from the 
 # resolve_guard_plan 이 교체 의도(_topic_changes_shoes)를 감지하면 이
 # 변형으로 갈아탄다. negative 는 FOOTWEAR_NEGATIVE 그대로 쓴다 — 방어 대상
 # (맨발·신발 소실)이 같고 "참조 신발 유지" 라는 지시가 없을 뿐이다.
+# 2026-10-24 (R227): 유지 변형과 **같은 조건문**으로 바꿨다. 기준이 참조가
+# 아니라 프롬프트 서술이라 "the prompt describes" 를 쓴다. 왜(Why) 무조건
+# 오픈토를 뺐나: 이 경로에서도 "앞이 막힌 단화" 를 서술하면 같은 충돌이 났다.
 FOOTWEAR_CHANGE_POSITIVE = ("footwear change guard: the footwear described in the prompt takes "
                             "priority — wear exactly the described shoes on both feet, do not copy "
                             "the reference image footwear, do not keep the reference shoes, "
-                            "toes stay separate from the shoe: in open-toe shoes all five toes "
-                            "are bare, individually outlined and fully visible from tip to "
-                            "base, uniform bare skin across every toe, toes sit clear of the "
-                            "straps and are not tucked under the shoe upper")
+                            "keep the toe construction the prompt describes exactly: if the "
+                            "described shoes are closed-toe the toe is fully covered with no bare "
+                            "toes showing (a closed toe hides the toes and that is correct), if "
+                            "they are open-toe all five toes are bare, individually outlined and "
+                            "clear of the shoe edge, never fused with the shoe upper or wrapped "
+                            "in fabric, do not add any strap, buckle, bow or lace that the "
+                            "described shoes do not have")
 
 
+# 신발 negative 짝. 2026-10-24 (R227) — 유지 변형이 앞코 조건문이 되면서
+# 뒤집힘(닫힌 신발의 샌들화)과 없는 장식 추가를 명시적으로 막는다.
+# 왜(Why) cfg=1.0 인데도 고치나: 이 저장소는 positive/negative 를 손으로
+# 동기화한다 — cfg 를 올린 실행에서 짝이 어긋나면 방어가 조용히 사라진다.
 FOOTWEAR_NEGATIVE = ("bare feet, barefoot, missing shoes, missing footwear, lost shoes, "
                      "invisible footwear, deformed footwear, melted shoes, feet without shoes, "
                      "shoes disappearing, one shoe missing, half a shoe, "
                      "shoes in a different colour, changed shoe colour, different shoe style, "
                      "different heel, different straps, footwear swap, wrong shoe colour, "
+                     "sandals where the reference shows closed shoes, closed shoes turned into "
+                     "sandals, open-toe conversion of a closed shoe, added straps, "
+                     "extra straps, added bows, bows not present in the reference, "
+                     "bare toes in closed-toe shoes, toes visible through a closed shoe, "
                      "toe covered by fabric, single toe wrapped in cloth, toe sock, "
                      "rubber sleeve over one toe, fabric strap fused with a toe, "
                      "toe merged into the shoe upper, big toe hidden by the shoe, "
@@ -1650,6 +1970,31 @@ FOOTWEAR_POSITIVE_UPPER = ("footwear presence guard: do not make the person bare
 
 
 FOOTWEAR_NEGATIVE_UPPER = FOOTWEAR_NEGATIVE
+
+
+# 맨발 가드 (2026-10-25 감사 F3). 왜(Why) 새로 두나: 사용자가 "A barefoot woman
+# standing on the beach" 처럼 **맨발을 요구**하면, 종전에는 참조 유지 가드가
+# 그대로 나가 "keep the exact shoes" 와 짝 negative 의 "bare feet, barefoot" 이
+# **같은 실행에서 사용자 문장과 정면 충돌**했다(실측: positive 에 신발 유지 문구
+# 와 함께 맨발 요구가, negative 에 bare feet 금지가 동시에 들어갔다). 맨발 주제
+# 에서는 신발 잠금을 끄고 이 가드로 갈아탄다 — 참조에 신발이 있어도 벗긴다.
+# 뒤쪽 "five separate toes" 는 해부 가드(ANATOMY_COUNT)의 발가락 문구와 **같은
+# 방향**이라 서로 밀어내지 않는다.
+FOOTWEAR_BARE_POSITIVE = (
+    "bare feet guard: the person is barefoot as described — both feet are bare "
+    "with no shoes and no socks, bare skin on the feet, five separate toes on "
+    "each foot with individual outlines, natural heel and sole, do not keep, "
+    "copy or restore any footwear from a reference image")
+
+
+# 맨발 negative 짝. FOOTWEAR_NEGATIVE 와 달리 "bare feet, barefoot" 를 금지하지
+# **않는다** — 그것이 바로 요구된 상태다. 대신 신발·양말이 나타나는 쪽을 막는다.
+# cfg=1.0 워크플로에서는 전달되지 않지만, 저장소 관례대로 positive 와 짝을
+# 맞춰 둔다 — cfg 를 올린 실행에서도 방어가 어긋나지 않는다.
+FOOTWEAR_BARE_NEGATIVE = (
+    "shoes appearing on bare feet, unexpected footwear, shoes added to bare "
+    "feet, socks appearing, slippers on bare feet, bare toes covered by a shoe, "
+    "footwear restored from a reference image, bare feet becoming shod")
 
 
 # 신체-사물 접촉 경계 가드. 왜(Why): FURNITURE_DNA 는 사물 쪽 형태만 지키고
@@ -1719,15 +2064,28 @@ GARMENT_BOUNDARY_NEGATIVE_UPPER = (
 )
 
 
-def _footwear_guard(shot):
+def _footwear_guard(shot, slots=None):
     """샷별 신발 가드 (positive, negative). CU/ECU 면 upper 변형.
 
     다중 선택(콤마)이면 하나라도 CU/ECU 일 때 upper 를 쓴다 (2026-10-21 감사,
     R181) — 통째로 비교하면 전신 변형이 나와 화면에 없는 발 문구가 붙었다.
+
+    `slots` 는 토픽이 **신발 참조로 선언한 슬롯**(`_footwear_slots`)이다.
+    주면 문구가 그 슬롯을 지목하고, 안 주면 종전 문구 그대로다(2026-10-24,
+    R225) — 선언 없는 실행의 프롬프트는 **바이트 동일**해야 한다.
+    여럿이면 작은 번호 하나만 쓴다(먼저 선언된 것).
     """
     try:
         if has_any_label(shot, FACE_CRITICAL_SHOTS):
             return FOOTWEAR_POSITIVE_UPPER, FOOTWEAR_NEGATIVE_UPPER
+        try:
+            _s = sorted(int(x) for x in (slots or ()))
+        except (TypeError, ValueError):
+            # 방어용이다 — `_footwear_slots` 는 1~10 정수만 돌려준다. 값이
+            # 이상하면 슬롯을 모르므로 종전 문구로 물러선다.
+            _s = []
+        if _s:
+            return FOOTWEAR_POSITIVE_SLOT.format(slot=_s[0]), FOOTWEAR_NEGATIVE
         return FOOTWEAR_POSITIVE, FOOTWEAR_NEGATIVE
     except Exception:
         return FOOTWEAR_POSITIVE, FOOTWEAR_NEGATIVE
@@ -1873,6 +2231,59 @@ def _garment_boundary_guard(shot):
         return GARMENT_BOUNDARY_POSITIVE, GARMENT_BOUNDARY_NEGATIVE
 
 
+# ── 참조 충실 모드용 압축 가드 (2026-10-25, E3) ────────────────────────────
+# 왜(Why) 별도 상수인가: 참조 4장 워크플로에서 붉은 방(참조 4번)이 사라지는
+# 원인은 프롬프트 **길이가 아니라 내용**이다. 해부·손·발을 지시하는 문장이
+# 참조를 이긴다 — 같은 길이의 무해한 텍스트는 붉은 벽을 지키는데(33.74% 대
+# 1.42%), 해부 문장은 249~652자만으로 붉은 벽을 무너뜨린다(30.97 -> 0.78%).
+# 측정 기록: docs/dev-loop/2026-10-25-compact-body-guards/spec.md.
+#
+# 왜(Why) 원본 상수를 줄이지 않나: tests/test_node.py 가 `"same colour" in
+# FOOTWEAR_POSITIVE` 같은 문자열을 66곳에서 잠그고 있다. 상수를 줄이면 그
+# 잠금이 "그 문구가 실제로 나간다"는 뜻을 잃는다. 그래서 원본은 그대로 두고
+# **켤 때만** 압축본으로 치환한다.
+#
+# 아래 문장은 E3-1 측정에 쓴 문자열과 **문자 단위로 같다.** 다르게 고치면
+# 붉은 벽 수치(2.18 -> 39.50)가 그 판에 이전되지 않는다.
+COMPACT_ANATOMY_POSITIVE = (
+    "Anatomy stays correct and readable: natural proportions, two arms, two legs, "
+    "two feet with one foot at the end of each leg, five fingers per hand, one "
+    "thumb and four fingers, fingers and limbs separate and whole, no extra or "
+    "missing limb, no joined or blended limbs."
+)
+
+# 신발은 선언 슬롯이 있으면 그 번호를 지목한다(원본 FOOTWEAR_POSITIVE_SLOT 과
+# 같은 이유 — R225). 측정에 쓴 문자열은 슬롯 판(slot=3)이다.
+COMPACT_FOOTWEAR_POSITIVE = (
+    "The shoes keep the exact colour, silhouette and heel of the footwear "
+    "reference image."
+)
+COMPACT_FOOTWEAR_POSITIVE_SLOT = (
+    "The shoes keep the exact colour, silhouette and heel of reference image {slot}."
+)
+
+COMPACT_BOUNDARY_POSITIVE = (
+    "Hands keep their own place and their own outline. Wrists, forearms and legs "
+    "stay distinct from the garment and from any object they rest against."
+)
+
+
+def compact_footwear_guard(slots=None) -> str:
+    """압축 신발 가드. 선언 슬롯이 있으면 그 번호를 지목한다.
+
+    원본 `_footwear_guard` 와 달리 CU/ECU upper 변형을 두지 않는다 — 압축본은
+    화면에 없는 사지를 요구하지 않으므로 upper 분기가 필요 없다(측정은 전신에서
+    했다. 상반신 샷에서의 효과는 미측정).
+    """
+    try:
+        _s = sorted(int(x) for x in (slots or ()))
+    except (TypeError, ValueError):
+        _s = []
+    if _s:
+        return COMPACT_FOOTWEAR_POSITIVE_SLOT.format(slot=_s[0])
+    return COMPACT_FOOTWEAR_POSITIVE
+
+
 # 최종 negative 조립 — 공용 조립기에 힌트/믹스/외양/발란스 방어와 extra 를 덧붙인다
 def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str = "",
                    hint_defense: bool = False, mix_guard: bool = False,
@@ -1887,10 +2298,13 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
                    detail_def_upper: bool = False,
                    footwear: bool = False,
                    footwear_upper: bool = False,
+                   footwear_bare: bool = False,
                    body_object_boundary: bool = False,
                    body_object_boundary_upper: bool = False,
                    garment_boundary: bool = False,
                    garment_boundary_upper: bool = False,
+                   hand_placement: bool = False,
+                   seat: bool = False,
                    sheet_kind: str = "") -> str:
     # 힌트·믹스·외양·발란스 방어는 base 경로 전용이라 조립기가 아니라
     # 여기서 덧붙인다(중복이 아니라 경로별 전용).
@@ -1913,10 +2327,12 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
          "anatomy_count_upper": anatomy_count_upper,
          "detail_def_upper": detail_def_upper,
          "footwear": footwear, "footwear_upper": footwear_upper,
+         "footwear_bare": footwear_bare,
          "body_object_boundary": body_object_boundary,
          "body_object_boundary_upper": body_object_boundary_upper,
          "garment_boundary": garment_boundary,
-         "garment_boundary_upper": garment_boundary_upper},
+         "garment_boundary_upper": garment_boundary_upper,
+         "hand_placement": hand_placement, "seat": seat},
         "color tint", extras=tuple(tail) + (llm_extra, extra),
         physics_neg=physics_neg, pose_ref=pose_ref)
 

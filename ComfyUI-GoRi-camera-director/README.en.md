@@ -6,8 +6,9 @@
 
 Give it one line of scene description (Korean is fine) plus optional reference
 images, and it builds an English prompt with **shot, lens, angle, composition,
-lighting, grade and camera motion** already attached. The result plugs straight
-into Qwen-Image 2.1, and the text alone can be pasted into KREA 2 or MiniMax H3.
+lighting, grade and camera motion** already attached. The prompt works with **any
+image model** — connect that model's CLIP to `clip` and the result plugs straight
+in, or copy the text alone into KREA 2 or MiniMax H3.
 
 - **Works with no API key.** The default mode (rules) picks the camera from a
   Korean/English keyword list, so it runs fully offline.
@@ -25,7 +26,9 @@ Menu         HF Skills / Camera
 
 ## Quick start (3 steps)
 
-1. Type the scene into `topic`. **Korean is fine.**
+1. Type the scene into `topic`. **Korean is fine.** Or connect another node's
+   **text box (STRING) to `topic`** — the camera node auto-classifies and applies
+   the pose, motion and other data that arrives in `topic`.
 2. Connect the final model's CLIP to `clip`.
 3. Connect `positive_out` to the KSampler's `positive` and `negative_out` to
    `negative`, then run.
@@ -41,16 +44,28 @@ photos, connect them from `image_1` upward. The sections below explain each step
 2. Restart ComfyUI.
 3. In the node menu open **HF Skills / Camera** → **(GoRi) Camera Director Skills**.
 
-No extra pip packages are needed. It uses only `torch`, `numpy` and `PIL`, which
-ComfyUI already ships.
+Prompt building needs no extra pip packages. It uses only `torch`, `numpy` and
+`PIL`, which ComfyUI already ships.
+
+> **Reference auto-analysis is optional (section 5-5).** Only this feature, which
+> decides the role of each `image_1`~`image_10` from pixels, uses `mediapipe`.
+> Without `mediapipe` the analysis is silently skipped and prompt building keeps
+> working. If you want it, run `python -m pip install mediapipe` once with the
+> ComfyUI Python.
+>
+> Pose detection also needs a pose model (`pose_landmarker_lite.task`). It ships
+> inside this folder, so nothing else is downloaded. To use a different model,
+> point `GORI_POSE_MODEL` at the full path of the `.task` file. The object model
+> (`efficientdet_lite0.tflite`) ships inside this folder too.
 
 ---
 
 ## 2. First wiring
 
 ```text
+Text box (STRING) ────────────────────────→ topic        (optional)
 Final model CLIP ─────────────────────────→ clip
-Qwen prompt rewriter ──── positive_prompt → prompt_in
+Prompt rewriter ───────── positive_prompt → prompt_in
 Reference photo ──────────────────────────→ image_1
 Pose map (DWPreprocessor, body only) ─────→ pose_image   (optional)
 Final model VAE ──────────────────────────→ vae          (optional)
@@ -62,15 +77,20 @@ Existing negative conditioning ───────────→ negative    
   ├─ negative_out ────────→ KSampler.negative
   ├─ prompt_out ──────────→ Show Text (for checking)
   ├─ image_out ───────────→ I2V start frame / upscale (optional)
-  └─ reference_latent_out → Consistency Keeper.camera_latent (optional)
+  └─ reference_latent_out → KSampler.latent_image / VAE Decode (optional)
 ```
 
 The shortest path is: **type the scene into `topic`, connect `clip`, done.**
 You do not need `prompt_in`; the node builds the prompt from `topic` itself.
 
-> **Connect the final model's CLIP to `clip`.** Qwen-Image 2.1 needs a Qwen
-> CLIP; Flux or SDXL needs its own. Mixing CLIPs from different models can
-> break faces and skin.
+> **You can fill `topic` from a text box instead of typing.** Convert the `topic`
+> field to an input (right-click the field) and connect another node's **text box
+> (STRING)** output. The node auto-classifies and applies the pose, motion and
+> other data that arrives in `topic`, exactly as if you had typed it.
+
+> **Connect the final model's CLIP to `clip`.** Whatever model you render with,
+> use **its own** CLIP. Mixing CLIPs from different models can break faces and
+> skin.
 
 > **Do not connect the prompt rewriter's CLIP here.** Take the rewriter's
 > **string** output (`positive_prompt`) into `prompt_in`, and give `clip` the
@@ -86,16 +106,22 @@ You do not need `prompt_in`; the node builds the prompt from `topic` itself.
 | `negative_out` | CONDITIONING | `KSampler.negative` | Keeps your existing negative and adds failure guards |
 | `prompt_out` | STRING | Show Text, another prompt node | The exact English string used. Copy it into KREA 2 or similar |
 | `image_out` | IMAGE | I2V start frame, upscale | Passes the main reference image through. Empty when no image is connected |
-| `reference_latent_out` | LATENT | Consistency Keeper, VAE Decode | Latent of the main reference. Requires `vae` |
+| `reference_latent_out` | LATENT | KSampler, VAE Decode | Latent of the main reference. Connect `latent_image` and it leaves at **exactly the width and height that node decided**; without `latent_image` it follows the reference image's aspect. Requires `vae` |
 
 > **A sheet image is also dropped from `image_out` and `reference_latent_out`.**
 > Even if a character sheet becomes the main reference, the outputs carry a
 > non-sheet reference instead. Passing the sheet through would make downstream
-> nodes (I2V, upscale, Keeper) draw a multi-panel sheet. If the sheet is the
+> nodes (I2V, upscale) draw a multi-panel sheet. If the sheet is the
 > only connected reference, both outputs are empty.
 
-Connecting `prompt_out` to the Consistency Keeper's `camera_prompt` tells the
-keeper about intent such as "change the outfit" or "change the background".
+> **`reference_latent_out` can be used directly as the sampler's start latent.**
+> Connect an empty latent (Empty Latent Image, Deno Resolution, ...) to
+> `latent_image` and the output leaves at **exactly that node's width and height**.
+> Every ratio works the same — 1:1, 4:5, 3:4, 2:3, 16:9, 9:16, 16:10, 21:9 — because
+> the image size the sampler produces is decided by the start latent's size. Without
+> `latent_image` it follows the reference image's aspect as before. With
+> `denoise=1.0`, though, the start latent's **shape is the seed**, so changing the
+> ratio changes the result even at the same seed (see 4-8).
 
 > The `positive` socket is kept for compatibility with older workflows. The new
 > path does not use it and ignores it even when connected — this node builds the
@@ -105,7 +131,9 @@ keeper about intent such as "change the outfit" or "change the background".
 
 ## 4. Using the widgets
 
-Top to bottom: **topic → preset → automation → ten camera dropdowns → AI LLM settings**.
+Top to bottom: **topic → preset → automation → ten camera dropdowns → AI LLM
+settings**. The preset row and each feature popup also carry a **↻ refresh
+button** that restores the preset defaults (4-9).
 
 ### 4-1. topic — one line of scene
 
@@ -115,6 +143,10 @@ Write the scene as you would describe it. **Korean works.**
 A woman in a black coat turns around in a rainy alley
 ```
 
+- **You can feed `topic` from a text box instead of typing.** Convert the `topic`
+  field to an input (right-click the field) and connect another node's **text box
+  (STRING)** output. The node auto-classifies and applies the pose, motion and
+  other data that arrives in `topic`.
 - Connecting a wire to `prompt_in` makes it replace the `topic` field. Unplug it
   and the field takes over again.
 - If you name a shot in the topic (`full body`, `close-up shot`), that wins over
@@ -133,7 +165,9 @@ A woman in a black coat turns around in a rainy alley
 ### 4-2. preset — set the mood in one click
 
 Choosing a preset **fills all ten camera dropdowns with that preset's values**.
-Choosing `자동 (auto)` clears them back to auto.
+Switching presets does not erase what you set under another preset — each
+preset remembers its own last state (see the note at the end of 4-4). To put a
+field back to the preset default, press the **↻ button** on the preset row (4-9).
 
 | Preset | Feel |
 |---|---|
@@ -210,6 +244,17 @@ and leave neon on.
 > ten fields is not the way — that state cannot be distinguished from the normal
 > API path where widgets are left empty and the whole preset applies.
 
+**Your toggles survive — each preset remembers its own state**
+
+Switching presets never erases what you turned on under another preset. Add a
+lighting option under `자동 (auto)`, switch to `시네마틱 인물`, and come back — your
+earlier toggles return. Each preset keeps its own last state. After a page
+refresh or ComfyUI restart the workflow restores its saved state, and
+remembering starts from there.
+
+The buttons that restore the preset defaults — the **↻ refresh buttons** on the
+preset row and in each feature popup — are described in **4-9**.
+
 ### 4-5. AI LLM settings (collapsed)
 
 A new node starts with a collapsed **`AI LLM 설정`** (AI LLM settings) row.
@@ -223,6 +268,10 @@ stays the way you left it.
 | `api_key` | Key. If empty, `.env` and environment variables are checked |
 | `custom_base_url` | Only for `Custom (OpenAI compatible)` |
 | `vision_detail` | Image size sent to the LLM: `선명 (768)` / `균형 (512)` / `절약 (384)` |
+
+One field is not in the table: `llm_hint`. It carries a short instruction for the
+LLM and **never appears in the UI** (API and script use only). It applies only when
+you run with `AI 판단 (llm)`, and is ignored under `규칙 (auto)`.
 
 Running with `AI 판단 (llm)` makes the `model` field **blink green**. Local LLMs
 can take tens of seconds, so this tells you it is working. When judgment
@@ -298,6 +347,63 @@ a lucky image by changing seeds is not reproducible.
 > out, add one more of the five items above. Console logs and `prompt_out` show
 > what was attached.
 
+### 4-8. Reference image resolution — follows the input resolution
+
+The reference image is conditioned at **the same pixel count as the resolution
+node connected to `latent_image`**. The number field at the bottom of the node
+(after the pose socket, `reference_max_mp`) is **hidden and its value is unused**
+— the value comes from the input now. (It is kept as a **hidden slot-keeping
+field** so that saved widget values are not shifted by one slot.)
+
+| Input (resolution node) | Reference conditioning |
+|---|---|
+| 1.0MP (e.g. 1344x768) | also ~1.0MP — a portrait photo becomes 752x1360 (same pixel count) |
+| 2.0MP | also ~2.0MP |
+| 0.5MP | also ~0.5MP (smaller input, smaller reference) |
+| not connected | nothing to follow, so the reference is set to 1MP |
+
+- **Why it was removed:** the field let the reference be encoded larger than the
+  input (input 1MP, reference 2MP). That resolution is never used for generation,
+  so it adds no information and only misaligns the pixel grid between the
+  reference and the result.
+- The reference **photo keeps its own aspect ratio** — it is never cropped or
+  letterboxed. Only the pixel count (grid cells) matches the input.
+- **To make the photo match the canvas shape, prepare the photo in that shape
+  yourself.** The node never crops, letterboxes or stretches it. Cropping
+  changed the outfit and the face, padding (letterboxing) added nothing for the
+  better, and stretching distorted the body and the face. A photo you prepared
+  yourself is passed through as is.
+- **The resolution node decides the output aspect and size.** Every ratio — 1:1,
+  16:9, 9:16, 21:9 — comes out as is (output 5 leaves at exactly that size).
+- **Trade-off:** with `reference_latent_out` as the sampler's
+  start latent, the start latent's **shape is the seed** (`denoise=1.0`). Changing
+  the ratio widget therefore changes the picture even at the same seed. This is not
+  a defect but a necessary consequence of changing the ratio — a different ratio
+  means a different canvas, and a different canvas means a different noise tensor.
+  To get the same picture at the same seed, **do not change the ratio.**
+- A larger output means a larger reference, and **step time follows the
+  reference size** — a 2x reference takes about 3.4x the time, and half takes
+  about 0.7x. On an 8GB card keep the resolution node near 1MP.
+
+### 4-9. ↻ Refresh — back to the preset defaults
+
+These put the fields back to the preset values after you changed some by hand.
+Both look like a **browser refresh arrow (↻)**; normally only the arrow shows,
+and hovering reveals the background.
+
+| Button | Where | What it does |
+|---|---|---|
+| ↻ on the preset row | On the preset row, **one slot in from the right end** | Restores all ten camera fields to the current preset's defaults |
+| ↻ in a popup | A feature popup (the window that opens when you click shot, lens, …), **top-right corner** | Restores **only that popup's field** to the preset default |
+
+- The baseline is the **currently selected preset's defaults**. Values the preset
+  provides stay and only your manual changes revert. A field the preset does not
+  cover goes back to `auto`.
+- The popup ↻ touches **only that popup** — other popups and the preset settings
+  are left alone.
+- The result is written into that preset's memory, so coming back to the preset
+  shows the restored state (see "Your toggles survive" in 4-4).
+
 ---
 
 ## 5. Reference images (`image_1` to `image_10`)
@@ -314,8 +420,82 @@ appears**. The hidden sockets are a display convenience; saved links are unaffec
 - Slots with a person are found from pixels and used as main-subject candidates (5-5).
 - Any slot that is not the main subject needs a role in the topic. Without one it
   will **not** copy face, hair, skin, outfit or identity (duplication guard).
-- Connect the **same numbers** to the Consistency Keeper. Different numbers mean
-  the keeper pulls toward a different person.
+
+#### Naming a role by slot number — the colon (`:`) is the rule
+
+This is how you assign roles by number in the topic. **Write `N번:` and that slot is
+fixed to that role.** The colon is the **declaration mark** — "this number is this
+role".
+
+**Four rules** — number + `번` + colon + role word.
+
+```
+1번: 한국 여성
+2번: 의자
+3번: 하이 힐
+4번: 배경
+연출: <scene sentence>
+```
+
+1. After the number write `번` (or `번째`) and then the **colon (`:`)**. The `번` is
+   mandatory — it is the condition that keeps a **ratio** such as `16:9` from
+   reading as a colon declaration.
+2. Write the role word **after** the colon. **Spaces are free**
+   (`3번: 하이힐` = `3번: 하이 힐`).
+3. A particle may follow the word (`2번: 의자를` — slot 2 = object).
+4. One per line, or separated with `/`.
+
+| You write | The node reads |
+|---|---|
+| `2번: 의자` | slot 2 = object |
+| `3번: 하이 힐` · `3번: 하이힐` | slot 3 = outfit (spaces are free) |
+| `4번: 배경` | slot 4 = background |
+| `1번: 한국 여성` | slot 1 = person |
+| `둘째: 의자` · `두 번째: 의자` | slot 2 = object (Korean ordinals count as numbers) |
+| `피사체: 1번 이미지` | slot 1 = main subject |
+| `이미지 2의 핸드백` · `2번 이미지 의자` | the older forms still work (object) |
+| `2번 앉은 자세` | slot 2 = pose |
+| `연출: <sentence>` | only the sentence after this line becomes the scene |
+
+**Read even without a colon** — outfit, background and pose notes, and the older
+image notation, work as they always did: `3번 하이힐` · `4번 배경` ·
+`2번 앉은 자세` · `2번 이미지 의자` · `이미지 2의 핸드백`.
+
+**Deliberately not supported** — these are not read.
+
+| You write | Why not |
+|---|---|
+| `2번 의자` (no colon) | there is **no way to tell a declaration from a sentence**. A wear sentence like `2번 옷을 입혀` (a person) leaks in as an outfit note. Put the colon in |
+| `1번: 앉아` · `2번: 신겨` | a **verb** in the declaration slot is an action, not a thing. For a pose write a pose word, like `2번 앉은 자세` |
+
+**Why the colon is required**: without it there is no way to tell a **declaration**
+from a **sentence**. `2번 의자` (a declaration) and `2번 의자를 밀어` (a sentence),
+`2번: 하이힐` (a declaration) and `2번 하이힐을 신겨` (a sentence) look the same in
+plain text. Reading a sentence as a declaration can make a person disappear from the
+result, so without a colon the node does not bind a slot to a role.
+
+**It is still not silent** — when your topic looks like a colon-less declaration the
+node prints one line in the console. **The note does not change any verdict** (the
+prompt is unchanged).
+
+```
+[Camera Director] 콜론 없는 역할 표기 "2번 의자" — 역할로 읽지 않습니다.
+그 칸을 역할로 쓰려면 2번: 의자 처럼 콜론을 붙여 주세요 (문장의 일부였다면 그대로 두세요)
+```
+
+The note covers **object and person** notes only — outfit, background and pose notes
+that already work without a colon, and forms like `2번 이미지 의자`, are never
+nagged about. Since the word may be the subject of a sentence, the line is worded
+conditionally ("if you meant it as a role"). One line per run at most.
+
+**Word class is sorted out automatically.** Nouns and numerals go through the
+object, outfit, background and person lexicons; verbs go to the state or change
+decision (`신발을 신고` is a state, `신겨` is a change); adjectives, adverbs and
+determiners go to the modifier decision (`같은` keeps, `다른` swaps). **Unknown
+words follow the old path** — the automatic classification never flips an
+existing verdict.
+
+If one slot is given several roles, **pose > object > person** wins.
 
 ### 5-2. Pose
 
@@ -336,7 +516,7 @@ the main subject.
 In `AI 판단 (llm)` mode you do not have to name a slot at all: the LLM looks at
 each reference image's pose and **picks the pose reference itself**, attaching a
 label. That choice is then verified against pixels, so it only applies to slots
-where a person was actually detected (guards against false positives). If you
+where a person was actually detected (so it does not land on the wrong slot). If you
 write `image 2 is pose only` yourself, **your instruction always wins**.
 
 #### Pointing at a pose with a map image (`pose_image`)
@@ -372,8 +552,8 @@ For shots where the face matters:
 - **Use `중경 (MS)` or a closer shot** so the face gets enough pixels. `auto`
   tends to frame the whole body and makes the face small.
 - If the face must be preserved, add a face-specific tool (a face detailer and
-  so on). The keeper only restores small drift within the same composition; it
-  cannot rebuild a face when the composition changes a lot.
+  so on). This node only shapes the prompt; it cannot rebuild a face when the
+  composition changes a lot.
 
 ### 5-3. Outfit replacement
 
@@ -417,6 +597,10 @@ limbs swapping.
 If you connect images but leave the topic blank, the node **analyses each image's
 pixels and assigns the roles itself.**
 
+> **`topic` counts the same whether you type it or wire a text box into it.** The
+> pixel analysis always runs, but when the topic names a slot that verdict wins
+> (see the last bullet below).
+
 - It **finds the slots that contain a person** and uses the first one as the main
   subject (face, body and outfit source). Other people stay as additional persons.
 - Slots with no person become secondary references (background, object, style).
@@ -441,6 +625,9 @@ place it.
 attached images and assigns each slot's role, which overrides the pixel verdict.
 The roles are person, outfit, object, background, style and pose, and a slot that
 is not actually connected is ignored.
+
+> Auto-analysis needs `mediapipe` and a pose model (`.task`). If either is missing
+> only the analysis is skipped and everything else keeps working (see section 1).
 
 Character sheets are still detected from pixels even with an empty topic.
 
@@ -487,6 +674,8 @@ word like `multiple characters` always wins over that judgment.
 There is nothing to switch on. The node adds only what the situation needs.
 
 - **People**: finger and toe counts, limb separation, skin texture, face structure.
+- **Scenes without people**: for a landscape or an object (or an animal-only
+  scene), people-only phrases such as finger and skin wording are left out.
 - **Pose requests**: asking for a new pose makes the model redraw the face. A
   face-lock phrase goes into the negative so it does not become someone else.
 - **Facing the camera**: wording such as `facing forward` or `looking at the
@@ -575,7 +764,7 @@ GEMINI_API_KEY=...
 | A wire will not attach to `prompt_in` | Right-click the widget → *Convert widget to input*, or drag the wire onto it |
 | `AI 판단 (llm)` gives ordinary results | Check the console for the LLM failure (key, model name, server running). It falls back to rules |
 | Korean text comes out unchanged | Switch to `AI 판단 (llm)` or install the translation model |
-| Korean text inside the image is broken | The model cannot render Korean (Flux/SDXL). Use a Qwen-Image model or composite the text separately |
+| Korean text inside the image is broken | Most image models cannot draw Korean. Pick a model that renders text well, or composite the text in an image editor |
 | Two people appear | A single-character sheet was treated as a cast sheet. Write `character sheet` in the topic |
 | The output looks like a multi-panel sheet | A normal photo was detected as a sheet. Remove `character sheet` from the topic and describe the scene |
 | `image_out` / `reference_latent_out` is empty | Only a sheet image is connected. Sheets are dropped from all outputs, so connect one more reference besides the sheet |
@@ -587,6 +776,10 @@ GEMINI_API_KEY=...
 | Shoe colour or style changes | A guard keeps the reference shoes. If it still changes, name the colour and style you want in the topic |
 | `pose_image` is connected but the pose does not change | A map that also draws hands and face can be misread. Connect a body-only map |
 | Changing the reference image does not change the result | A stale cache. Restart ComfyUI |
+| Output ratio differs from the one you picked | Check that `latent_image` (Empty Latent etc.) is connected. With it, output 5 leaves at exactly that size. Without it, it follows the reference image's aspect (4-8) |
+| The output stays at 1MP (e.g. 752x1360) and does not grow | `latent_image` (the resolution node) is not connected. Connect it and output 5 leaves at exactly that size, and the reference follows that pixel count too (4-8) |
+| The same seed gives a different result | The start latent's size changed, which is equivalent to a different seed (`denoise=1.0`). Do not change the resolution node's ratio or megapixels between runs |
+| The photo shape and the output composition drift apart | Keeping the reference photo's aspect ratio is the intended behaviour — the node never pads, crops or stretches it. To match shapes, prepare the photo in the canvas shape yourself (4-8) |
 | Skin looks like plastic | Remove `flawless`/`smooth` from the upstream prompt and use a grainy grade such as `cinematic film` or `35mm film` |
 | Emoji in the console show as `?` | A Windows console display issue. It does not affect the node |
 | A shared file contained an API key | Check whether it was an `Export (API)` file. See the exception in section 7 |
@@ -616,4 +809,6 @@ a copy**, so quality and identity drift. For a continuous sequence:
 - Five camera angles (POV, reflection, panoramic, three-quarter rear, wide hero)
   adapted from `xoxxel/camera-prompts` (MIT)
 - Korean to English translation model: `Helsinki-NLP/opus-mt-tc-big-ko-en` (CC-BY-4.0)
+- Bundled pose model `pose_landmarker_lite.task`: MediaPipe Pose Landmarker (Apache-2.0) — see `POSE_MODEL_LICENSE.txt`
+- Bundled object detector `efficientdet_lite0.tflite`: MediaPipe EfficientDet-Lite0 (Apache-2.0) — see `OBJECT_MODEL_LICENSE.txt`
 - This node: MIT

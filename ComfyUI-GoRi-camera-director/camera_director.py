@@ -22,12 +22,12 @@ from __future__ import annotations
 # 왜(Why) future import 다음인가: `from __future__` 는 docstring 바로 다음에
 # 와야 한다 (SyntaxError). 버전 상수는 그 뒤 첫 코드다.
 # 왜(Why) 노드마다 따로인가 (2026-10-02): 팩은 여러 노드를 한 번에 배포하는
-# 관리 단위일 뿐이다. 카메라만 고쳤는데 팩 버전을 올리면 키퍼도 바뀐 것처럼
+# 관리 단위일 뿐이다. 카메라만 고쳤는데 팩 버전을 올리면 다른 노드도 바뀐 것처럼
 # 보인다. 각 노드는 자기 변경에만 버전을 올린다. 새 노드를 만들면 첫날부터
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.80"
+__version__ = "1.9.87"
 
 
 import json
@@ -82,13 +82,63 @@ except ImportError:  # 스탠드얼론/테스트 실행용
     from cam_synopsis import *  # noqa: F403
 
 
-def _latent_mp(latent_image) -> float | None:
-    """sampling latent의 메가픽셀. 알 수 없으면 None (점검 생략)."""
+def _latent_declared_ratio(latent_image):
+    """latent 가 스스로 선언한 한 칸의 픽셀 배수. 못 쓰면 None.
+
+    왜(Why) 모델 비율보다 먼저 보나 (2026-10-23 실측): 빈 latent 노드
+    (`EmptyLatentImage`)는 `height//8, width//8` 격자를 만들고
+    `downscale_ratio_spacial: 8` 을 함께 보낸다. 즉 **격자 x 선언 = 사용자가
+    고른 픽셀 수** 다. ComfyUI 자신도 그 둘의 비(선언/모델비율)만큼만 보정한다
+    (`fix_empty_latent_channels` — comfy/sample.py:53~56). 모델 비율만 곱하면
+    8 배 선언 격자를 16 배로 읽어 **정확히 4 배** 과대해진다.
+
+    실측 (2026-10-23): 캔버스 768x1344(1.03MP)가 1536x2688(4.13MP)로 읽혀
+    참조 1장이 4배로 인코딩됐고(참조 4장 = 16.5MP) 8B 텍스트 인코더가 58초를
+    썼다 — 같은 실행에서 같은 4장을 1MP 로 인코딩한 `#55` 는 7초였다.
+
+    양의 정수가 아니면 None 을 돌려 모델 비율 폴백을 쓰게 한다. bool 은
+    정수의 하위형이라 따로 막는다(True 가 1 로 읽히면 격자가 1배가 된다).
+    """
+    try:
+        _d = (latent_image.get("downscale_ratio_spacial")
+              if isinstance(latent_image, dict) else None)
+        if isinstance(_d, bool) or not isinstance(_d, int) or _d <= 0:
+            return None
+        return _d
+    except Exception:
+        return None
+
+
+def _vae_ratio(vae, fallback=16):
+    """vae.downscale_ratio 가 양의 정수면 그 값, 아니면 fallback.
+
+    왜(Why) 폴백이 있나 (2026-10-22): 정수가 아닌 비율(비디오 VAE 의
+    callable/tuple)은 한 변 환산을 단정할 수 없다. vae 미연결·비정수는
+    전부 폴백이다(기존 동작 16 유지). bool 은 정수의 하위형이라 따로 막는다.
+    """
+    _r = getattr(vae, "downscale_ratio", None)
+    if isinstance(_r, bool) or not isinstance(_r, int) or _r <= 0:
+        return fallback
+    return _r
+
+
+def _latent_mp(latent_image, vae=None) -> float | None:
+    """sampling latent의 메가픽셀. 알 수 없으면 None (점검 생략).
+
+    왜(Why) 배수를 어디서 읽나 (2026-10-23): **latent 가 선언한 배수가 먼저**
+    (`_latent_declared_ratio`)다. 선언이 없으면 종전대로 vae.downscale_ratio
+    (2026-10-22 실측: Qwen-Image-2.1 = 16, SDXL·Flux = 8), 그것도 없으면 16 이다
+    — 즉 선언 없는 입력(다른 노드의 native 격자·기존 테스트)의 결과가 하나도
+    안 바뀐다.
+    """
     try:
         samples = latent_image.get("samples") if isinstance(latent_image, dict) else None
         if samples is None or getattr(samples, "ndim", None) != 4:
             return None
-        h, w = int(samples.shape[-2]) * 16, int(samples.shape[-1]) * 16
+        _ratio = _latent_declared_ratio(latent_image)
+        if _ratio is None:
+            _ratio = _vae_ratio(vae)
+        h, w = int(samples.shape[-2]) * _ratio, int(samples.shape[-1]) * _ratio
         return (h * w) / 1e6
     except Exception:
         return None
@@ -160,8 +210,8 @@ def preflight_warnings(_topic: str, camera: dict, latent_mp=None,
                 "positive 가드만 방어합니다. negative 를 쓰려면 cfg 2.0~4.0 을 "
                 "권장합니다 — 단 일부 환경은 1.0 초과에서 샘플러가 크래시하므로"
                 "(실측 2026-10-13: aimdo malloc_graph_pop NULL) 그때는 런처에 "
-                "--disable-comfy-compiler 를 넣거나 positive 가드와 2차 패스"
-                "(일관성 키퍼)로 방어하십시오")
+                "--disable-comfy-compiler 를 넣거나, positive 가드만으로 쓰고 "
+                "negative 가 필요한 부위는 프롬프트로 직접 지정하십시오")
         if denoise and not 0.0 < denoise <= 1.0:
             msgs.append(f"denoise={denoise} 범위 이탈 (0 초과 1 이하)")
         elif denoise and denoise > 0.9:
@@ -393,6 +443,14 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # 전용). 가구 경계와 **같은 게이트**를 쓴다 — 인물 + 참조 실행. 게이트를
     # 넓히면 다른 경로의 문구가 함께 늘어나므로 기존 계약 범위로 시작한다.
     garment_boundary = is_human and image_count >= 1
+    # 손 배치 (2026-10-24 실측, R220): 앉아서 "양 손을 무릎에" 올린 장면에서
+    # 두 손이 겹쳐 한 덩어리로 합쳐지고 손가락이 서로 넘어갔다. 손 계열 문구가
+    # 전부 "한 손 안에서 손가락 다섯 개·경계 분리" 라 **두 손 사이**를 덮는 문구가
+    # 없었다. 넓은 "손" 이 아니라 **배치 구문**(무릎에·양 손을·품에·hands resting…)
+    # 에만 켠다 — 손이 화면에 있는 것만으로는 둘이 붙을 위험이 없다.
+    # 참조 실행 여부를 게이트에 넣지 않는다: 위험은 참조 유무가 아니라 자세에서
+    # 온다(참조가 손을 공급하지 못하는 denoise=1.0 에서 더 크다).
+    hand_placement = is_human and hand_placement_marks(text)
     # 신발 교체 지시면 유지 가드를 교체 가드로 갈아탄다 (2026-10-15 실측):
     # "앞이 막혀 있는 흰색 단화" 지시와 "keep that footwear(reference)" 가
     # 같은 positive 에서 정면 충돌했다 (2026-10-13 에 identity anchor 는
@@ -400,6 +458,17 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # 기존 upper 변형 그대로 — 교체 문구가 없는 발을 그려 넣는다.
     footwear_change = (footwear and _limb_visible
                        and _topic_changes_shoes(text))
+    # 맨발 요구 (2026-10-25 감사 F3). 왜(Why) 필요한가: "A barefoot woman on
+    # the beach" 처럼 맨발을 요구하면 참조 유지 가드가 그대로 나가 "keep the
+    # exact shoes" 와 짝 negative 의 "bare feet" 금지가 **사용자 문장과 정면
+    # 충돌**했다(같은 실행에서 셋이 동시에 나갔다). 맨발 주제에서는 신발 잠금
+    # 자체를 끄고(아래 `footwear = False`) 맨발 가드로 갈아탄다. `_topic_wants_
+    # barefoot` 이 `_topic_changes_shoes` 에 양보하므로 위 교체 경로와 배타다.
+    _barefoot_topic = bool(footwear and _topic_wants_barefoot(text))
+    footwear = footwear and not _barefoot_topic
+    # 맨발 가드는 발이 화면에 보이는 샷에서만 의미가 있다(위 _limb_visible).
+    # CU/ECU 맨발은 문구가 없다 — "do not make barefoot"(upper)도 내지 않는다.
+    footwear_bare = _barefoot_topic and _limb_visible
     # llm_hint 방어어는 LLM 판정이 실제로 이뤄진 실행에만.
     hint_defense = tier == "llm" and bool((llm_hint or "").strip())
 
@@ -469,7 +538,13 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         declared_topic=declared_topic)
 
     furniture_slots = _object_dna_slots(text, labels, image_count)
-    furniture_pos = _furniture_dna_guard(text, furniture_slots)
+    # 좌석 관계 (2026-10-24, R226): 좌석 어휘 + 착석 동사가 있는 슬롯 ∩ 사물 DNA
+    # 대상. 좌석 어휘가 있어도 사물 DNA 대상이 아니면(의상·배경 등) 좌석 문구를
+    # 내지 않는다. 좌석 슬롯은 `_furniture_dna_guard` 안에서 방향 조항만 갈아
+    # 끼운다 — 형태·접촉·개수 충실은 그대로 남는다.
+    seat_slots = _seat_slots(text) & set(furniture_slots)
+    furniture_pos = _furniture_dna_guard(text, furniture_slots,
+                                         seat_slots=seat_slots)
     # 배경 참조의 사물 충실 (2026-10-22 실측, 파란 동그라미). 사물 정식 슬롯과
     # 달리 **존재를 요구하지 않는다** — 조건문 하나만 낸다. 왜 필요한지는
     # cam_guards 의 FURNITURE_BACKGROUND_POSITIVE 주석 참조(실측: 좌.png 의 검은
@@ -513,20 +588,71 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         # 화면에 보이는 샷)일 때만 붙인다 — CU/ECU 는 없는 발을 그린다.
         "limb_integrity": (LEG_FOOT_INTEGRITY_POSITIVE
                            if (anatomy_count and _limb_visible) else ""),
-        "footwear": (FOOTWEAR_CHANGE_POSITIVE if footwear_change
-                     else (_footwear_guard(_shot)[0] if footwear else "")),
+        "footwear": (FOOTWEAR_BARE_POSITIVE if footwear_bare
+                     else FOOTWEAR_CHANGE_POSITIVE if footwear_change
+                     else (_footwear_guard(_shot, _footwear_slots(text))[0]
+                           if footwear else "")),
         "body_object_boundary": (_body_object_boundary_guard(_shot)[0]
                                  if body_object_boundary else ""),
         "garment_boundary": (_garment_boundary_guard(_shot)[0]
                              if garment_boundary else ""),
+        # 손 배치 (2026-10-24, R220) — 두 손이 겹치거나 합쳐지는 실패 방어.
+        # 샷 변형이 없다: 손은 전신·중경·상반신 어디서나 두 손이 함께 나올 수 있다.
+        # CU/ECU 에서도 손이 크게 잡히면 두 손이 붙을 수 있어 upper 분기를 두지
+        # 않는다(문구 자체가 두 손 사이 서술이라 없는 손을 요구하지 않는다).
+        "hand_placement": HAND_PLACEMENT_POSITIVE if hand_placement else "",
         "furniture": furniture_pos,
         "furniture_bg": furniture_bg_pos,
+        # 좌석 접촉점 (2026-10-24, R226) — 좌석 슬롯이 있을 때만 나간다.
+        # run() 은 body-object 경계 **뒤에** 이 조각을 붙인다(경계 → 접촉점).
+        # run_prompt() 는 2026-10-25 R239 부터 **장면 문장 바로 뒤**에 붙인다 —
+        # 꼬리에서는 뒤따르는 조항에 희석돼 의자가 소실됐다(실측 A/B).
+        "seat": (SEAT_OCCUPANCY_POSITIVE if seat_slots else ""),
         "character_sheet": sheet_text,
         "pose": pose_pos,
         "spacing": spacing_pos,
         "physics": phys_pos or grounding,
         "ground": ground_pos,
     }
+    # 참조 충실 — 해부·경계 계열 positive 를 압축본으로 치환한다 (2026-10-25 E3,
+    # 2026-10-26 항상 적용으로 내부화).
+    # 왜(Why) 항상인가: 기본이 꺼짐이던 동안 그 위젯을 모르는 사용자가 계속
+    # 참조를 잃었다(실측 2026-10-26: 규칙 경로 3.26% 대 17.51%). 옳은 동작을
+    # 기본으로 올리고 외부 스위치를 없앴다 — 스위치가 있으면 기본 동작이 두
+    # 계약으로 갈린다. 설계: docs/dev-loop/2026-10-26-ref-fidelity-internal/.
+    # 왜(Why) 다리·발이 보이는 샷에서만 하나 (`_limb_visible`): 압축본은
+    # "two legs, two feet" 를 담는다. CU/ECU 는 발이 화면에 없어 그 문구가
+    # 오히려 없는 사지를 그리게 한다 — 그래서 상반신 샷은 종전 upper 변형을
+    # 그대로 둔다. 압축 효과(E3)도 전신 장면에서만 측정했다.
+    # 왜(Why) 원본 상수를 안 줄이나: tests/test_node.py 가 그 문자열을 66곳에서
+    # 잠그고 있다. 상수를 줄이면 잠금이 "그 문구가 실제로 나간다"는 뜻을 잃는다.
+    # 게다가 원문은 negative 빌더가 (pos, neg) 쌍으로 계속 쓴다 — 지우면
+    # cfg 2~4 사용자의 해부 방어가 함께 사라진다.
+    # 왜(Why) 원본 상수가 아니라 `pos` 를 덮나: 조립 순서 코드(run_prompt 의 if)는
+    # 그대로 두는 편이 되돌리기 쉽다 — 빈 문자열은 자연히 빠진다.
+    if _limb_visible:
+        # 해부 계열 — 원문 4조각(body_balance·detail_def·anatomy_count·
+        # limb_integrity)을 압축 1조각으로 합친다. 조각이 하나도 안 켜진
+        # 장면(예: 풍경)에는 넣지 않는다.
+        if body_balance or detail_def or anatomy_count:
+            pos["body_balance"] = COMPACT_ANATOMY_POSITIVE
+            pos["detail_def"] = ""
+            pos["anatomy_count"] = ""
+            pos["limb_integrity"] = ""
+        # 경계 계열 — 원문 2조각(body_object_boundary·garment_boundary)을
+        # 압축 1조각으로 합친다.
+        # 왜(Why) hand_placement 는 합치지 않나 (사용자 결정 2026-10-26): 그 문구는
+        # 앉아서 "양 손을 무릎에" 올린 두 손이 한 덩어리로 합쳐지는 실패를 막는
+        # **따로 측정된** 방어다(R220, "never merge into a single shape"). 압축
+        # 경계문은 그 조항을 담지 않으므로, 합치면 사용자 장면(무릎에 손)에서
+        # 측정된 방어가 사라진다. 그래서 손 배치는 원문 그대로 남긴다.
+        if body_object_boundary or garment_boundary:
+            pos["body_object_boundary"] = COMPACT_BOUNDARY_POSITIVE
+            pos["garment_boundary"] = ""
+        # 신발은 세 분기 중 **동일성 잠금**일 때만 압축한다. 맨발·교체 지시는
+        # 사용자가 명시한 요구라 그대로 둔다.
+        if footwear and not footwear_bare and not footwear_change:
+            pos["footwear"] = compact_footwear_guard(_footwear_slots(text))
     return {
         "positive": pos,
         # negative 빌더는 플래그를 받는다. 문자열이 아니라 판정 결과.
@@ -539,15 +665,18 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
             "anatomy_count_upper": (anatomy_count and not _limb_visible),
             "footwear": footwear,
             "footwear_upper": (footwear and not _limb_visible),
+            "footwear_bare": footwear_bare,
             "body_object_boundary": body_object_boundary,
             "body_object_boundary_upper": (body_object_boundary
                                            and not _limb_visible),
             "garment_boundary": garment_boundary,
             "garment_boundary_upper": (garment_boundary and not _limb_visible),
+            "hand_placement": bool(hand_placement),
             "hint_defense": hint_defense,
             "remove_item": bool(remove_item),
             "furniture": bool(furniture_pos),
             "furniture_bg": bool(furniture_bg_pos),
+            "seat": bool(seat_slots),
             "character_sheet": bool(sheet_text),
             "pose_ref": bool(pose_pos),
             "ref_bottom_cropped": ref_bottom_cropped,
@@ -562,6 +691,7 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         "spacing_measure": spacing_measure,
         "furniture_slots": furniture_slots,
         "furniture_bg_slots": furniture_bg_slots,
+        "seat_slots": seat_slots,
         "furniture_surface_pos": furn_surface_pos,
         "furniture_surface_neg": furn_surface_neg,
     }
@@ -771,16 +901,21 @@ class CameraDirector:
                                  extra_pnginfo, png_scrubbed)
         # 프롬프트 진입점: 선 연결(prompt_in)이 있으면 우선, 없으면 topic 칸
         external = (prompt_in or "").strip()
+        # topic 칸 **원문** (2026-10-25 감사 F4). prompt_in 이 연결되면 이 값은
+        # 출력 프롬프트에서 버려지지만, **가드 판정**에는 함께 봐야 한다.
+        # 왜(Why): 사용자가 "2번은 포즈만" 같은 슬롯 지시를 topic 칸에 적어 두고
+        # 선을 연결하는 경우가 흔한데, 그 지시가 판정에서 통째로 사라져 positive
+        # 가드만 빠지고 짝 negative 는 남았다(실측: 같은 문장이 prompt_in 안에
+        # 있으면 가드 True, topic 칸에만 있으면 False). 출력 문구는 계약대로
+        # prompt_in 을 그대로 쓴다(테스트 "선연결 시 외부 프롬프트 우선").
+        _topic_field = (topic or "").strip()
         if external:
-            # topic 칸에 글자가 있으면 **버려진다** — 대체 세맨텍스는 계약
-            # (테스트 "선연결 시 외부 프롬프트 우선")이라 유지하지만, 조용한
-            # 손실은 원인 없는 오판을 만든다. 슬롯 지시("2번은 포즈만")가
-            # 사라졌는데 결과가 이상한 이유를 사용자가 알 수 없게 되므로
-            # 한 번 분명히 알린다 (2026-10-19 사용자 지적).
-            if (topic or "").strip():
+            if _topic_field:
                 _log("[Camera Director] prompt_in 에 선이 연결되어 topic 칸의 "
-                     "글자는 쓰이지 않습니다 — 슬롯 역할·시트·포즈 지시가 필요하면 "
-                     "그 내용을 연결된 프롬프트 쪽에 함께 넣어 주세요")
+                     "글자는 출력 프롬프트에 쓰이지 않습니다 — 다만 슬롯 "
+                     "역할·시트·포즈 같은 가드 판정에는 함께 반영합니다. "
+                     "출력 문장에도 넣으려면 연결된 프롬프트 쪽에 함께 적어 "
+                     "주세요")
             topic, topic_src = external, "외부(prompt_in)"
         else:
             topic, topic_src = (topic or "").strip(), "topic 칸"
@@ -854,8 +989,23 @@ class CameraDirector:
         reference_items = _reference_items(image_items=image_items, image_list=image_list, image=image)
         reference_images = [img for _label, img in reference_items]
         image_labels = [label for label, _img in reference_items]
-        # 9·10번 슬롯 = 외양 참조 전용 (사용자 전용 기능). 픽셀 근거: 실제 연결 여부.
-        appearance_ref = 9 in image_labels or 10 in image_labels
+        # 9·10번 슬롯 = 외양 참조 **기본값** (사용자 전용 기능). 근거: 연결된
+        # 9·10번에서 **사용자 선언을 뺀** 나머지. 2026-10-23 (AC-19·AC-21):
+        # `9번: 의자` 처럼 선언하면 그 슬롯은 1~8번과 같은 역할 슬롯이고 외양
+        # 가드가 붙지 않는다. 픽셀 판정은 해제 근거로 쓰지 않는다 — 픽셀은 옷과
+        # 사물을 가를 수 없다(실측). LLM 역할은 병합 **뒤** 다시 계산한다(아래).
+        appearance_slots = appearance_ref_slots(analysis, image_labels)
+        appearance_ref = bool(appearance_slots)
+        # 콜론 없는 역할 표기 안내 (2026-10-23). **판정을 바꾸지 않는다** — 같은
+        # 표기를 규칙은 그대로 두고, 사용자에게 콜론을 권하는 로그 한 줄만 낸다.
+        # 왜(Why) 노드에서 부나: `_note_once` 는 "실행 한 번에 한 줄" 계약이라
+        # 실행 경계를 아는 이 자리가 맞다. cam_subject 안에서 부르면 슬롯 판정
+        # 함수를 여러 번 부르는 단위 테스트마다 로그가 끼어든다.
+        # 왜(Why) 참조가 있을 때만: 참조가 하나도 없으면 역할 표기가 쓸 데 없다.
+        if reference_items:
+            _notation = colon_less_role_hint(analysis)
+            if _notation:
+                _note_once("camera.notation_hint", _notation)
         primary_image = reference_images[0] if reference_images else None
         image_count = len(reference_images)
         # 참조 자동 분류 (2026-10-19) — 슬롯 번호가 아니라 픽셀로 사람을 찾는다.
@@ -863,10 +1013,15 @@ class CameraDirector:
         # "첫 연결 = 주 피사체"라서 그 옷이 사람 신원으로 지목됐다. 토픽이 슬롯을
         # 지목하면 그 판정이 우선하고(cam_subject 힌트 규칙), 비었을 때만 쓴다.
         ref_kinds = {}
+        # 픽셀이 사람을 찾은 슬롯 (2026-10-23 실측). LLM 역할 병합 뒤에도 이 값만
+        # 픽셀 근거로 남긴다 — 병합된 지도에는 LLM 의 person 이 섞여 있어서
+        # 그대로 보면 "픽셀 실측" 과 "LLM 분석" 이 구분되지 않는다.
+        _pixel_persons = set()
         if reference_items:
             try:
                 ref_kinds = classify_references(reference_items)
-                set_reference_kinds(ref_kinds)
+                _pixel_persons = set(person_slots(ref_kinds))
+                set_reference_kinds(ref_kinds, persons=_pixel_persons)
                 _persons = person_slots(ref_kinds)
                 if _persons:
                     _log("[Camera Director] 참조 자동 분류 — 인물 슬롯 "
@@ -881,8 +1036,25 @@ class CameraDirector:
                     _log("[Camera Director] 참조 분석 — " + _an)
             except Exception as _e:  # noqa: BLE001
                 ref_kinds = {}
+                _pixel_persons = set()
                 _log("[Camera Director] 참조 자동 분류 실패 "
                      f"({type(_e).__name__}) — 기존 규약으로 진행")
+        # 픽셀이 사람을 찾은 슬롯은 외양 참조 기본값을 해제한다 (2026-10-23 실측).
+        # 왜(Why): 그 슬롯은 주 피사체·보조 인물로 쓰인다(`_hint_person_slots`).
+        # 같은 슬롯을 몸 외양 참조로도 남기면 같은 프롬프트가 "이 칸이 신원" 과
+        # "이 칸은 몸 부위" 를 동시에 말한다. 실측(의자 1번 + 여성 9번 + 빈
+        # topic): 9번이 승격되지 못하고 1번(의자)이 주 신원이 됐다.
+        if _pixel_persons and (appearance_slots & _pixel_persons):
+            _app_px = appearance_ref_slots(analysis, image_labels)
+            if _app_px != appearance_slots:
+                # 로그 문구는 기능 이름을 드러내지 않는다 (2026-10-23 사용자 지시).
+                # 콘솔은 사용자에게 보이므로 **무슨 일이 일어났는지**만 적는다.
+                # 잠금: R212-3 이 `_log` 문자열 상수를 훑어 확인한다.
+                _log("[Camera Director] 역할 재지정 — 픽셀에서 사람이 검출된 "
+                     + "/".join(str(x) for x in sorted(appearance_slots - _app_px))
+                     + "번 (그 슬롯은 주 피사체·보조 인물로 씁니다)")
+                appearance_slots = _app_px
+                appearance_ref = bool(appearance_slots)
         # 캐릭터 시트 픽셀 판별 — LLM 비전 노트용으로 여기서 한 번 더 부른다.
         # 왜(Why) 여기서도 부르나: resolve_guard_plan 안의 판별은
         # _plan(=LLM 블록 뒤)에서야 끝나는데, LLM 에게 보내는 image_note 는
@@ -972,7 +1144,8 @@ class CameraDirector:
                             converted_labels, main=main_label,
                             persons=plan["persons"],
                             poses=plan["poses"],
-                            clothing=plan["outfits"])
+                            clothing=plan["outfits"],
+                            appearance=appearance_slots)
                         if secondary:
                             image_note += ("Use reference image(s) " + ", ".join(secondary)
                                            + " only for explicitly requested roles "
@@ -1013,12 +1186,14 @@ class CameraDirector:
                         "body pose and limb angles, and let the image model copy the "
                         "posture from those images. Identity and wardrobe stay with "
                         "the main reference and the topic.")
-                if 9 in converted_labels or 10 in converted_labels:
+                _app_conv = sorted(appearance_slots & set(converted_labels))
+                if _app_conv:
                     # 9·10번 = 외양 참조. LLM에게 역할을 명확히 알려 판정에 반영.
                     # 어떤 부위(가슴/성기)가 어떤 슬롯에 와도 올바르게 매칭되도록
                     # "부위 식별 → 매핑 명시 → 교차 금지" 순서로 지시한다.
-                    _app_slots = ", ".join(str(x) for x in converted_labels
-                                           if x in (9, 10))
+                    # 2026-10-23 (AC-19): 선언으로 역할이 정해진 9·10번은 여기
+                    # 들어오지 않는다 — 선언과 반대 지시를 내지 않는다.
+                    _app_slots = ", ".join(str(x) for x in _app_conv)
                     image_note += (
                         "\nReference image " + _app_slots
                         + " is a body appearance reference (e.g. a close-up of "
@@ -1037,9 +1212,11 @@ class CameraDirector:
                         "tapering tips, slightly irregular thickness, lying and "
                         "bending along the body's curves, layered with natural "
                         "depth — never clumped patches or sticker-like hair.")
-                elif appearance_ref and failed_labels:
+                elif appearance_slots & set(failed_labels):
                     # 9·10번은 연결됐지만 변환 실패: 역할 설명은 그대로 전달하되
                     # 이미지 픽셀은 볼 수 없다고 명시해 LLM이 오해하지 않게 한다.
+                    # 2026-10-23: 선언으로 역할이 정해진 9·10번은 외양 참조가
+                    # 아니므로 여기 오지 않는다(그 슬롯은 위 if 가지가 처리한다).
                     image_note += ("\nSlots 9/10 are reserved as body appearance "
                                    "references (e.g. close-ups of intimate detail), "
                                    "but image conversion failed. Treat them as text "
@@ -1223,9 +1400,24 @@ class CameraDirector:
                 _llm_kinds = _gated
         if _llm_kinds:
             ref_kinds.update(_llm_kinds)
-            set_reference_kinds(ref_kinds)
+            # 병합된 지도에는 LLM 의 person 이 섞인다 — 픽셀 근거는 위에서 구한
+            # 집합을 그대로 넘겨 9·10번 경계가 풀리지 않게 한다 (2026-10-23).
+            set_reference_kinds(ref_kinds, persons=_pixel_persons)
             _log("[Camera Director] LLM 참조 역할 — "
                  + ", ".join(f"{k}번={v}" for k, v in sorted(_llm_kinds.items())))
+            # LLM 분석까지 반영한 **최종** 종류로 외양 참조 기본값을 다시 계산한다
+            # (2026-10-23, AC-24 — 사용자 지시 "분석은 LLM, 반영은 우리 규칙").
+            # 왜(Why) 여기서 다시 계산하나: 위 869행은 LLM 호출 **전**이라 선언만
+            # 안다. LLM 이 "9번은 소품" 이라고 분석했는데 외양 가드가 남으면 같은
+            # 프롬프트가 "몸 외양" 과 "소품" 을 동시에 말한다 — 실측으로 찾은 구멍.
+            _app_llm = appearance_ref_slots(analysis, image_labels, _llm_kinds)
+            if _app_llm != appearance_slots:
+                # 로그 문구는 기능 이름을 드러내지 않는다 (2026-10-23 사용자 지시).
+                _log("[Camera Director] 역할 재지정 — LLM 역할 반영 ("
+                     + "/".join(str(x) for x in sorted(appearance_slots - _app_llm))
+                     + "번)")
+                appearance_slots = _app_llm
+                appearance_ref = bool(appearance_slots)
 
         # LLM 의 시트 판정 (2026-10-19) — 픽셀만으로는 같은 사람 반복과 다른
         # 캐릭터 나열을 가를 수 없다(실측 sim 0.415 대 0.216). LLM 은 faces·
@@ -1313,6 +1505,10 @@ class CameraDirector:
         scene, scene_src = topic, "주제 원문"
         llm_extra = ""
         llm_anatomy = ""
+        # LLM 이 참조 인물의 의상을 서술했으면(2026-10-25) 상태로 넘긴다.
+        # 규칙(auto) tier 는 이 값을 빈 문자열로 두어 문구가 한 글자도 달라지지
+        # 않는다. 읽는 곳은 run_prompt 의 최종 병합부 하나뿐이다.
+        llm_outfit = ""
         if tier == "llm" and isinstance(llm_obj, dict):
             s = clean_scene_text(str(llm_obj.get("scene") or ""))
             if s:
@@ -1361,6 +1557,16 @@ class CameraDirector:
                 # 합치는 게 맞다. 로그는 위에서 따로 남겼으므로 추적 가능하다.
                 llm_extra = (llm_extra.rstrip("., ") + ", " + llm_anatomy
                              if llm_extra.strip() else llm_anatomy)
+            # LLM 이 읽은 참조 인물의 의상 (2026-10-25). 왜(Why) 읽나: 규칙(C)
+            # 경로에는 옷을 읽는 눈이 없어 "옷을 바꾸지 말라" 만 내보낸다. LLM 이
+            # 있으면 참조 1번의 옷을 **이름으로** 서술해 그 문구에 실어 보낸다.
+            # 정제는 anatomy 와 같은 이유(LLM 출력이 프롬프트에 들어간다)로
+            # 영문·숫자·기본 구두점만 남기고 200자로 자른다. 없으면 조용히 넘어간다.
+            llm_outfit = str(llm_obj.get("outfit") or "").strip()
+            llm_outfit = re.sub(r"[^A-Za-z0-9 ,.\-()']+", " ",
+                                llm_outfit).strip()[:200]
+            if llm_outfit:
+                _log("[Camera Director] LLM 의상 서술: " + llm_outfit[:150])
 
         # 한국어→영어 번역 (규칙 tier 전용). LLM tier 는 위 블록이 이미 영문화.
         # assemble 출력(scene)만 번역하고, 판정/경고/프리플라이트는 원본(한글)
@@ -1368,12 +1574,24 @@ class CameraDirector:
         # 시놉시스(다문장)면 문장별 구조화로 응집된 영문 장면을 만든다 — 단문/
         # 번역 불가 시 기존 단일 번역으로 폴백(기존 동작 보존, 조립 로직 비변경).
         # LLM tier 는 이 분기를 타지 않아 깊은 서사 이해는 LLM 확장 결과가 된다.
-        _scene_assembled = scene
-        if tier != "llm" and scene:
-            if _looks_like_synopsis(scene):
-                _syn = structure_ko_synopsis(scene)
+        # 역할 선언 줄 분리 (2026-10-23, AC-10~AC-12): 사용자 표기
+        # `1번: 한국 여성 / 2번: 의자 / 연출: <장면>` 에서 선언부는 슬롯 배정용이지
+        # 그림 내용이 아니다. 그대로 번역·조립하면 번역기가 "1번:" 을 문장으로 읽는다.
+        # **번역 입력과 조립 문장만** scene_out 을 쓴다.
+        # 왜(Why) scene 을 자르지 않나: fix_background_clause·fix_fan_clause 가
+        # 한글 원문(scene)에서 `배경: 2번` 선언을 읽어 절을 복원한다 — 자르면
+        # R189 배경 복원이 깨진다(design 4절). LLM tier 는 scene 이 이미 영문
+        # 장면이므로 손대지 않는다(AC-13, 동작 완전 동일).
+        scene_out = scene if tier == "llm" else scene_text(topic)
+        if scene_out != scene:
+            _log("[Camera Director] 역할 선언 줄을 장면에서 분리했습니다 — "
+                 f"장면 {len(scene_out)}자 / 원문 {len(scene)}자")
+        _scene_assembled = scene_out
+        if tier != "llm" and scene_out:
+            if _looks_like_synopsis(scene_out):
+                _syn = structure_ko_synopsis(scene_out)
                 _syn_en = _syn.get("scene_en", "")
-                if _syn_en and _syn_en != scene:
+                if _syn_en and _syn_en != scene_out:
                     _scene_assembled = fix_footwear_clause(scene, _syn_en)
                     _h = _syn.get("hints", {}) or {}
                     _h_log = ", ".join(f"{k}" for k, v in _h.items()
@@ -1386,8 +1604,8 @@ class CameraDirector:
                     # 은 비CJK 입력에 None 을 돌려준다(설계상 번역 불필요). 그 None 을
                     # 실패로 로그하면 영어 topic 매 실행이 "번역 실패" 오경고가 된다 —
                     # 실제 로그 5연속이 그 오경고였다 (엔진·모델·의존성 전부 정상).
-                    if _has_cjk(scene):
-                        _tr = translate_ko_to_en(scene)
+                    if _has_cjk(scene_out):
+                        _tr = translate_ko_to_en(scene_out)
                         if _tr:
                             _scene_assembled = _en_normalize(
                                 fix_footwear_clause(
@@ -1397,8 +1615,8 @@ class CameraDirector:
                             _log("[Camera Director] ⚠ 주제 번역 실패 — 원문 사용")
                     # else: 영어 원문 그대로 (번역 불필요 — 실패 로그 없음)
             else:
-                if _has_cjk(scene):
-                    _tr = translate_ko_to_en(scene)
+                if _has_cjk(scene_out):
+                    _tr = translate_ko_to_en(scene_out)
                     if _tr:
                         _scene_assembled = _en_normalize(
                             fix_footwear_clause(
@@ -1503,12 +1721,20 @@ class CameraDirector:
                             image_labels=image_labels)
         # 가드 판정은 resolve_guard_plan 한 곳에서. run() 과 run_prompt() 가
         # 각자 반복하던 시대를 끝내고, 짝이 어긋날 수 없게 했다.
+        # topic 칸 원문을 판정 소스에 합친다 (2026-10-25 F4). prompt_in 이
+        # 연결돼 topic 칸이 출력에서 버려진 실행에서도, 그 칸에 적힌 슬롯·포즈
+        # 지시는 가드 판정에 반영해야 한다 — 아래 declare 도 같은 취지다.
+        _guard_src = (analysis or "") + " " + (scene or "")
+        _declared_topic = topic or ""
+        if external and _topic_field:
+            _guard_src = _guard_src + " " + _topic_field
+            _declared_topic = (_declared_topic + " " + _topic_field).strip()
         _plan = resolve_guard_plan(
-            (analysis or "") + " " + (scene or ""), camera, image_count,
+            _guard_src, camera, image_count,
             image_labels, reference_items, primary_image, reference_images,
             tier=tier, llm_hint=llm_hint,
             weak_sheet_slots=weak_sheet, sheet_kind=_sheet_kind,
-            declared_topic=topic or "")
+            declared_topic=_declared_topic)
         _gpos = _plan["positive"]
         _gflags = _plan["flags"]
         nudity_guard_text = nudity_anatomy_guard((topic or "") + " " + (scene or ""))
@@ -1517,6 +1743,7 @@ class CameraDirector:
         detail_def = _gflags["detail_def"]
         anatomy_count = _gflags["anatomy_count"]
         footwear = _gflags["footwear"]
+        footwear_bare = _gflags["footwear_bare"]
         body_object_boundary = _gflags["body_object_boundary"]
         garment_boundary = _gflags["garment_boundary"]
         hint_defense = _gflags["hint_defense"]
@@ -1538,8 +1765,18 @@ class CameraDirector:
                  f"(측정 하단 여백 {int(round(_bm_ref * 100))}%) — 이 샷은 화면에 "
                  "없는 하반신(다리·발)을 모델이 새로 만들어야 하므로 다리·발 "
                  "개수가 늘어날 수 있습니다. 다리까지 보이는 참조를 함께 넣거나, "
-                 "상반신 샷(근접 CU·극접 ECU)으로 자르거나, 시드를 바꾸거나, "
-                 "2차 패스(일관성 키퍼)로 방어하십시오")
+                 "상반신 샷(근접 CU·극접 ECU)으로 자르거나, 시드를 바꾸십시오")
+            # 손 배치 표지가 함께 있으면 손도 같은 위험에 놓인다 (2026-10-24, R220,
+            # AC-4). 손은 무릎 높이(=화면 하단)에 오므로 하단이 잘린 참조에서는
+            # 손의 픽셀 근거가 없어 모델이 손을 새로 그린다 — 그때 두 손이 겹치거나
+            # 뭉친다. **로그 전용**이다: 문구를 늘리면 같은 게이트의 다른 조건
+            # 결과가 함께 흔들린다(위 경고와 같은 판단).
+            if _gpos["hand_placement"]:
+                _log("[Camera Director] ⚠ 손 배치 장면입니다 — 참조에 그 손 위치가 "
+                     "보이지 않으면(하단 잘림 또는 손이 옷·몸에 가림) 모델이 손을 "
+                     "새로 그려야 하므로 두 손이 겹치거나 한 덩어리로 뭉칠 수 "
+                     "있습니다. 원하는 손 위치가 보이는 참조를 넣거나, 시드를 "
+                     "바꾸어 다시 생성하십시오")
         if mix_guard:
             positive = positive.rstrip(". ") + ". " + _gpos["mix_guard"] + "."
             _log("[Camera Director] 다중 참조 믹스 가드 활성 (연결 이미지 "
@@ -1552,9 +1789,10 @@ class CameraDirector:
                      f"합성 결과 조명이 어긋날 수 있음. 조명 방향이 같은 참조 권장")
         if appearance_ref:
             positive = positive.rstrip(". ") + ". " + APPEARANCE_REF_POSITIVE + "."
-            _slots = "/".join(str(x) for x in (9, 10) if x in image_labels)
+            _slots = "/".join(str(x) for x in sorted(appearance_slots))
+            # 로그 문구는 기능 이름을 드러내지 않는다 (2026-10-23 사용자 지시).
             _log("[Camera Director] " + _slots
-                 + "번 외양 참조 가드 활성 (외양 적용 + 컷 삽입 방어)")
+                 + "번 참조 가드 활성 (몸 비율 + 컷 삽입 방어)")
             positive = positive.rstrip(". ") + ". " \
                 + APPEARANCE_HAIR_REALISM_POSITIVE + "."
         if body_balance:
@@ -1571,15 +1809,29 @@ class CameraDirector:
             positive = positive.rstrip(". ") + ". " + _gpos["limb_integrity"] + "."
             _log("[Camera Director] 다리·발·종아리 무결성 가드 활성 "
                  "(추가 발·휜 종아리·손 뭉갬 방어)")
-        if footwear:
+        if footwear or footwear_bare:
             positive = positive.rstrip(". ") + ". " + _gpos["footwear"] + "."
         if body_object_boundary:
             positive = positive.rstrip(". ") + ". " + _gpos["body_object_boundary"] + "."
+        # 좌석 접촉점 (2026-10-24, R226) — 위 body-object 경계 **뒤에** 온다
+        # (경계 → 접촉점 순서). 좌석 슬롯이 있을 때만 나간다.
+        if _gpos.get("seat"):
+            positive = positive.rstrip(". ") + ". " + _gpos["seat"] + "."
+            _log("[Camera Director] 좌석 접촉점 가드 활성 ("
+                 + "/".join(str(x) for x in sorted(_plan["seat_slots"]))
+                 + "번 — 체중이 좌석 쿠션에, 팔걸이 걸터앉음 방어)")
         # 의복 경계 (2026-10-16) — 손이 치마에 삼켜진 실측. 위 가구 경계와 짝.
         if garment_boundary:
             positive = positive.rstrip(". ") + ". " + _gpos["garment_boundary"] + "."
             _log("[Camera Director] 의복 경계 가드 활성 "
                  "(손·사지가 옷에 잠기지 않음)")
+        # 손 배치 (2026-10-24, R220) — 두 손이 겹치거나 한 덩어리로 합쳐지고
+        # 손가락이 서로 넘어가는 실패 방어. cfg=1.0 이라 negative 가 무효여서
+        # positive 가 유일한 방어다(위 다리·발 무결성과 같은 이유).
+        if _gpos["hand_placement"]:
+            positive = positive.rstrip(". ") + ". " + _gpos["hand_placement"] + "."
+            _log("[Camera Director] 손 배치 가드 활성 "
+                 "(두 손 겹침·한 덩어리 합침·손가락 넘어감 방어)")
         if _furn_text:
             positive = positive.rstrip(". ") + ". " + _furn_text + "."
             _log("[Camera Director] 가구·사물 DNA 가드 활성 ("
@@ -1658,9 +1910,15 @@ class CameraDirector:
         self._last_guard_plan = _plan
         self._last_appearance_ref = appearance_ref
         self._last_subject_text = ((topic or "") + " " + (scene or ""))
+        # topic 칸 원문도 판정 소스에 합친다 (2026-10-25 F4). prompt_in 연결로
+        # 출력에서 버려진 그 칸의 슬롯·포즈 지시가 negative 쪽 판정에도
+        # 반영되게 한다 — plan(positive)과 같은 텍스트를 보게 맞춘다.
+        if external and _topic_field:
+            self._last_subject_text = (self._last_subject_text + " "
+                                       + _topic_field).strip()
         negative = build_negative(camera, extra=extra_negative or "",
                                   llm_extra=llm_extra,
-                                  topic=((analysis or "") + " " + (scene or "")),
+                                  topic=_guard_src,
                                   hint_defense=hint_defense, mix_guard=mix_guard,
                                   appearance_ref=appearance_ref,
                                   sheet_kind=_sheet_kind,
@@ -1685,6 +1943,9 @@ class CameraDirector:
                                    footwear_upper=bool(
                                        _plan["flags"].get(
                                            "footwear_upper")),
+                                   footwear_bare=bool(
+                                       _plan["flags"].get(
+                                           "footwear_bare")),
                                    body_object_boundary=body_object_boundary,
                                     body_object_boundary_upper=bool(
                                         _plan["flags"].get(
@@ -1692,7 +1953,10 @@ class CameraDirector:
                                    garment_boundary=garment_boundary,
                                     garment_boundary_upper=bool(
                                         _plan["flags"].get(
-                                            "garment_boundary_upper")))
+                                            "garment_boundary_upper")),
+                                   hand_placement=bool(
+                                       _plan["flags"].get("hand_placement")),
+                                   seat=bool(_plan["flags"].get("seat")))
         # 정면 응시 회피어 (2026-10-15) — positive 보강문과 짝이다.
         # 한쪽만 붙으면 방어가 조용히 사라진다 (같은 이음새 결함 실측 다수).
         if _gaze_neg:
@@ -1708,6 +1972,7 @@ class CameraDirector:
         # 왜(Why) 여기서 붙이나: 기존 가드 파이프라인은 텍스트 기반이라 분류
         # 결과를 억지로 끼워 넣으면 판정과 충돌한다. 문장 하나를 더하는 방식이
         # 가장 좁고 되돌리기 쉽다. 토픽이 "2번 의상" 이라고 했으면 쓰지 않는다.
+        _auto_roles = ""
         if ref_kinds and not _text_names_slots(analysis):
             _auto_roles = auto_reference_roles_positive(ref_kinds, image_labels)
             if _auto_roles:
@@ -1715,8 +1980,18 @@ class CameraDirector:
                 _log("[Camera Director] 자동 역할 문장 적용 ("
                      + ", ".join(f"{k}번={v}"
                                  for k, v in sorted(ref_kinds.items())) + ")")
+        # prompt_in 경로도 같은 자동 역할 문장을 병합할 수 있게 상태로 넘긴다
+        # (2026-10-25 감사). 왜(Why): 이 문장은 여기(base)에서만 붙어 prompt_out
+        # 에 들어갔다. prompt_in 경로는 positive_text 를 앵커로 **다시** 세우므로
+        # 이 문장이 사라져, 사물 참조에 "keep its exact shape, material and
+        # colour" 지시가 빠졌다(실측: 나무 의자 제품 샷 + 참조 1장에서 base/standalone
+        # 에는 있고 prompt_in 에는 없음). _last_image_labels 와 같은 상태 전달 패턴.
+        self._last_auto_roles = _auto_roles
         self._last_camera = dict(camera)
         self._last_llm_extra = llm_extra
+        # LLM 이 서술한 참조 인물 의상 (2026-10-25). run_prompt 의 최종 병합부가
+        # prompt_in 유무와 무관하게 같은 값을 읽는다. 규칙 tier 는 "".
+        self._last_llm_outfit = llm_outfit
         self._last_image_count = image_count
         self._last_image_labels = list(image_labels)
         # Skills(run_prompt) 경로는 run() 을 거치지 않으므로 LLM 시트 판정을
@@ -1813,23 +2088,131 @@ class CameraDirectorEncode(CameraDirector):
         # DWPreprocessor 결과(검은 배경 + 색 뼈대)를 받는다. 참조 사진이
         # 아니라 image_items(개수·vision·latent)에 넣지 않는다.
         optional["pose_image"] = ("IMAGE",)
+        # 호환용 자리 위젯 reference_max_mp (2026-10-23 되살림). 왜(Why) 지웠다가
+        # 되살렸나: 참조 해상도의 출처는 입력(latent_image)의 MP 로 옮겼으므로
+        # (아래 _prepare_qwen_image_data docstring) 사용자가 정할 값이 아니다.
+        # 그래서 지웠는데, **지우면 저장된 위젯 값이 한 칸씩 밀렸다.**
+        # 실측 (2026-10-23, 브라우저에서 확인): ComfyUI 프런트엔드는 저장된
+        # widgets_values 를 자리 순서로 위젯에 넣는다. 옛 워크플로(이 위젯이
+        # 있던 시절 저장)는 값이 23개다. 위젯이 22개가 되면 값 22개는 정상
+        # 정렬되지만 23개는 **provider(첫 optional 위젯)부터 한 칸 밀린다** —
+        # 제공자·모델명·주소가 엉뚱한 칸으로 가고 pf_steps 가 1 이 되어
+        # "steps 범위 이탈(8~150)" 경고가 뜬다. 즉 "맨 뒤 위젯이라 안 밀린다"
+        # 는 판단은 틀렸다.
+        # 그래서 **값은 쓰지 않고 자리만 지키는** 위젯으로 남긴다. 화면에는
+        # hidden 으로 감추므로(llm_hint 와 같은 방식) 사용자가 다룰 숫자는
+        # 여전히 없다. 이 자리를 다시 지우려면 위 밀림 실측을 먼저 보라.
+        optional["reference_max_mp"] = ("FLOAT", {
+            "default": 1.0, "min": 0.0, "max": 64.0, "step": 0.5,
+            "hidden": True,
+            "tooltip": ("호환용 자리 — 값은 쓰이지 않는다. 참조 해상도는 "
+                        "latent_image 입력의 픽셀 수를 따른다."),
+        })
+        # 참조 충실(가드 압축)은 2026-10-26 부터 **내부 동작**이다 — 위젯이 없다.
+        # 왜(Why) 위젯을 되살리면 안 되나: 기본값이 꺼짐인 스위치가 있으면 기본
+        # 동작이 두 계약으로 갈리고, 그 위젯을 모르는 사용자는 계속 참조를 잃는다
+        # (실측 2026-10-26: 규칙 경로 3.26% 대 17.51%). 설계와 근거는
+        # docs/dev-loop/2026-10-26-ref-fidelity-internal/ 참조. 옛 워크플로가
+        # 이 위젯 값을 들고 있어도 안전하다 — 위젯은 optional 맨 뒤였고, 서버는
+        # 모르는 입력 키를 kwargs 에 넣지 않는다(execution.py:173-195).
         return {"required": required, "optional": optional,
                 "hidden": dict(base.get("hidden", {}))}
 
     @staticmethod
-    def _reference_target_size(latent_image):
+    def _reference_target_size(latent_image, vae=None):
         """reference 목표 크기 (w, h). latent 미연결·파손이면 (None, None).
 
         왜(Why): _prepare와 run_prompt(기준 latent 조회)가 같은 캐시 키를
         써야 적중한다. 계산을 한 곳에 둔다.
+
+        왜(Why) 배수를 어디서 읽나 (2026-10-23): `_latent_mp` 와 같은 규칙이다
+        — **latent 가 선언한 배수가 먼저**(`_latent_declared_ratio`)이고,
+        선언이 없으면 vae.downscale_ratio, 그것도 없으면 16 이다. 선언을 모델
+        비율로 덮어쓰면 빈 latent 노드가 보낸 8 배 격자를 16 배로 읽어 참조가
+        4배가 된다 (실측은 `_latent_declared_ratio` 주석에).
         """
         try:
             samples = latent_image.get("samples") if isinstance(latent_image, dict) else None
             if samples is not None and samples.ndim == 4:
-                return (int(samples.shape[-1]) * 16, int(samples.shape[-2]) * 16)
+                _ratio = _latent_declared_ratio(latent_image)
+                if _ratio is None:
+                    _ratio = _vae_ratio(vae)
+                return (int(samples.shape[-1]) * _ratio, int(samples.shape[-2]) * _ratio)
         except Exception:
             pass
         return (None, None)
+
+    @staticmethod
+    def _canvas_fit_latent(ref_latent, latent_image, vae=None):
+        """기준 latent 출력을 사용자 캔버스(latent_image)의 H,W 에 맞춘다.
+
+        왜(Why) 필요한가 (2026-10-23 실측 / 2026-10-24 재적용): 이 노드의 5번 출력은
+        샘플러의 시작 latent 로 연결된다. 샘플러가 만드는 이미지 크기는 시작 latent
+        의 H,W 가 정하므로, 이 값이 사용자가 고른 빈 latent 와 같아야 "내가 고른
+        비율로 나온다" 가 성립한다. 이 함수가 없으면 13가지 비율을 모두 넣어도 출력이
+        참조 사진 비율로 고정된다 — 2026-10-24 실측: 79번을 16:9 로 두든 9:16 으로
+        두든 저장된 출력이 똑같이 736x1328 이었다(참조 사진 비율).
+
+        2026-10-24 왕복 기록: 이 함수는 522a302 에서 "비율을 바꾸니 같은 시드의 결과가
+        달라졌다" 는 이유로 한 번 빠졌다. 다시 넣는 이유는 그 변화가 denoise=1.0 에서
+        **필연**이기 때문이다 — 시작 latent 의 모양이 곧 시드이므로 비율을 바꾸면
+        그림이 달라지는 것이 정상이고, 달라지지 않는 쪽이 고장이다. 대가(합의):
+        비율을 바꾸면 같은 시드라도 그림이 바뀐다.
+
+        왜(Why) vae 를 받나 (2026-10-23 실측 회귀): 캔버스 격자를 **샘플러가 보는
+        크기로 환산**해야 한다. 빈 latent 노드는 `height//8` 격자에 선언 8 을 붙여
+        보내지만 Qwen 2.1 VAE 는 16 배다. 환산 없이 격자를 그대로 내보내면
+        `fix_empty_latent_channels` 가 **비어 있지 않은** 참조 latent 을 보정하지
+        않아(comfy/sample.py:49~56 — is_empty 일 때만 선언을 쓴다) 샘플러가 raw 격자로
+        돌고 디코드 x16 에서 출력이 4배가 된다(768x1344 를 고르면 2688x1536 이 나간다).
+        그래서 comfy/sample.py:53~56 과 같은 식으로 선언/모델 비율만큼 줄인다. 선언이
+        없거나 vae 가 없으면 환산하지 않는다 — 기존 계약(격자 그대로)이 그대로 유지된다.
+
+        조건화(positive 안의 reference_latents)는 이 함수를 지나지 않는다 — Qwen 이
+        참조 레이아웃을 따라가는 동작과 캐시 키는 그대로다(R216·R217 계약).
+
+        반환: 캔버스 크기로 맞춘 latent dict. 캔버스가 없거나 파손이면 원본을
+        **같은 객체로** 돌려준다(하위호환 — latent_image 를 연결하지 않은 기존
+        그래프의 결과가 한 픽셀도 안 바뀐다).
+        """
+        if ref_latent is None:
+            return None
+        try:
+            samples = (ref_latent.get("samples")
+                       if isinstance(ref_latent, dict) else ref_latent)
+            canvas = (latent_image.get("samples")
+                      if isinstance(latent_image, dict) else latent_image)
+            if (samples is None or canvas is None
+                    or getattr(samples, "ndim", 0) != 4
+                    or getattr(canvas, "ndim", 0) != 4):
+                return ref_latent
+            target_h, target_w = int(canvas.shape[-2]), int(canvas.shape[-1])
+            # 캔버스 격자 → 모델 격자 환산 (선언이 모델 비율과 다를 때만).
+            _decl = _latent_declared_ratio(latent_image)
+            _model = getattr(vae, "downscale_ratio", None)
+            if (_decl is not None and not isinstance(_model, bool)
+                    and isinstance(_model, int) and _model > 0
+                    and _decl != _model):
+                target_h = max(1, int(round(target_h * _decl / float(_model))))
+                target_w = max(1, int(round(target_w * _decl / float(_model))))
+            if (int(samples.shape[-2]), int(samples.shape[-1])) == (target_h, target_w):
+                return ref_latent      # 이미 같은 크기 — 텐서를 새로 만들지 않는다
+            import torch.nn.functional as _F
+            fitted = _F.interpolate(samples.float(), size=(target_h, target_w),
+                                    mode="bicubic", align_corners=False)
+            fitted = fitted.to(dtype=samples.dtype, device=samples.device)
+            _note_once(
+                "camera.ref_canvas_fit",
+                "[Camera Director] 기준 latent 를 캔버스 크기로 맞춥니다 "
+                "(참조 사진 비율 대신 사용자가 고른 크기).")
+            return {"samples": fitted}
+        except Exception as exc:  # noqa: BLE001
+            # 왜(Why) 말하나: 조정이 조용히 실패하면 5번 출력이 다시 참조 사진
+            # 비율로 나가는데 화면에는 아무 단서가 없다.
+            _note_once("camera.ref_canvas_fit_fail",
+                       "[Camera Director] 기준 latent 크기 조정 실패 — 참조 사진 "
+                       f"비율로 진행: {type(exc).__name__}: {str(exc)[:80]}")
+            return ref_latent
 
     @staticmethod
     def _prepare_qwen_image_data(image_items, vae=None, latent_image=None,
@@ -1846,6 +2229,18 @@ class CameraDirectorEncode(CameraDirector):
         photograph of one young woman" 라고 명시해도 4뷰가 나온다.
         프롬프트로는 이길 수 없다 — pixel-level 레이아웃 힌트라서.
         그래서 시트는 LLM(신원 파악)에만 보여주고 diffusion 에서는 뺀다.
+
+        크기 규칙 (2026-10-23 사용자 판정): **참조 픽셀 수 = 입력(latent_image)
+        픽셀 수.** 참조 사진의 종횡비는 그대로 두므로 격자 셀 수가 입력과
+        같아지고 모양만 사진대로 남는다. 입력이 연결되지 않았으면 따를 값이
+        없으므로 1MP(QWEN_REF_MAX_PIXELS)로 폴백한다.
+
+        모양 규칙 (2026-10-23 판정): **참조 종횡비를 캔버스로 강제하지 않는다.**
+        캔버스가 16:9 인데 사진이 세로면 참조도 세로다. 여백·크롭·늘리기로
+        모양을 맞추는 세 방식은 A/B 6판 실측에서 모두 현행보다 나쁘거나
+        이득이 없었다(아래 크기 계산부 주석에 수치). 모양을 맞추려면
+        **사용자가 사진을 그 모양으로 준비**한다 — 그러면 아래 계산이 그
+        모양을 그대로 낸다. R216 이 이 판정을 잠근다.
         """
         latent_skip_labels = {str(x) for x in (latent_skip_labels or set())}
         if not image_items:
@@ -1856,18 +2251,27 @@ class CameraDirectorEncode(CameraDirector):
             # 읽는다. 한 번만 말하고 텍스트 경로로 계속 진행한다.
             _note_once("camera.qwen_not_tensor",
                        "[Camera Director] 참조 이미지에 tensor 속성(movedim)이 "
-                       "없어 Qwen 이미지·latent 준비를 건너뜁니다 "
+                       "없어 이미지·latent 준비를 건너뜁니다 "
                        "(텍스트 지시만 반영됩니다).")
             return [], None
         try:
             import comfy.utils
             import node_helpers
         except Exception as exc:  # noqa: BLE001
-            _log(f"[GoRi Camera Director Skills] ComfyUI Qwen image utility unavailable, text fallback: {exc}")
+            _log("[GoRi Camera Director Skills] ComfyUI image utilities "
+                 f"unavailable (comfy.utils/node_helpers), text fallback: {exc}")
             return [], None
         ref_latents = []
         images_vl = []
-        target_w, target_h = CameraDirectorEncode._reference_target_size(latent_image)
+        target_w, target_h = CameraDirectorEncode._reference_target_size(
+            latent_image, vae=vae)
+        # 참조 크기의 출처는 입력이다 (2026-10-23 사용자 판정). 왜(Why):
+        # 2026-10-22 의 위젯 reference_max_mp 는 1MP 하드 상한을 열었지만 입력에
+        # 묶지 않아서, 입력 1MP 에 위젯 2.0 을 넣으면 참조가 2MP 로 인코딩됐다 —
+        # 생성에 쓰이지 않는 해상도라 정보가 늘지 않고 격자만 어긋난다. 사용자
+        # 관찰: 그 어긋남이 피부 변화로 눈에 보인다. 그래서 상한을 없애고
+        # **참조 픽셀 수 = 입력 픽셀 수** 로 맞춘다. 따를 입력이 없을 때만
+        # (latent 미연결) 종전 하드값 1MP 로 폴백한다.
         for _label, image in image_items:
             try:
                 # **(H,W,C) 3차원 입력을 (1,H,W,C) 로 정규화한다** (2026-10-19).
@@ -1890,15 +2294,27 @@ class CameraDirectorEncode(CameraDirector):
                     continue
                 samples = image[:1].movedim(-1, 1)
                 if target_w and target_h:
+                    # 참조 픽셀 수 = 입력 픽셀 수 (1:1). 사진의 종횡비는 유지하므로
+                    # 격자 셀 수가 입력과 같아지고 모양만 사진대로 남는다.
+                    # 16 배수 정렬: VAE 가 H//16 으로 격자를 만든다 — 정렬하지
+                    # 않으면 의도한 픽셀 수와 실제 격자가 몇 칸 어긋난다.
                     ratio = samples.shape[3] / samples.shape[2]
-                    width = target_w
-                    height = round(width / ratio)
-                    if width * height > QWEN_REF_MAX_PIXELS:
-                        # latent가 2~3MP여도 reference는 1MP 상한 (종횡비 유지 축소)
-                        scale = (QWEN_REF_MAX_PIXELS / (width * height)) ** 0.5
-                        width = max(32, round(width * scale))
-                        height = max(32, round(height * scale))
-                    width, height = max(32, width), max(32, height)
+                    _px_in = float(target_w) * float(target_h)
+                    width = int(round((_px_in * ratio) ** 0.5))
+                    height = int(round((_px_in / ratio) ** 0.5))
+                    width = max(32, int(round(width / 16.0)) * 16)
+                    height = max(32, int(round(height / 16.0)) * 16)
+                    # 왜(Why) 모양까지 캔버스에 맞추지 않나 (2026-10-23 A/B 6판):
+                    # 캔버스 1344x736(16:9) · 세로 사진(비율 0.558) 기준 실측.
+                    #  여백   볼 색 +1.2/+4.6/+5.2% · 배치 추론 -155자 소실
+                    #         → 이득 없음 (세 방식 중 가장 온건)
+                    #  크롭   -10.3/-21.6/-27.3% · 코트 소실 · 얼굴이 다른 사람
+                    #         → 파괴적
+                    #  늘리기 체형과 얼굴이 넓어짐 → 왜곡
+                    # 셋 다 현행(사진 비율 유지)보다 나쁘거나 이득이 측정되지
+                    # 않아 모양 강제를 넣지 않는다. 그 판정을 R216 이 잠근다 —
+                    # 여백·크롭·늘리기가 들어오면 참조 비율이 캔버스 비율이 되어
+                    # R216-3 이 곧바로 깨진다.
                 else:
                     total = QWEN_REF_MAX_PIXELS
                     scale_by = ((total / (samples.shape[3] * samples.shape[2])) ** 0.5)
@@ -1996,13 +2412,25 @@ class CameraDirectorEncode(CameraDirector):
                     image_9=None, image_10=None, llm_hint="", unique_id=None,
                     prompt=None, extra_pnginfo=None,
                     vision_detail=VISION_DETAIL_DEFAULT,
-                    pf_steps=0, pf_cfg=0.0, pf_denoise=0.0, pose_image=None):
+                    pf_steps=0, pf_cfg=0.0, pf_denoise=0.0, pose_image=None,
+                    reference_max_mp=1.0):
+        # reference_max_mp 는 자리만 지키는 호환 위젯이라 값이 쓰이지 않는다
+        # (INPUT_TYPES 주석 참조). 그런데 **받아 두기는 해야 한다** — ComfyUI 는
+        # 프롬프트에 실린 입력 키를 전부 f(**inputs) 로 넘기므로(execution.py
+        # get_input_data), 위젯이 존재하는 한 이 인자가 없으면 실행이
+        # TypeError 로 죽는다. llm_hint(같은 hidden 위젯)도 같은 이유로 받는다.
+        del reference_max_mp
         image_items = [
             (1, image_1), (2, image_2), (3, image_3), (4, image_4), (5, image_5),
             (6, image_6), (7, image_7), (8, image_8), (9, image_9), (10, image_10),
         ]
         image_items = [(label, img) for label, img in image_items if img is not None]
-        prompt_out, negative_text, _ = CameraDirector.run(
+        # base run 의 negative 는 쓰지 않는다 — 아래에서 build_camera_negative 로
+        # 카메라 전용 negative 를 **다시 만든다**(그 과정에 llm_extra·방어어를
+        # 병합한다). 그래서 여기서 받은 negative 는 즉시 버려지는 값이다.
+        # 언팩은 자리만 지킨다(2026-10-25 죽은 변수 정리 — 종전 이름
+        # `negative_text` 는 2832 에서 곧바로 재할당돼 한 번도 읽히지 않았다).
+        prompt_out, _, _ = CameraDirector.run(
             self, topic=topic, preset=preset, automation=automation,
             shot=shot, lens=lens, angle=angle, composition=composition,
             lighting=lighting, grade=grade, motion=motion,
@@ -2051,7 +2479,7 @@ class CameraDirectorEncode(CameraDirector):
                 _log("[Camera Director] ⚠ 번역 실패 — prompt_in 원문을 사용합니다")
         # latent 크기 점검 (base run에는 latent가 없어 여기서만 가능).
         for _warn in preflight_warnings(external_prompt or (topic or ""),
-                                        camera, latent_mp=_latent_mp(latent_image)):
+                                        camera, latent_mp=_latent_mp(latent_image, vae=vae)):
             _log(f"[Camera Director] 출발 점검 ⚠ {_warn}")
         # 국가 표현형·포즈 참조 가드는 참조 슬롯 정보를 함께 봐야 하므로
         # 바깥에서 확보한다 (negative 생성도 이 블록 밖에서 일어난다).
@@ -2136,8 +2564,11 @@ class CameraDirectorEncode(CameraDirector):
         _detail_def_pi = _gflags_pi["detail_def"]
         _anatomy_count_pi = _gflags_pi["anatomy_count"]
         _footwear_pi = _gflags_pi["footwear"]
+        _footwear_bare_pi = _gflags_pi["footwear_bare"]
         _boundary_pi = _gflags_pi["body_object_boundary"]
         _garment_pi = _gflags_pi["garment_boundary"]
+        # 손 배치 (2026-10-24, R220) — base run 과 같은 plan 조각.
+        _hand_place_pi = _gflags_pi["hand_placement"]
         _pose_pos_pi = _gpos_pi["pose"]
         _phys_pos_pi = _gpos_pi["physics"]
         _phys_neg_pi = _plan_pi["physics_neg"]
@@ -2171,6 +2602,20 @@ class CameraDirectorEncode(CameraDirector):
             base_text = self._combine_prompt_text(base_text, outfit_anchor)
             base_text = self._combine_prompt_text(base_text, duo_anchor)
             base_text = self._combine_prompt_text(base_text, role_anchor)
+            # 자동 분류 역할 문장 (2026-10-25 감사) — base run 이 분류 결과로 만든
+            # 문장을 여기서도 병합한다. 왜(Why): 이 문장은 base 에서만 붙어
+            # prompt_out 으로 나갔고, prompt_in 경로는 앵커로 다시 세우느라 그것을
+            # 잃었다. 다만 **참조에 사람이 있을 때는 병합하지 않는다** — 그때는
+            # 신원·보조 역할 앵커가 이미 참조 사용법을 정해 두었고(빈 topic 이어도
+            # 2번 사람을 주 피사체로 지목한다), 자동 역할 문장을 겹치면 R172 가
+            # 금지하는 "reference image 1"(비주체 참조를 포함 대상으로 지목)이
+            # 다시 나타난다. 사람이 없으면 앵커가 비어(build_identity_anchor 는
+            # 비-사람이면 "") 이 문장이 참조 사용법을 알리는 유일한 문구라
+            # 반드시 필요하다 — base/standalone 과 같은 문장을 넣는다.
+            _auto_roles_pi = (getattr(self, "_last_auto_roles", "") or "").strip()
+            if (_auto_roles_pi and not _hint_person_slots()
+                    and _auto_roles_pi not in base_text):
+                base_text = self._combine_prompt_text(base_text, _auto_roles_pi)
             # topic 칸도 **장면 텍스트로 포함**한다 (2026-10-13 사용자 지시).
             # 왜(Why) 고쳤나: 종전에는 prompt_in 이 연결되면 topic 텍스트가
             # 프롬프트에서 **조용히 빠졌다.** 판정용 텍스트(_eth_text_pi)에는
@@ -2181,12 +2626,18 @@ class CameraDirectorEncode(CameraDirector):
             # (네거티브에는 넣지 않는다 — topic 은 긍정 서술이라 부정문이 되면
             #  positive 와 정면 충돌한다. 2026-10-11 MIX_GUARD 실측과 같은 이유.)
             _scene_pi = (topic or "").strip()
-            _scene_pi_en = _scene_pi
-            if _tier_rp != "llm" and _scene_pi:
-                if _looks_like_synopsis(_scene_pi):
-                    _syn = structure_ko_synopsis(_scene_pi)
+            # 역할 선언 줄 분리 (2026-10-23, AC-12): Skills(topic) 경로에도 같은
+            # 표기가 들어온다 — 이 노드가 사용자가 실제로 실행하는 노드다.
+            # 보정 근거(_scene_pi → fix_footwear/fix_pose)는 **원문 그대로** 두고,
+            # 번역 입력과 프롬프트 문장만 scene_out 을 쓴다(design 4절과 같은 원칙).
+            _scene_pi_out = (_scene_pi if _tier_rp == "llm"
+                             else scene_text(topic))
+            _scene_pi_en = _scene_pi_out
+            if _tier_rp != "llm" and _scene_pi_out:
+                if _looks_like_synopsis(_scene_pi_out):
+                    _syn = structure_ko_synopsis(_scene_pi_out)
                     _syn_en = _syn.get("scene_en", "")
-                    if _syn_en and _syn_en != _scene_pi:
+                    if _syn_en and _syn_en != _scene_pi_out:
                         _scene_pi_en = _syn_en
                         _h = _syn.get("hints", {}) or {}
                         _h_log = ", ".join(f"{k}" for k, v in _h.items()
@@ -2198,28 +2649,36 @@ class CameraDirectorEncode(CameraDirector):
                         # _has_cjk 가드 — 영어 topic 은 번역 대상이 아니라
                         # translate 가 None(정상)을 돌려 기본값(_scene_pi)을
                         # 유지한다. 가드 없이 호출해도 결과는 같고 조용하다.
-                        if _has_cjk(_scene_pi):
-                            _tr = translate_ko_to_en(_scene_pi)
+                        if _has_cjk(_scene_pi_out):
+                            _tr = translate_ko_to_en(_scene_pi_out)
                             if _tr:
                                 _scene_pi_en = _en_normalize(
                                     fix_footwear_clause(
                                         _scene_pi,
                                         fix_pose_clause(_scene_pi, _tr)))
                 else:
-                    if _has_cjk(_scene_pi):
-                        _tr = translate_ko_to_en(_scene_pi)
+                    if _has_cjk(_scene_pi_out):
+                        _tr = translate_ko_to_en(_scene_pi_out)
                         if _tr:
                             _scene_pi_en = _en_normalize(
                                 fix_footwear_clause(
                                     _scene_pi, fix_pose_clause(_scene_pi, _tr)))
-            _user_text = external_prompt_en
-            if _scene_pi:
-                if _scene_pi.lower() in external_prompt.lower():
+            # 역할 선언 줄 분리 (R224, 2026-10-24 실측): prompt_in 경로에도 같은
+            # 표기가 들어온다 — 워크플로의 GoogleTranslateTextNode 가 토픽을 영어로
+            # 미리 번역해 넣으면 `Number 1: ... / Directed by: <장면>` 이 최종
+            # 프롬프트에 그대로 실렸다(8389자). 위 topic 경로와 **같은 함수**를
+            # 쓴다 — 따로 만들면 한쪽만 갱신돼 조용히 갈린다.
+            # LLM tier 는 이미 영문 장면이라 손대지 않는다(_scene_pi_out 과 같은 규칙).
+            _external_out = (external_prompt_en if _tier_rp == "llm"
+                             else scene_text(external_prompt_en))
+            _user_text = _external_out
+            if _scene_pi_out:
+                if _scene_pi_out.lower() in _external_out.lower():
                     _log("[Camera Director] topic 칸 텍스트가 prompt_in 에 이미 "
                          "포함돼 있어 중복을 생략합니다 (장면 문장 1회만)")
                 else:
                     _user_text = self._combine_prompt_text(
-                        _scene_pi_en, external_prompt_en)
+                        _scene_pi_en, _external_out)
             # 배경 지정 문장 보정 (2026-10-15, base run과 동일 판정):
             # 번역기가 뭉갠 자기참조 배경 문장은 지시력을 잃는다.
             _ko_user_pi = (topic or "") + " " + (external_prompt or "")
@@ -2264,11 +2723,67 @@ class CameraDirectorEncode(CameraDirector):
                               + ". " + _item_pos_pi)
                 _log("[Camera Director] 의류 색상 고정 가드 활성 (positive "
                      "고정 + negative 오색)")
+            # 좌석 접촉점을 장면 문장 **뒤**로 옮긴다 (2026-10-25, R239).
+            # 왜(Why) — 실측 A/B (같은 실행 그래프, seed 42, tier=규칙, 참조 4장).
+            # 네 실행 모두 좌석·가구 가드가 동일하게 발동했는데 의자(2번 참조)
+            # 충실도가 갈렸다: `#112` 가 98자(노드 가드만)인 실행은 의자가
+            # **소실**됐고, 같은 가드 **원문**을 장면 문장 뒤에 둔 실행은 의자가
+            # **회복**됐다. 즉 문구 내용은 옳고 **위치가 틀렸다** — 종전 자리인
+            # 꼬리에는 조항이 15개 더 이어져 희석된다.
+            # 옮기는 것은 **접촉점 조항 하나**다. 실측에서 접촉점만 넣으면 의자가
+            # 살아나고 의상이 멀쩡했으나, 방향 조항만 넣거나 둘 다 넣으면
+            # 카디건이 사라졌다(그 조항은 `reference image 2` 를 반복 지목하는
+            # 긴 문장이라 앞에 두면 꼬리 가드를 희석한다). 그래서 방향 조항은
+            # 가구 DNA 안의 종전 자리를 지킨다.
+            # 장면 문장을 **따르는** 자리여야 한다 — 앞에 두면 무효였다(실측).
+            if _gpos_pi.get("seat"):
+                _user_text = (_user_text.rstrip().rstrip(".")
+                              + ". " + _gpos_pi["seat"])
+                _log("[Camera Director] 좌석 접촉점 가드 활성 ("
+                     + "/".join(str(x) for x in
+                                sorted(_plan_pi["seat_slots"]))
+                     + "번 — 장면 문장 뒤로 이동, 체중이 좌석 쿠션에, "
+                     "팔걸이 걸터앉음 방어)")
             base_text = self._combine_prompt_text(base_text, _user_text)
             positive_text = self._combine_prompt_text(base_text, camera_text)
         else:
             positive_text = prompt_out
             single_person_anchor = ""
+            # 정면 응시·의류 색상의 negative 회피어를 standalone 에서도 살린다
+            # (2026-10-25 비대칭 결함 수정). 왜(Why) 필요한가: 이 두 가드의
+            # 보강문(positive)은 base run 이 만든 prompt_out 에 이미 들어 있는데
+            # (positive_text = prompt_out), negative 는 아래에서
+            # build_camera_negative 로 **다시 만든다** — base run 의 negative 를
+            # 쓰지 않는다. 그 재조립에는 gaze/item 회피어가 없어서 positive 에는
+            # 있고 negative 에는 없는 비대칭이 됐다(실측: standalone 정면 응시·
+            # 의류 색상 회피어 유실). 위 `if external_prompt:` 블록 안에서만
+            # 계산되던 것을 여기서도 같은 함수·같은 원문 소스로 계산해 짝을 맞춘다
+            # (소스는 위 분기와 동일하게 topic + prompt_in 으로 맞춘다).
+            _guard_src_pi = (topic or "") + " " + (external_prompt or "")
+            _gaze_pos_pi, _gaze_neg_pi = gaze_forward_guard(
+                _guard_src_pi, positive_text)
+            _item_pos_pi, _item_neg_pi = color_adherence_guard(
+                _guard_src_pi, positive_text)
+            # 짝 강제 (2026-10-25 감사). 이 분기의 positive_text 는 base run 의
+            # prompt_out 이라, 그 가드의 보강문이 이미 들어 있으면 negative 만
+            # 더하면 짝이 맞는다. 문제는 **보강문 없이 negative 만 붙는 경로**다:
+            # 위 gaze_forward_guard 는 en_text(최종 프롬프트)에서 영문 마커를
+            # 찾는데, 그 안에는 사물 방향 잠금 상용구("The side facing the camera
+            # in the reference ...", FURNITURE_ORIENTATION_POSITIVE)의
+            # "facing the camera" 도 들어 있다. 사람 주제 + 사물 참조에서 이것이
+            # 정면 응시 마커로 **오탐**되고, base run 은 자기 소스(장면문)로
+            # 판정하므로 보강문을 넣지 않는다 — 그래서 negative 만 나가
+            # 요청하지 않은 "profile view·side glance" 회피어가 측면·옆모습
+            # 구도를 억제했다(실측 재현: _workspace/probe10_gaze_natural.py).
+            # 보강문이 실제로 없으면 negative 도 붙이지 않는다(짝 불변식).
+            if (_gaze_neg_pi
+                    and "directly into the camera" not in positive_text.lower()):
+                _gaze_neg_pi = ""
+            # 색상 고정도 같은 불변식을 적용한다 — 보강문이 없으면 회피어도 뺀다.
+            if (_item_neg_pi
+                    and "kept true to the requested shade"
+                    not in positive_text.lower()):
+                _item_neg_pi = ""
         # R196 (2026-10-22 실측) — 단서 로그는 **최종 텍스트에서 한 번만**.
         # 왜(Why) 종전에는 같은 줄이 2번 찍혔나: run() 과 run_prompt() 가 각자
         # 자기 삽입에 로그를 남겼는데, 두 분기 중 **한쪽 삽입은 항상 버려진다**
@@ -2379,16 +2894,28 @@ class CameraDirectorEncode(CameraDirector):
                     positive_text, _gpos_pi["limb_integrity"])
                 _log("[Camera Director] 다리·발·종아리 무결성 가드 활성 "
                      "(추가 발·휜 종아리·손 뭉갬 방어)")
-            if _footwear_pi:
+            if _footwear_pi or _footwear_bare_pi:
                 positive_text = self._combine_prompt_text(
                     positive_text, _gpos_pi["footwear"])
             if _boundary_pi:
                 positive_text = self._combine_prompt_text(
                     positive_text, _gpos_pi["body_object_boundary"])
+            # 좌석 접촉점 (2026-10-24, R226) 은 여기(꼬리)에 있지 않다.
+            # 2026-10-25 R239 실측: 꼬리에서는 뒤따르는 15개 조항에 희석돼
+            # 의자가 소실됐다. 위 장면 조립 블록(장면 문장 바로 뒤)으로 옮겼다.
+            # 방향 조항(SEAT_ORIENTATION_POSITIVE)은 가구 DNA 안 종전 자리를
+            # 지킨다 — 그 조항은 `reference image 2` 를 반복 지목하는 긴
+            # 문장이라 앞에 두면 의상 보존 꼬리 가드를 희석한다(b8/b4 실측).
             # 의복 경계 (2026-10-16) — 위 가구 경계와 짝이다.
             if _garment_pi:
                 positive_text = self._combine_prompt_text(
                     positive_text, _gpos_pi["garment_boundary"])
+            # 손 배치 (2026-10-24, R220) — base run 과 같은 plan 조각.
+            if _hand_place_pi:
+                positive_text = self._combine_prompt_text(
+                    positive_text, _gpos_pi["hand_placement"])
+                _log("[Camera Director] 손 배치 가드 활성 "
+                     "(두 손 겹침·한 덩어리 합침·손가락 넘어감 방어)")
             if _cs_text_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _cs_text_pi)
@@ -2435,6 +2962,18 @@ class CameraDirectorEncode(CameraDirector):
             if _phys_pos_pi:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           _phys_pos_pi)
+            # 간격 유지 가드(spacing)도 prompt_in 경로에 병합한다 (2026-10-23).
+            # 왜(Why) 필요했나: base run 은 `_plan["positive"]["spacing"]` 을
+            # 붙이는데(1652) prompt_in 경로는 physics/ground 만 읽어, 이 가드가
+            # **단독으로 서는 경우**(physics positive 가 비어 있고 참조 2장 이상)
+            # positive 문구만 사라지고 짝 negative 는 그대로 나갔다 — "간격을
+            # 벌리지 마라" 만 있고 "측정된 거리·지면을 유지하라" 가 없는 한 방향
+            # 방어였다(실측: BASE positive True / prompt_in False). plan 조각
+            # `spacing` 은 physics positive 가 있으면 이미 빈 값이므로(442)
+            # 여기서 중복 병합은 생기지 않는다.
+            if _gpos_pi.get("spacing"):
+                positive_text = self._combine_prompt_text(
+                    positive_text, _gpos_pi["spacing"])
             # 배경 지면 고정 가드도 prompt_in 경로에 병합한다 (base run과
             # 동일 판정 — plan 하나가 두 경로의 positive/negative 를 만든다).
             if _gpos_pi["ground"]:
@@ -2445,14 +2984,27 @@ class CameraDirectorEncode(CameraDirector):
             # 품질 가드도 prompt_in 경로에 병합한다 (base run의
             # assemble → add_quality_guard 에 해당. 왜(Why): 이 경로에만
             # 빠져 있어 prompt_in 실행에서 품질 지시가 없었다
-            # 2026-10-07 감사). 동물 전용 주제면 동물용 가드를 쓴다
-            # (add_quality_guard 와 동일 분기 — 사람 손가락 지시가
-            # 동물 그림과 정면 충돌한다).
-            _only_animal_pi = (_is_animal_subject(_eth_text_pi)
-                               and not _is_human_subject(_eth_text_pi))
+            # 2026-10-07 감사). 주제에 맞는 상수는 quality_guard_text 한 곳이
+            # 고른다 (사람 / 동물 전용 / 비인간 장면 — 2026-10-25 감사 통합).
+            # add_quality_guard 와 **같은 함수**를 써서 두 경로가 갈리지 않는다.
             positive_text = self._combine_prompt_text(
-                positive_text,
-                QUALITY_GUARD_ANIMAL if _only_animal_pi else QUALITY_GUARD)
+                positive_text, quality_guard_text(_eth_text_pi))
+        # LLM 의상 서술을 최종 문장에 반영한다 (2026-10-25, AC-2).
+        # 왜(Why) 여기가 유일한 자리인가: prompt_in 이 연결되면 base run 이 만든
+        # LLM 장면(prompt_out)은 이 함수에서 버려지고(위 분기), 이 노드는 앵커로
+        # 문장을 다시 세운다. 그래서 LLM 이 옷을 서술해도 그 문장이 최종 프롬프트에
+        # **닿지 못했다**(실측 2026-10-25: 장면에 "wearing elegant high heels" 만
+        # 남고 카디건·원피스 누락). 두 분기(prompt_in / standalone)를 **지난 뒤**
+        # 한 번만 붙여 양쪽이 같은 문구를 받게 한다. standalone 은 prompt_out 에
+        # 장면이 이미 들어 있어 중복이 될 수 있으므로 부분문자열 중복 검사로 막는다.
+        # 규칙(auto) tier 는 `_last_llm_outfit` 이 빈 값이라 무동작(AC-3).
+        if _tier_rp == "llm":
+            _llm_outfit_pi = (getattr(self, "_last_llm_outfit", "") or "").strip()
+            if _llm_outfit_pi and _llm_outfit_pi.lower() not in positive_text.lower():
+                positive_text = self._combine_prompt_text(
+                    positive_text, "wearing " + _llm_outfit_pi)
+                _log("[Camera Director] LLM 의상 서술을 프롬프트에 반영 ("
+                     + str(len(_llm_outfit_pi)) + "자)")
         prevent_duplicates = bool(single_person_anchor) if external_prompt else False
         # negative도 positive와 **같은 텍스트 소스**를 본다 (topic + prompt_in).
         # 왜(Why): 이음새가 어긋나면 positive에 붙은 지시의 짝인 negative가
@@ -2488,12 +3040,15 @@ class CameraDirectorEncode(CameraDirector):
             footwear=_footwear_pi,
             footwear_upper=bool(
                 _plan_pi["flags"].get("footwear_upper")),
+            footwear_bare=_footwear_bare_pi,
             body_object_boundary=_boundary_pi,
             body_object_boundary_upper=bool(
                 _plan_pi["flags"].get("body_object_boundary_upper")),
             garment_boundary=_garment_pi,
             garment_boundary_upper=bool(
                 _plan_pi["flags"].get("garment_boundary_upper")),
+            hand_placement=_hand_place_pi,
+            seat=bool(_gpos_pi.get("seat")),
             aspect_ratio=_aspect_ratio_pi)
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
@@ -2574,7 +3129,7 @@ class CameraDirectorEncode(CameraDirector):
         negative_out = self._combine_conditioning(negative, negative_cond)
         if positive is not None:
             _log("[GoRi Camera Director Skills] positive conditioning 입력은 새 문자열 경로에서 무시됩니다. "
-                 "Qwen positive_prompt 문자열을 prompt_in에 연결하세요.")
+                 "프롬프트 재작성기의 positive_prompt 문자열을 prompt_in에 연결하세요.")
         _log("[GoRi Camera Director Skills] positive_out/negative_out/prompt_out 출력 "
               f"(single_encode={bool(external_prompt or positive is None)})")
         # image_out: 역할 계획(plan)이 선출한 주 reference 이미지를 그대로 통과.
@@ -2615,16 +3170,25 @@ class CameraDirectorEncode(CameraDirector):
                         main_img = img
                         break
             image_out = main_img
-        # 기준 latent 출력 (3번 교정 노드용). _prepare가 이미 인코딩한 결과를
-        # 캐시 키로 조회만 한다 — 재인코딩 없음. vae 미연결이면 None.
+        # 기준 latent 출력 (3번 교정 노드·샘플러 시작 latent 용). _prepare가 이미
+        # 인코딩한 결과를 캐시 키로 조회만 한다 — 재인코딩 없음. vae 미연결이면 None.
+        # 2026-10-24 재적용: 이 출력을 사용자 캔버스 H,W 로 맞추는 `_canvas_fit_latent`
+        # (R215)를 다시 넣는다. 왜(Why) — 빠져 있는 동안 비율 위젯이 출력 크기를 정하지
+        # 못하는 고장이 실측으로 재현됐다(79번 16:9 -> 1344x736 · 9:16 -> 736x1344 인데
+        # 저장된 출력은 둘 다 736x1328 · 참조 사진 비율). 522a302 의 되돌림 근거였던
+        # "비율을 바꾸니 같은 시드에서 그림이 달라졌다" 는 denoise=1.0 에서 **필연**이다
+        # — 시작 latent 의 모양이 곧 시드이므로 비율을 바꾸면 그림이 바뀌는 것이 정상이다.
+        # 대가(합의 2026-10-24): 비율을 바꾸면 같은 시드라도 그림이 바뀐다. 그 맞바꿈을
+        # 사용자가 선택했다. 캔버스를 연결하지 않으면 같은 객체가 그대로 나간다(하위호환).
         reference_latent_out = None
         try:
             if vae is not None and main_img is not None:
-                _tw, _th = CameraDirectorEncode._reference_target_size(latent_image)
+                _tw, _th = CameraDirectorEncode._reference_target_size(latent_image, vae=vae)
                 _cached = _qwen_ref_cache_get(
                     _qwen_ref_cache_key(main_img, _tw, _th, vae), vae)
                 if _cached is not None and _cached[1] is not None:
-                    reference_latent_out = {"samples": _cached[1]}
+                    reference_latent_out = CameraDirectorEncode._canvas_fit_latent(
+                        {"samples": _cached[1]}, latent_image, vae=vae)
         except Exception as e:
             # 왜(Why) 말하나 (2026-10-07 라운드 2): 기준 latent 가 조용히
             # None 이 되면 3번 교정 노드가 "camera 기준 없음" 으로 죽고
@@ -2647,11 +3211,13 @@ class CameraDirectorEncode(CameraDirector):
 # 왜(Why): 같은 reference 이미지는 프롬프트를 바꿔도 매 실행마다
 # common_upscale(lanczos) + vae.encode()를 반복했다. VAE encode 1회가
 # 수초대라 반복 실행 체감 속도를 지배하므로, 내용 해시+목표 크기 키로
-# 재사용한다. latent가 2~3MP여도 reference는 1MP 상한으로 묶어
-# upscale/VAE/KSampler 부하가 해상도 비례로 불어나는 것을 막는다.
+# 재사용한다.
+# 크기 정책은 2026-10-23 부로 "참조 픽셀 수 = 입력 픽셀 수" 다 (사용자 판정).
+# 2026-10-22 에 있던 위젯은 제거됐다 — 값의 출처가 입력이 됐기 때문이다.
+# 이 상수는 이제 **입력이 없을 때(latent_image 미연결)만** 쓰는 폴백값이다.
 # ---------------------------------------------------------------------------
 
-QWEN_REF_MAX_PIXELS = 1024 * 1024  # reference conditioning 1MP 상한
+QWEN_REF_MAX_PIXELS = 1024 * 1024  # 입력 미연결 시 reference 폴백 1MP
 
 
 _QWEN_REF_CACHE: dict = {}
@@ -2810,7 +3376,17 @@ def _thumb_sig(image) -> str:
 
 
 def _qwen_ref_cache_key(image, target_w, target_h, vae) -> str:
-    """reference 캐시 키: 내용 썸네일 해시 + 목표 크기 + VAE 식별자."""
+    """reference 캐시 키: 내용 썸네일 해시 + 목표 크기 + VAE 식별자.
+
+    규칙 (2026-10-23 실측 사고): **참조 결과를 바꾸는 입력은 전부 이 키에
+    있어야 한다.** 빠지면 바뀐 입력으로 재실행해도 캐시에 먹혀 옛 참조가
+    나간다 — 실측: 참조 크기 상한이 키에 없던 동안 상한 1.0 판과 0.25 판의
+    출력이 픽셀까지 동일했다(maxAbs=0). 그래서 "참조를 키워도 비용이 안
+    는다" 는 결론이 나왔고, 실측은 정반대였다(2배 = 3.4배 시간).
+    참조 크기를 정하는 값(사진 내용 · 목표 크기 · VAE)은 지금 다 들어 있다.
+    새 입력을 참조에 반영하려면 이 키에도 넣어야 한다 (R217 이 인코딩 횟수로
+    잠근다).
+    """
     shape, digest = _thumb_digest(image, length=16)
     if digest is None:
         # 식별 불가 — 새 키로 항상 미스시킨다(_thumb_sig 와 같은 이유:

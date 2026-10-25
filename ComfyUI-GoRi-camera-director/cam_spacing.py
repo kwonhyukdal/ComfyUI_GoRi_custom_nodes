@@ -15,7 +15,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"SPACING_GRID", "SPACING_SKIN_CHROMA", "SPACING_RG", "SPACING_TOUCH_RATIO", "SPACING_APART_RATIO", "SPACING_FAR_RATIO", "SPACING_HEAD_BAND", "SPACING_BOTTOM_CROP", "_skin_score", "subject_spacing", "spacing_guard", "spacing_log_text"
+"SPACING_GRID", "SPACING_SKIN_CHROMA", "SPACING_RG", "SPACING_TOUCH_RATIO", "SPACING_APART_RATIO", "SPACING_FAR_RATIO", "SPACING_HEAD_BAND", "SPACING_BOTTOM_CROP", "_skin_score", "subject_spacing", "_declares_multiple_subjects", "spacing_guard", "spacing_log_text"
 ]
 
 
@@ -264,6 +264,35 @@ def subject_spacing(image) -> dict:
     return out
 
 
+def _declares_multiple_subjects(text: str) -> bool:
+    """topic 이 **다인을 선언**했는가 — `spacing_guard` 의 문구 게이트 전용.
+
+    왜(Why) 필요한가 (2026-10-24 실측): `spacing_guard` 의 docstring 은 "거리는
+    픽셀이, 인원수는 topic 이 맡고 **둘이 합의할 때만** 문구를 붙인다" 고 약속했는데,
+    실제 게이트는 `_is_human_subject(topic) or _is_multi_person_request(topic)`
+    이었다. `_is_human_subject` 는 **1인 장면에도 참**이라 통과했다 — 참조 1번
+    (한국 여성 1인)에서 코트 옆 조각이 별도 봉우리로 잡힌 측정값
+    (peaks=2 · apart=True · v_separate=True)에 "두 피사체" 문구 309자가 나갔다
+    (로그 360행, R222).
+
+    왜(Why) `_is_multi_person_request` 단독이 아닌가: 그 키워드 목록에는 "두 사람"
+    류만 있고 **콜론 선언**(`1번: 한국 여성` / `2번: 한국 남성`)이 없다. 그래서
+    사람 역할 슬롯이 2개 이상인지도 함께 본다. 세 신호 모두 cam_subject 의 기존
+    함수를 재사용하며, **콜론 없는 역할 표기를 판정에 읽는 새 함수는 만들지
+    않는다**(R211-5 계약 — 그 표기는 안내만 하고 판정에는 쓰지 않는다).
+
+    한계(정직): "1번 남자가 2번 여성을 포옹한다" 처럼 콜론도 키워드도 없는 문장은
+    셋 다 False 다. 그래서 **접촉(close) 문구는 이 함수로 게이트하지 않는다** —
+    게이트하면 그 계약(R45-3297)이 깨진다.
+    """
+    t = text or ""
+    if _is_multi_person_request(t):
+        return True
+    if _second_person_slots(t):
+        return True
+    return len(_person_role_slots(t)) >= 2
+
+
 def spacing_guard(measure: dict, topic: str) -> tuple:
     """(positive, negative). 픽셀 측정(거리) × topic(인원수)을 합쳐 판단.
 
@@ -275,6 +304,18 @@ def spacing_guard(measure: dict, topic: str) -> tuple:
     픽셀이 확실히 아는 것은 "떨어진 거리" 하나뿐이다. 그래서 부각은 "떨어져 있든
     붙어 있든 **측정된 거리를 유지하라**"로 통일한다 — 모델이 참조의 공간 관계를
     깨뜨리는(포옹인데 떨어지게, 떨어져 있는데 겹치게) 실패를 막는 것이 목적.
+
+    문구별 게이트가 **다르다** (2026-10-24 실측, R222):
+      - "두 피사체"를 전제한 `far`/`apart`/`v_separate` 는 topic 이 다인을 선언할
+        때만 낸다(`_declares_multiple_subjects`). 1인 사진이 픽셀 오검출(옆 조각
+        분리 · 세로 run)로 `apart=True` 가 되어도 "하나를 다른 하나보다 높게 두라"
+        가 나가면 안 된다 — 의자에 앉히는 장면에 그 지시가 붙으면 걸터앉음의
+        노드측 원인이 된다(실측 로그 360행).
+      - 접촉(`close`)은 게이트하지 않는다: "1번 남자가 2번 여성을 포옹한다" 같은
+        문장은 다인 신호 3종이 못 잡으므로, 게이트하면 그 계약(R45-3297)이 깨진다.
+        1인 사진은 `close=False` 라 이번 피해와 무관하다.
+      - 하단 여백 문구도 게이트하지 않는다: 1인 장면에도 "보이는 바닥을 그만큼
+        유지하라" 는 옳다(R45-3294).
     """
     try:
         m = measure or {}
@@ -283,11 +324,12 @@ def spacing_guard(measure: dict, topic: str) -> tuple:
         if not (_is_human_subject(topic or "") or _is_multi_person_request(topic or "")):
             return "", ""
         pos, neg = "", ""
+        _mp = _declares_multiple_subjects(topic or "")
         if m.get("close"):
             pos = ("spatial fidelity: keep the two subjects in contact as in "
                    "the reference — bodies touching with no gap between them")
             neg = "the subjects standing apart with empty space between them"
-        elif m.get("far"):
+        elif _mp and m.get("far"):
             # 화면 양끝 수준으로 떨어진 구도. "가까이 떨어짐"과 구분한다 --
             # 실측에서 좌우 끝에 선 두 사람(간격 50%)에도 가까운 문구가 붙었다.
             pos = ("spatial fidelity: the two subjects stay far apart at the "
@@ -295,13 +337,13 @@ def spacing_guard(measure: dict, topic: str) -> tuple:
                    "empty space between them preserved")
             neg = ("the subjects pulled close together, the wide empty space "
                    "between them filled in")
-        elif m.get("apart"):
+        elif _mp and m.get("apart"):
             pos = ("spatial fidelity: keep the same separation between the "
                    "subjects as the reference — the space between them stays "
                    "the same size, they do not crowd together")
             neg = ("the subjects pushed together into overlapping silhouettes, "
                    "merged into one mass")
-        if m.get("v_separate"):
+        if _mp and m.get("v_separate"):
             # 세로로 늘어선 구도 — 가로 거리만 재면 이 배치를 놓친다.
             pos = (pos + ", " if pos else "") + (
                 "spatial fidelity: keep the same vertical arrangement as the "
