@@ -133,7 +133,8 @@ You do not need `prompt_in`; the node builds the prompt from `topic` itself.
 
 Top to bottom: **topic → preset → automation → ten camera dropdowns → AI LLM
 settings**. The preset row and each feature popup also carry a **↻ refresh
-button** that restores the preset defaults (4-9).
+button** that restores the preset defaults (4-9). One slot below the preset row's
+↻ (the automation row) is a **save icon** that opens the save window (4-10).
 
 ### 4-1. topic — one line of scene
 
@@ -148,7 +149,9 @@ A woman in a black coat turns around in a rainy alley
   (STRING)** output. The node auto-classifies and applies the pose, motion and
   other data that arrives in `topic`.
 - Connecting a wire to `prompt_in` makes it replace the `topic` field. Unplug it
-  and the field takes over again.
+  and the field takes over again. The topic text is not discarded, though — it is
+  still read when the node decides guards, such as slot roles (`2 is pose only`),
+  coverage requests (`cover it up`) and macro shots.
 - If you name a shot in the topic (`full body`, `close-up shot`), that wins over
   the dropdown defaults.
 - Lighting and motion keywords are read too: `neon`, `sunset`, `studio`,
@@ -263,7 +266,7 @@ stays the way you left it.
 
 | Field | Description |
 |---|---|
-| `provider` | OpenAI · Anthropic · Gemini · OpenRouter · Groq · DeepSeek · Mistral · Ollama · LM Studio · Custom |
+| `provider` | OpenAI · Anthropic · Gemini · OpenRouter · Groq · DeepSeek · Mistral · Ollama · LM Studio · Custom (OpenAI 호환) |
 | `model` | Model name. Empty uses the provider default |
 | `api_key` | Key. If empty, `.env` and environment variables are checked |
 | `custom_base_url` | Only for `Custom (OpenAI compatible)` |
@@ -403,6 +406,81 @@ and hovering reveals the background.
   are left alone.
 - The result is written into that preset's memory, so coming back to the preset
   shows the restored state (see "Your toggles survive" in 4-4).
+
+### 4-10. Save — the `user preset` window
+
+One slot below the preset row's ↻ (in the automation row, one slot in from the
+right end) is a **save icon**. It looks like a **floppy disk**, and its size and
+hover behaviour match ↻ — normally only the icon shows, and hovering reveals the
+background.
+
+Pressing it **opens the save window to the right**. This window behaves exactly
+like the other settings windows (the ones that open when you click shot, lens, …).
+
+| Where in the window | What it is |
+|---|---|
+| Top left | `user preset` — the name of this window |
+| Top right | The **save button** — pressing it saves the current camera values under that name |
+| Below the header | The **name field** — with `preset name` shown faintly inside as a hint |
+| Middle | The list of presets you saved — each one becomes a checkbox row |
+| Right end of each row | The **trash icon** — pressing it asks first, then deletes that preset |
+
+**Type a name and press the save button** to store the current camera values —
+ten slots (shot, lens, angle, composition, lighting, grade, motion, motion2,
+speed, amplitude) — under that name. The name appears in the middle list right
+away and the name field is cleared.
+
+- **The save button saves user presets only.** Saving the workflow file is still
+  the keyboard `Ctrl+S`.
+- Saving again with the same name **overwrites** it — change the values, save
+  under the same name, and that preset is updated.
+- If the name is empty, it does not save and shows "enter a name first".
+- Saved files land in a **`user_presets`** folder inside the installed camera
+  node, one JSON file per name (for example `시네마틱 인물.json`). Delete a file
+  there and that preset is gone.
+- **Pressing the trash icon at the right end of a row asks first** whether to
+  delete that preset. Confirm and it is deleted; cancel and nothing happens.
+- Deleting also **removes the file from the `user_presets` folder.** The list on
+  screen and the folder always stay in the same state — you never delete a row
+  and leave its file behind.
+- **Checking a row in the list puts that preset's name into the `user preset`
+  slot below** (visible when you open the preset list). Check several and all
+  their names stack up there. **Checking alone changes neither the ten camera
+  values nor the node's top `preset` slot name** — it only puts the name on the
+  list.
+- **The values go in when you click a name in the `user preset` list below** —
+  at that moment the ten camera values enter the node and the top `preset` slot
+  name changes to that preset.
+- **Unchecking puts the camera back to auto.** The node's top `preset` slot
+  becomes `자동 (auto)` and all ten values become `자동 (auto)` as well.
+  (The ↻ on that preset row also resets.)
+- **Your checks are saved with the workflow.** Save the workflow and the checks
+  stay put across a browser refresh or a ComfyUI restart — you do not have to
+  re-check them when you come back.
+- When you have no saved presets yet, the middle of the window shows the single
+  line `아직 설정 항목이 없습니다`.
+- Like the other settings windows, it **closes when you click outside** and
+  follows the node as you move or zoom the canvas.
+- If you cannot see the icon, press **Ctrl+F5** (hard refresh) once. A running
+  page may still hold the old screen file in memory.
+
+**A `user preset` label also appears under the preset list.** Click the preset
+row (`preset`) and the list opens (a `Filter list` input at the top, then
+`자동 (auto)`, `시네마틱 인물`, …); a `user preset` slot follows **directly
+below** it. That slot shows **the names of the presets you checked in the save
+window**, and shows the single line `아직 설정 항목이 없습니다` when none are
+checked.
+
+**Click a name there to pick that preset** — its ten values go into the camera
+node, the node's top `preset` slot name changes to that preset (for example
+`자동 (auto)` → `내 프리셋`), and the dropdown closes. You see the values in the
+node's `shot`, `lens`, `angle`, `composition`, … slots. You cannot save or
+delete from this slot — those two live in the save window described above.
+
+> **Note — updating the node can delete your presets.** The `user_presets` folder
+> lives inside the node folder, so updating the node through ComfyUI Manager can
+> remove it. Before updating, copy the `user_presets` folder somewhere else if you
+> want to keep those presets.
 
 ---
 
@@ -692,9 +770,44 @@ There is nothing to switch on. The node adds only what the situation needs.
 - **Contact and action wording**: `pushed against`, `holding`, `throwing`,
   `running` are translated into contact, weight and mid-action instructions.
 - **Removal scenes**: no half-removed pieces or floating fragments left behind.
+- **Coverage and nudity**: applied only when you ask. Writing `cover it up` adds a
+  coverage phrase to the positive, while `show it` suppresses it. If you say
+  nothing, the node does not step in even for a risky combination — the model
+  decides on its own.
 - **Two or more references**: distance between subjects and bottom margin are
   measured from pixels and preserved. Opposite lighting directions between
   references raise a console warning.
+- **Background reference**: a reference declared as the background (for example
+  `slot 4: background`) keeps its **surfaces** — floor material, wall, ceiling,
+  window, curtain, rug — for indoor and outdoor scenes alike. Lighting follows
+  the **reference light** while the `lighting` widget is `auto`; if you pick
+  lighting or grade **yourself**, your choice wins. The full rule is in **5-8**.
+
+### 5-8. With a background reference — what follows the reference, what follows your settings
+
+Declaring one reference as the **background** (for example `slot 4: background`)
+makes that reference the background of the result. What follows the reference
+and what follows the camera settings is set out below.
+
+| What | Who wins |
+|---|---|
+| Floor material, floor pattern, wall, ceiling, window, curtain, rug | **The reference always wins** — whether lighting is auto or chosen by you |
+| Lighting (direction, shadows, colour temperature) while `lighting` is `auto` | **The reference background light is the base.** Lighting the camera fills in automatically (framing rules, image hints, the default window light) shapes the subject only |
+| Lighting and grade **chosen by you** (a preset or the dropdowns) | **Your choice wins.** The reference does not override it |
+| Scene mood and subject | Varies with the prompt (`topic`) |
+
+**Why it splits this way**: declaring a background is itself the instruction
+"use this background", so **surfaces** follow the reference. Choosing lighting or
+grade yourself is the instruction "shoot it in this mood", so the reference must
+not override it. Hence **your choice when you pick one, the reference when it is
+auto**.
+
+**The node tells you in the console.** One line in the run log says whether the
+reference light was used as the base or your own lighting was kept — nothing
+changes silently.
+
+> In short: **surfaces follow the reference; lighting follows the reference when
+> auto and your choice when you pick one.**
 
 ---
 

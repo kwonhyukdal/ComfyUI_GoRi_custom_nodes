@@ -27,7 +27,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.87"
+__version__ = "1.9.90"
 
 
 import json
@@ -48,7 +48,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 #   cam_util    공용 로그·로더 / cam_tables 카메라 조항 테이블
 #   cam_subject 주제 분류·역할 판정 / cam_anchors 앵커 문구
 #   cam_guards  가드 문구 / cam_physics 물리 가드 / cam_spacing 간격
-#   cam_sheet   시트 판별 / cam_llm LLM·키
+#   cam_sheet   시트 판별 / cam_llm LLM·키 / cam_presets 사용자 프리셋 파일
 # 아래 * import 는 이 파일의 공개 표면을 그대로 유지한다 (테스트·호출자가
 # camera_director.<이름> 으로 접근하는 계약).
 # ---------------------------------------------------------------------------
@@ -66,6 +66,7 @@ try:
     from .cam_translate import *  # noqa: F403
     from .cam_translate import _has_cjk
     from .cam_synopsis import *  # noqa: F403
+    from .cam_presets import *  # noqa: F403
 except ImportError:  # 스탠드얼론/테스트 실행용
     from cam_util import *  # noqa: F403
     from cam_tables import *  # noqa: F403
@@ -80,6 +81,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
     from cam_translate import *  # noqa: F403
     from cam_translate import _has_cjk
     from cam_synopsis import *  # noqa: F403
+    from cam_presets import *  # noqa: F403
 
 
 def _latent_declared_ratio(latent_image):
@@ -367,14 +369,24 @@ def _reference_analysis_text(items) -> str:
 def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
                        image_items, primary_image, _reference_images,
                        tier="", llm_hint="", weak_sheet_slots=None,
-                       sheet_kind="", declared_topic=None):
+                       sheet_kind="", declared_topic=None,
+                       light_explicit=False, pixel_sheet_slots=None):
     """한 실행의 가드 판정을 **한 곳에서** 모아서 돌려준다.
 
     왜(Why) `_reference_images` 는 받기만 하나: 예전 리팩터 전에는 여기서
     썼다. 지금 본문은 subject_text·개수·라벨·tier·hint 와 `_camera`(샷 인지
     게이트가 읽는 `shot`) 만 본다. `_reference_images` 는 어디서도 쓰지
     않는다. 호출부가 전부 positional 이라 안전하다. 시그니처를 줄이면
-    호출부 2곳과 테스트 5곳을 함께 고쳐야 해서 남긴다.
+    호출부 1곳과 테스트 여러 곳을 함께 고쳐야 해서 남긴다.
+
+    light_explicit (2026-10-28, 선택): 사용자가 조명·그레이드를 직접 골랐는가.
+    배경 참조 광원 우선 조항의 발동을 가른다 — 자동이면 참조가 기준, 명시면
+    사용자 설정이 1순위다(카메라 설정 무력화 금지).
+
+    pixel_sheet_slots (2026-10-28 감사, 선택): 호출부가 이미 계산해 둔 픽셀 시트
+    슬롯 목록. 넘기면 `sheet_like_slots` 를 다시 돌리지 않는다. None 이면
+    종전대로 여기서 계산한다 — 호출부가 계산에 실패했을 때 None 을 넘겨
+    동작을 바꾸지 않기 위한 구분이다(빈 리스트 [] 와 None 은 뜻이 다르다).
 
     왜(Why) 이 함수를 만드는가(2026-09-29):
     `run()` 과 `run_prompt()` 가 같은 가드 판정을 각자 반복하면서 결과를
@@ -523,7 +535,15 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # 딛은 지면도 그 참조여야 한다 — run10 에서 참조 배경(흙바닥)과 달리 바닥이
     # 콘크리트로 나왔다. negative 는 물리 negative 채널(phys_neg)로 함께 흘린다
     # — 짝인 방어를 한곳에서 만들어 어긋날 수 없게 한다.
-    ground_pos, ground_neg = ground_reference_guard(text)
+    # 배경 참조 슬롯을 **먼저** 구해 지면 가드에 넘긴다 (2026-10-28 사용자 실측):
+    # 배경 슬롯 판정이 두 벌이면 한쪽만 갱신돼 어긋난다. 종전엔 지면 가드만
+    # 문장형 감지기(background_ref_slot)로 발동해 슬롯 목록형("4번: 배경")을
+    # 놓쳤다 — 같은 실행에서 배경 충실 가드는 켜지고 지면 가드는 없었다(앞쪽
+    # 바닥만 밝은 타일). 판정 근거는 _background_dna_slots 하나이고, 아래 배경
+    # 충실 가드도 같은 값을 쓴다. 그래서 둘이 구조적으로 어긋날 수 없다.
+    furniture_bg_slots = _background_dna_slots(text, labels, image_count)
+    ground_pos, ground_neg = ground_reference_guard(
+        text, background_slots=furniture_bg_slots)
     if ground_neg:
         phys_neg = (phys_neg + ", " + ground_neg) if phys_neg else ground_neg
 
@@ -531,7 +551,12 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # declared_topic 은 사용자가 원래 쓴 topic — 시트 가드 발동 근거.
     # subject_text 는 topic + LLM scene 으로 더 넓지만(분기 판정용),
     # 발동에는 쓰지 않는다(2026-10-19 거짓 발동 실측).
-    pixel_sheet = sheet_like_slots(image_items)
+    # 픽셀 시트 판별. 호출부(run)가 이미 같은 목록으로 계산했으면 그 값을
+    # 그대로 받는다 — 종전엔 한 실행에서 같은 입력으로 두 번 돌았다
+    # (2026-10-28 감사 측정: 실제 6패널 시트 1장당 약 7.5ms, 실행당 2회).
+    # 받지 못했으면(단독 호출·계산 실패) 여기서 직접 계산한다(동작 불변).
+    pixel_sheet = (list(pixel_sheet_slots) if pixel_sheet_slots is not None
+                   else sheet_like_slots(image_items))
     sheet_text = character_sheet_guard(
         image_count, text, image_labels=labels, pixel_sheet_slots=pixel_sheet,
         sheet_kind=sheet_kind, weak_sheet_slots=weak_sheet_slots,
@@ -549,8 +574,15 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # 달리 **존재를 요구하지 않는다** — 조건문 하나만 낸다. 왜 필요한지는
     # cam_guards 의 FURNITURE_BACKGROUND_POSITIVE 주석 참조(실측: 좌.png 의 검은
     # 원기둥 다리 4개가 갈색 목재로 바뀌고 앞다리가 신발에 끼었다).
-    furniture_bg_slots = _background_dna_slots(text, labels, image_count)
-    furniture_bg_pos = _furniture_background_guard(text, furniture_bg_slots)
+    # 슬롯(furniture_bg_slots)은 위 지면 가드와 **같은 값**을 쓴다 — 두 가드가
+    # 다른 판정을 쓰면 한쪽만 발동한다(2026-10-28 실측).
+    # lighting 대신 사용자 명시 여부(light_explicit)를 넘긴다 (2026-10-28 정정).
+    # 왜(Why) 라벨을 넘기지 않나: 직전 구현이 "스튜디오 라벨이면" 이라는 두 번째
+    # 해석을 넣어 판정이 뒤집혔다(사용자가 고른 순간 종속). 판정은 "사용자가
+    # 조명·그레이드를 직접 골랐는가" 하나이고, 그 신호는 run() 이 fixed_cam 에서
+    # 만든다. 자동이면 참조 배경 광원이 기준, 명시면 그 설정이 1순위다.
+    furniture_bg_pos = _furniture_background_guard(
+        text, furniture_bg_slots, light_explicit=light_explicit)
     # 참조 사물 외형 고정 (2026-10-16 실측, 파란 동그라미): 의자 등받이 채널
     # 터프팅이 사라지고 색이 밝아졌다. FURNITURE_DNA 는 "정체성 유지"라 어떤
     # 특징인지 지명하지 못하고, denoise=1.0 에서 참조 픽셀은 거의 안 쓰인다 —
@@ -575,7 +607,6 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         # 실측: 노출 요청 + 참조 2장 → 두 문구가 동시에 positive 에 들어갔다.
         "mix_guard": ((MIX_GUARD_POSITIVE_BARE if _is_nudity_request(text)
                        else MIX_GUARD_POSITIVE) if mix_guard else ""),
-        "appearance_hair": "",
         "body_balance": BODY_BALANCE_POSITIVE if body_balance else "",
         "detail_def": ((DETAIL_DEFINITION_POSITIVE if _limb_visible
                         else DETAIL_DEFINITION_POSITIVE_UPPER)
@@ -788,19 +819,6 @@ class CameraDirector:
 
     # ----- 값 정규화 -------------------------------------------------------
     @staticmethod
-    def _widget_camera(**kw) -> dict:
-        """드롭다운 라벨 → 카메라 dict. AUTO/무효값은 DEFAULTS 유지.
-
-        다중 선택(콤마 구분)은 유효 라벨이 전부 맞을 때만 채택한다.
-        """
-        cam = dict(DEFAULTS)
-        for key, val in kw.items():
-            norm = normalize_multi_value(val, _TABLES.get(key, {}))
-            if norm:
-                cam[key] = norm
-        return cam
-
-    @staticmethod
     def _llm_camera(obj):
         """LLM JSON의 camera 값이 허용 라벨일 때만 채택 (충분치 않으면 None).
 
@@ -983,6 +1001,16 @@ class CameraDirector:
                 cam_source = f"프리셋 '{preset}' + 직접 조정"
         locked = set(fixed_cam)
 
+        # 사용자가 조명·그레이드를 **직접** 골랐는가 (2026-10-28 사용자 지시).
+        # 왜(Why) 이 신호가 필요한가: 참조 배경 광원 우선 조항은 **자동일 때만**
+        # 참조가 이겨야 한다. 사용자가 팝업(또는 프리셋)으로 조명/그레이드를
+        # 정하면 그 설정이 1순위다 — 참조가 덮으면 카메라 설정이 무력화된다.
+        # 왜(Why) fixed_cam 하나로 판정하나: fixed_cam 은 사용자가 고른 값만
+        # 담는다(자동은 normalize 가 빈 값으로 돌려 제외, 프리셋 값은 포함).
+        # 조명 라벨을 다시 해석하지 않는다 — 라벨을 두 곳에서 해석하면 한쪽만
+        # 뒤처진다(직전 커밋이 정확히 그랬다).
+        _light_explicit = bool({"lighting", "grade"} & set(fixed_cam))
+
 
         # 2) LLM (tier=llm일 때 1회만 — 실패 시 규칙 폴백)
         #    연결된 이미지들은 원래 image_N 번호를 유지하며 vision 전달 + 캐시 키에 이미지 서명 포함
@@ -998,9 +1026,10 @@ class CameraDirector:
         appearance_ref = bool(appearance_slots)
         # 콜론 없는 역할 표기 안내 (2026-10-23). **판정을 바꾸지 않는다** — 같은
         # 표기를 규칙은 그대로 두고, 사용자에게 콜론을 권하는 로그 한 줄만 낸다.
-        # 왜(Why) 노드에서 부나: `_note_once` 는 "실행 한 번에 한 줄" 계약이라
-        # 실행 경계를 아는 이 자리가 맞다. cam_subject 안에서 부르면 슬롯 판정
-        # 함수를 여러 번 부르는 단위 테스트마다 로그가 끼어든다.
+        # 왜(Why) 노드에서 부나: `_note_once` 는 **프로세스 생애당 한 줄** 계약이다
+        # (cam_util._ONCE_SEEN 은 실행 경계에서 지워지지 않는다 — 종전 주석의
+        # "실행 한 번에 한 줄" 은 사실과 달랐다). 그리고 cam_subject 안에서
+        # 부르면 슬롯 판정 함수를 여러 번 부르는 단위 테스트마다 로그가 끼어든다.
         # 왜(Why) 참조가 있을 때만: 참조가 하나도 없으면 역할 표기가 쓸 데 없다.
         if reference_items:
             _notation = colon_less_role_hint(analysis)
@@ -1055,13 +1084,16 @@ class CameraDirector:
                      + "번 (그 슬롯은 주 피사체·보조 인물로 씁니다)")
                 appearance_slots = _app_px
                 appearance_ref = bool(appearance_slots)
-        # 캐릭터 시트 픽셀 판별 — LLM 비전 노트용으로 여기서 한 번 더 부른다.
-        # 왜(Why) 여기서도 부르나: resolve_guard_plan 안의 판별은
+        # 캐릭터 시트 픽셀 판별 — LLM 비전 노트용으로 먼저 계산한다.
+        # 왜(Why) 여기서 먼저 계산하나: resolve_guard_plan 안의 판별은
         # _plan(=LLM 블록 뒤)에서야 끝나는데, LLM 에게 보내는 image_note 는
         # 그보다 앞에서 만들어진다. 그래서 토픽이 비어 있으면 픽셀이 시트를
         # 찾아도 LLM 은 시트라는 맥락 없이 6뷰 이미지를 받았다(2026-10-19 실측).
         # 비용은 장당 약 9ms.
-        pixel_sheet = []
+        # 2026-10-28 감사: 계산한 값을 resolve_guard_plan 에 넘겨 같은 판별을
+        # 두 번 돌리지 않는다(측정: 실제 6패널 시트 1장당 약 7.5ms, 실행당 2회).
+        # 계산 실패·참조 없음이면 None 을 넘겨 그쪽에서 종전대로 계산하게 둔다.
+        pixel_sheet = None
         weak_sheet = []
         if reference_items:
             try:
@@ -1079,7 +1111,10 @@ class CameraDirector:
                              + "/".join(weak_sheet)
                              + "번 (엄격 게이트 미달, topic 시트 선언과 교차)")
             except Exception:  # noqa: BLE001
-                pixel_sheet = []
+                # 계산에 실패했으면 None 으로 남긴다 — resolve_guard_plan 이
+                # 종전대로 직접 다시 계산하게 두어, 실패 경로의 동작을 바꾸지
+                # 않는다(빈 리스트를 넘기면 시트 판정이 꺼진 채 굳는다).
+                pixel_sheet = None
                 weak_sheet = []
         llm_obj = None
         img_sig, img_b64, img_b64s = None, None, []
@@ -1734,7 +1769,8 @@ class CameraDirector:
             image_labels, reference_items, primary_image, reference_images,
             tier=tier, llm_hint=llm_hint,
             weak_sheet_slots=weak_sheet, sheet_kind=_sheet_kind,
-            declared_topic=_declared_topic)
+            declared_topic=_declared_topic, light_explicit=_light_explicit,
+            pixel_sheet_slots=pixel_sheet)
         _gpos = _plan["positive"]
         _gflags = _plan["flags"]
         nudity_guard_text = nudity_anatomy_guard((topic or "") + " " + (scene or ""))
@@ -1847,6 +1883,20 @@ class CameraDirector:
                  + "/".join(str(x) for x in
                             sorted(_plan["furniture_bg_slots"]))
                  + "번 — 화면에 보이면 참조 그대로: 다리·접지·재질·색)")
+            # 조명 우선순위를 사용자에게 알린다 (2026-10-28, 무음 개입 금지).
+            # 판정은 가드와 **같은 신호**(_light_explicit)를 쓴다 — 조건을 두 곳에
+            # 적으면 갈라진다. 조명이 자동이면 참조 배경 광원이 기준이고, 직접
+            # 고르면 그 설정이 참조보다 우선한다.
+            if _plan["furniture_bg_slots"]:
+                if _light_explicit:
+                    _log("[Camera Director] 조명 우선순위 — 직접 고르신 조명·"
+                         "그레이드가 참조 배경 광원보다 우선합니다 (참조 광원 "
+                         "고정은 적용하지 않음)")
+                else:
+                    _log("[Camera Director] 조명 우선순위 — 조명이 자동이라 참조 "
+                         "배경의 광원(방향·그림자·색온도)을 기준으로 삼았습니다 "
+                         "(자동 조명은 피사체에만). 조명을 직접 고르시면 그 설정이 "
+                         "우선합니다")
         # 참조 사물 외형 고정 (2026-10-16 실측) — 가구 DNA 문구와 **짝**이다.
         # 한쪽만 붙으면 방어가 조용히 사라진다 (같은 이음새 결함 실측 다수).
         _fsurf_pos = _plan.get("furniture_surface_pos", "")
@@ -1908,6 +1958,16 @@ class CameraDirector:
         # 개별로 저장하면 plan 과 값이 어긋날 수 있고(그러면 짝인 negative 가
         # 사라진다), 읽는 곳도 plan 이므로 중복이다.
         self._last_guard_plan = _plan
+        # 참조 슬롯 지도는 plan 에 없다 — 따로 저장한다 (2026-10-28 결함 수정).
+        # 왜(Why): run() 은 끝에서 clear_reference_kinds() 를 부르므로, run_prompt
+        # 가 앵커·negative 를 만들 때는 힌트가 이미 없다. 그래서 run_prompt 가
+        # 다시 심는데, 종전엔 **픽셀 전용 분류**로 심었다. 픽셀 어휘에는 "pose"
+        # 가 없으므로 LLM 만 만들 수 있는 포즈 라벨이 그 순간 사라졌다 — 결과는
+        # positive 에만 포즈 가드가 붙고 짝인 negative 는 안 붙는 비대칭이다.
+        # 실측(seed 이력): {1:person,3:pose} → {1:person,3:unknown}.
+        # 병합된 지도를 그대로 넘겨 두 경로가 같은 판정을 쓰게 한다.
+        self._last_ref_kinds = dict(ref_kinds)
+        self._last_pixel_persons = set(_pixel_persons)
         self._last_appearance_ref = appearance_ref
         self._last_subject_text = ((topic or "") + " " + (scene or ""))
         # topic 칸 원문도 판정 소스에 합친다 (2026-10-25 F4). prompt_in 연결로
@@ -2449,9 +2509,27 @@ class CameraDirectorEncode(CameraDirector):
         # 모순됐다(실측: "reference image 1 as the exact identity source").
         # 여기서 참조 목록으로 힌트를 되심어 앵커·image_out 이 같은 판정을 쓴다.
         # 정리는 이 함수 끝의 clear_reference_kinds() 가 맡는다.
+        #
+        # 2026-10-28 결함 수정 — 무엇을 되심는가: 종전엔 픽셀 전용 분류를 다시
+        # 심었다. 그러면 run() 이 LLM 역할까지 병합해 둔 지도가 **덮여** LLM 만
+        # 만들 수 있는 "pose" 라벨이 사라진다. 포즈 가드는 positive(plan 이 만든
+        # 것)에 남고 짝인 negative(아래 조립)만 없어져, 한쪽만 붙은 방어가 됐다.
+        # 실측: seed 이력이 {1:person,3:pose} → {1:person,3:unknown} 으로 바뀌고
+        # negative 에서 "face of the pose reference image 3" 이 빠졌다.
+        # 그래서 run() 이 저장한 **병합된 지도**를 그대로 되심는다. 위 run() 이 plan
+        # 을 항상 심으므로(단독 호출 폴백을 2026-10-28 감사에서 걷어냈다) 이 가드는
+        # 늘 참이다. 그래도 남긴다 — 지도가 비면 아래 else 가 픽셀 분류로 되돌린다.
         if image_items:
+            _saved_kinds = (getattr(self, "_last_ref_kinds", None)
+                            if getattr(self, "_last_guard_plan", None) is not None
+                            else None)
             try:
-                set_reference_kinds(classify_references(image_items))
+                if _saved_kinds:
+                    set_reference_kinds(
+                        _saved_kinds,
+                        persons=getattr(self, "_last_pixel_persons", None))
+                else:
+                    set_reference_kinds(classify_references(image_items))
             except Exception as _e:  # noqa: BLE001
                 _log("[Camera Director] 참조 자동 분류 실패(Skills 재심기) "
                      f"({type(_e).__name__}) — 기존 규약으로 진행")
@@ -2508,42 +2586,13 @@ class CameraDirectorEncode(CameraDirector):
         # _eth_text_pi 를 쓴다. 그래서 양쪽이 어긋나 짝인 negative 가
         # 조용히 사라졌다(2026-09-28 실측: 지시가 한쪽_only 가 됨).
         # 이제 plan 하나로 양쪽이 같은 판정을 쓴다.
-        _plan_pi = getattr(self, "_last_guard_plan", None)
-        if _plan_pi is None:
-            # run() 없이 단독 호출된 경우(테스트·재사용). 같은 함수로 판정한다.
-            # 참조 분류 힌트도 여기서 다시 심는다 — run() 이 끝나며 지웠기 때문.
-            if image_items:
-                try:
-                    set_reference_kinds(classify_references(image_items))
-                except Exception as _e:  # noqa: BLE001
-                    # run() 경로(위)와 같은 이유로 원인을 남긴다 — 조용히
-                    # 삼키면 "참조가 왜 안 먹지" 를 로그로 추적할 수 없다.
-                    _log("[Camera Director] 참조 자동 분류 실패(단독 호출) "
-                         f"({type(_e).__name__}) — 기존 규약으로 진행")
-            # 왜(Why) 인자에서 다시 유도하나 (2026-10-05 감사): 예전엔
-            # _last_tier/_last_llm_hint 를 읽었지만 이 속성을 쓰는 곳이
-            # 저장소에 하나도 없어 폴백이 항상 tier=""/llm_hint="" 로
-            # 판정했다 — 유령 속성. run() 이 automation 에서 tier 를
-            # 유도하는 것과 같은 식을 이 함수의 인자로 재현한다.
-            _low_a_pi = (automation or "").lower()
-            # tier 는 llm / auto 두 가지뿐이다 (수동 제거).
-            _tier_pi = "llm" if "llm" in _low_a_pi else "auto"
-            # 약한 시트(3뷰 줄) — run() 을 거치지 않은 단독 호출에서도
-            # topic 시트 선언과 교차하면 측정한다.
-            _weak_sheet_pi = []
-            if (_is_character_sheet_request(_eth_text_pi)
-                    and not _is_multi_person_sheet(_eth_text_pi)):
-                try:
-                    _weak_sheet_pi = weak_sheet_slots(image_items)
-                except Exception:  # noqa: BLE001
-                    _weak_sheet_pi = []
-            _plan_pi = resolve_guard_plan(
-                _eth_text_pi, camera, last_count, last_labels, image_items,
-                (image_items[0][1] if image_items else None), [],
-                tier=_tier_pi, llm_hint=llm_hint,
-                weak_sheet_slots=_weak_sheet_pi,
-                sheet_kind=getattr(self, "_last_sheet_kind", ""),
-                declared_topic=topic or "")
+        # 위에서 CameraDirector.run(self, ...) 을 반드시 먼저 부르고, 그 run() 이
+        # self._last_guard_plan 을 **무조건** 심는다(run 안의
+        # `self._last_guard_plan = _plan`). 그래서 여기엔 항상 plan 이 있다.
+        # 2026-10-28 감사: plan 이 None 이면 다시 판정하던 폴백(단독 호출 지원)은
+        # 도달 불가라 걷어냈다. 그 폴백만 읽던 조명 명시 플래그 속성도 함께
+        # 없앴다 — 가드 판정은 위 run() 의 plan 하나가 진실이다.
+        _plan_pi = self._last_guard_plan
         _gpos_pi = _plan_pi["positive"]
         _gflags_pi = _plan_pi["flags"]
         _px_sheet_pi = _plan_pi["pixel_sheet_slots"]
@@ -2853,14 +2902,20 @@ class CameraDirectorEncode(CameraDirector):
         # 같은 문구가 2회 중복되기 때문이다. prompt_in 경로는 앵커를 다시
         # 조립하므로 여기서 붙여야 한다.
         if external_prompt:
-            detail_guard = macro_detail_guard(external_prompt or topic, camera)
+            # 판정 소스는 이 경로의 다른 가드와 같은 _eth_text_pi 다
+            # (2026-10-28 결함 수정). 종전엔 `external_prompt or topic` 이었는데,
+            # 이 블록은 이미 `if external_prompt:` 안이라 `or topic` 이 **절대
+            # 쓰이지 않는다**(죽은 표현). 그래서 사용자가 topic 칸에만 "가려줘"
+            # ·노출·매크로 지시를 적고 prompt_in 을 연결하면 그 가드가 조용히
+            # 빠졌다. 위 스케일 가드가 2026-10-16 에 같은 이유로 고친 부류다.
+            detail_guard = macro_detail_guard(_eth_text_pi, camera)
             if detail_guard:
                 positive_text = self._combine_prompt_text(positive_text, detail_guard)
-            nudity_guard = nudity_anatomy_guard(external_prompt or topic)
+            nudity_guard = nudity_anatomy_guard(_eth_text_pi)
             if nudity_guard:
                 positive_text = self._combine_prompt_text(positive_text, nudity_guard)
             # 사용자가 직접 지시한 가림만 반영한다 (자동 개입 아님).
-            cover_guard = coverage_guard(external_prompt or topic)
+            cover_guard = coverage_guard(_eth_text_pi)
             if cover_guard:
                 positive_text = self._combine_prompt_text(positive_text,
                                                           cover_guard)

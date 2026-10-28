@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from functools import lru_cache
 
 try:
     from . import llm_client
@@ -686,6 +687,21 @@ def scene_camera_mismatch(scene: str, camera: dict) -> str | None:
     return None
 
 
+@lru_cache(maxsize=256)
+def _shot_phrase_re(form: str):
+    """샷 표현 제거용 정규식 (패턴 캐시).
+
+    왜(Why) 캐시하나 (2026-10-28 감사): 종전엔 이 정규식을 루프 안에서 매번
+    `re.compile` 했다. 표현 수 × 반복(6) 만큼, 같은 form 을 매 실행 다시
+    컴파일했다. 패턴은 form 만의 함수라 캐시하면 결과는 같고 비용만 줄어든다.
+    lru_cache 는 스레드 안전하며 maxsize 를 넘으면 오래된 것부터 버린다.
+    """
+    return re.compile(
+        r"(?:\b(?:a|an|the|in|with|using|at|from)\s+)?"
+        + re.escape(form) + r"(?:\s+of)?[,]?\s*",
+        re.I)
+
+
 def fix_scene_shot_clause(scene: str, camera: dict) -> str:
     """장면 문장에서 최종 shot 과 어긋나는 샷 표현을 제거한다 (자동 교정).
 
@@ -732,12 +748,7 @@ def fix_scene_shot_clause(scene: str, camera: dict) -> str:
                 for form in forms:
                     # 앞 관사·전치사 + 표현 + 뒤 "of" 를 한 덩어리로 흡수해
                     # 고아 단어가 남지 않게 한다.
-                    esc = re.escape(form)
-                    pat = re.compile(
-                        r"(?:\b(?:a|an|the|in|with|using|at|from)\s+)?"
-                        + esc + r"(?:\s+of)?[,]?\s*",
-                        re.I)
-                    out = pat.sub(" ", out)
+                    out = _shot_phrase_re(form).sub(" ", out)
         # 변경이 없으면 원문 그대로 반환한다 — 정리 정규식이 멀쩡한 문장의
         # 선행 관사·공백까지 건드리지 않게 한다 (2026-10-21 회귀 방지).
         if out == scene:

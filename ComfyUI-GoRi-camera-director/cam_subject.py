@@ -14,7 +14,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "HUMAN_PRONOUN_KEYWORDS", "_human_pronoun_present", "ANIMAL_SUBJECT_KEYWORDS", "_animal_keyword_present", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_source_slots", "_clothing_declared_slots", "_CLOTHING_COLON_PATTERN", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_wants_barefoot", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
+"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "HUMAN_PRONOUN_KEYWORDS", "_human_pronoun_present", "ANIMAL_SUBJECT_KEYWORDS", "_animal_keyword_present", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_declared_slots", "_CLOTHING_COLON_PATTERN", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_wants_barefoot", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
 "_hint_person_slots", "_hint_pose_slots", "_hint_object_slots", "_text_names_slots", "intent_core",
 "_normalize_slots",
 "footwear_noun_mismatch", "_KO_WEAR_ITEMS", "_KO_CLOTHING_ROLE_WORDS",
@@ -1181,15 +1181,10 @@ def _clothing_role_slots_cached(text: str) -> frozenset:
     return frozenset(src - targets if targets else src)
 
 
-def _clothing_source_slots(text: str) -> set:
-    """의상 소스 슬롯(교체 대상 판정 전 원본)."""
-    return set(_clothing_source_slots_cached(text))
-
-
 def _clothing_declared_slots(text: str) -> set:
     """콜론으로 **참조 지정**된 의상 슬롯(예: `3번: 하이 힐`). 없으면 set().
 
-    왜(Why) `_clothing_source_slots` 를 쓰지 않나: 그쪽은 `이미지 2의 옷` 처럼
+    왜(Why) `_clothing_source_slots_cached` 를 쓰지 않나: 그쪽은 `이미지 2의 옷` 처럼
     이미지 슬롯 참조까지 포함한다. 그 형태는 **교체 지시**다(`wear the outfit from
     image 2` -> 교체, R164 계약). 반면 `N번: <품목>` 은 토픽이 참조 슬롯을
     **선언**한 것이므로, 같은 품목을 서술하는 문장은 참조 재진술이지 교체가 아니다
@@ -1991,7 +1986,7 @@ def _outfit_target_slots(text: str, source_slots=None) -> set:
     왜(Why) 여기서 소스를 다시 빼나(2026-09-29): 슬롯과 동사 사이에 말이 끼면
     "2번 의장을 1번에 입혀" 에서 **2번(소스)도** 대상 후보로 잡힌다. 그대로
     빼면 _clothing_role_slots 에서 소스까지 사라져 의상 가드가 통째로 죽는다.
-    순환을 피하려로 _clothing_source_slots(원본) 를 쓴다.
+    순환을 피하려고 _clothing_source_slots_cached(원본) 를 쓴다.
 
     source_slots(2026-10-07 라운드 2): 이미 계산한 소스를 넘기면 같은 정규식
     두 번을 다시 돌리지 않는다. 안 넘기면 원래대로 직접 계산한다.

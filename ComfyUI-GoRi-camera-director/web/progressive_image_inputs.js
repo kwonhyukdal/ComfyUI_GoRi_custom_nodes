@@ -1051,9 +1051,9 @@ app.api?.addEventListener?.("execution_start", clearAllLlmLights);
 /* ---------------------------------------------------------------------------
  * ai_llm_setup 섹션 헤더 + LLM 설정 접기 (2026-10-17)
  *
- * provider~vision_detail 6개 LLM 위젯이 motion2 아래부터 시작해 노드 중간을
- * 채운다. 규칙(auto)만 쓰는 사용자는 이 6칸을 볼 필요가 없어서, "AI LLM 설정"
- * 헤더 한 줄을 클릭하면 6칸이 접히고 노드 높이가 함께 줄어든다. 클릭하면 다시
+ * provider~vision_detail 5개 LLM 위젯이 motion2 아래부터 시작해 노드 중간을
+ * 채운다. 규칙(auto)만 쓰는 사용자는 이 5칸을 볼 필요가 없어서, "AI LLM 설정"
+ * 헤더 한 줄을 클릭하면 5칸이 접히고 노드 높이가 함께 줄어든다. 클릭하면 다시
  * 펼쳐진다.
  *
  * **기본 상태 = 접힘** (2026-10-18 사용자 지시 — 노드를 꺼낼 때 접힌 채로
@@ -1074,7 +1074,7 @@ app.api?.addEventListener?.("execution_start", clearAllLlmLights);
  * 잰다(첫 arrange 전에 숨겨야 늘어남 보정이 없다 — 아래 applyLlmFoldFromProperties).
  *
  * 높이 계산(Why 배치 기준인가): 프런트엔드 _arrangeWidgets 는 위젯 1칸 =
- * computeSize+4 이고, DOM 위젯(extra_negative)은 남는 공간을 나눠 갖는다.
+ * computeSize+4 이고, 일부 위젯(멀티라인 입력 등)은 남는 공간을 나눠 갖는다.
  * computeSize() 차이는 이 분배를 반영하지 않아 셀 때마다 어긋난다(파일 위
  * shrinkNewNode 주석의 "예산과 실제 배치의 괴리" 와 같은 종류). 그래서 접는
  * 순간의 **실제 y 좌표 차이**(pf_steps.y - provider.y)를 잰다 — 두 위젯이
@@ -1084,12 +1084,14 @@ app.api?.addEventListener?.("execution_start", clearAllLlmLights);
  * ------------------------------------------------------------------------- */
 const LLM_HEADER_NAME = "ai_llm_setup";
 const LLM_HEADER_LABEL = "AI LLM 설정";
-/** 접기 대상 6개. llm_hint 는 **빼야 한다** — 이미 hidden:True 인 위젯이라
- * 이 목록에 넣으면 펼칠 때 hidden=false 를 되돌려 UI 에 되살아난다(API·스크립트
- * 전용 위젯이 화면에 나온다). */
+/** 접기 대상 5개 (README 4-5 의 표와 같은 칸). llm_hint 는 **빼야 한다** —
+ * 이미 hidden:True 인 위젯이라 이 목록에 넣으면 펼칠 때 hidden=false 를 되돌려
+ * UI 에 되살아난다(API·스크립트 전용 위젯이 화면에 나온다). extra_negative 도
+ * 뺀다 — 노출 노드가 이 키를 INPUT_TYPES 에서 빼므로(DOM 위젯도 아니고) 목록에
+ * 있어 봐야 찾지 못해 조용히 무시되고, 계약만 실제와 어긋난다. */
 const LLM_FOLD_WIDGETS = [
   "provider", "model", "api_key", "custom_base_url",
-  "extra_negative", "vision_detail",
+  "vision_detail",
 ];
 const LLM_FOLD_PROP = "gori_llm_setup_folded";
 const LLM_FOLD_PX_PROP = "gori_llm_fold_px";
@@ -1432,8 +1434,8 @@ function applyMultiPopupScale(el, s) {
     cb.style.width = cbPx + "px";
     cb.style.height = cbPx + "px";
   }
-  for (const r of el.querySelectorAll(".gori-multi-row")) r.style.padding = rowPad;
-  for (const h of el.querySelectorAll(".gori-multi-head")) h.style.padding = headPad;
+  for (const r of el.querySelectorAll(".gori-popup-row")) r.style.padding = rowPad;
+  for (const h of el.querySelectorAll(".gori-popup-head")) h.style.padding = headPad;
 }
 
 /** 팝업 내용 배율 = 캔버스 줌 비율 (연 순간 대비). 순수 함수 — 테스트 가능.
@@ -1584,15 +1586,106 @@ function commitMultiValue(node, widget, values, selected) {
   app.canvas?.setDirty?.(true, true);
 }
 
-function openMultiPopup(node, widget) {
+/** 팝업 본문에 넣을 항목 목록을 계산한다 (순수 함수 — 테스트 가능).
+ *
+ * 원천은 opts.values(있으면) 또는 위젯의 콤보 values 다. '자동 (auto)' 는
+ * 노드 본체가 값으로 표시하므로 팝업에서는 뺀다.
+ *
+ * 왜(Why) 순수 함수로 뽑았나: 저장 팝업은 지금 항목이 0개지만 **나중에 항목이
+ * 들어가면 항목마다 체크박스 줄이 자동으로 생겨야 한다**(사용자 요구
+ * 2026-10-28). 항목 계산을 팝업 본문과 분리해 두면 SAVE_POPUP_ITEMS 에 값을
+ * 넣는 것만으로 줄이 생긴다 — 팝업 코드는 손대지 않는다. 문자열과
+ * {value,label} 둘 다 받는다(표시 이름을 값과 다르게 둘 수 있게).
+ */
+function popupItemList(widget, opts) {
+  const raw = Array.isArray(opts?.values)
+    ? opts.values
+    : (Array.isArray(widget?.options?.values) ? widget.options.values : []);
+  const out = [];
+  for (const v of raw) {
+    const value = (v && typeof v === "object") ? v.value : v;
+    const label = (v && typeof v === "object" && v.label != null) ? v.label : value;
+    if (value === undefined || value === null || value === "") continue;
+    if (String(value) !== MULTI_AUTO_LABEL) {
+      out.push({ value: String(value), label: String(label) });
+    }
+  }
+  return out;
+}
+
+/** 팝업 헤더 **우측 끝** 버튼을 만든다 (↻ 되돌리기 · 저장 공용).
+ *
+ * 왜(Why) 공용 빌더인가: 기존 팝업의 ↻ 와 저장 팝업의 '저장' 은 모양·호버
+ * 동작이 같아야 한다 — margin-left:auto 로 우측 끝에 붙고, 평소에는 글자만,
+ * 호버 시 사각 박스(#3a3a3a 채움 + #7ea6ff 테두리). 두 벌로 만들면 한쪽만
+ * 손질되어 어긋나므로 하나로 쓴다 (2026-10-28).
+ */
+function buildPopupHeadButton(label, title, onClick) {
+  const btn = document.createElement("span");
+  btn.textContent = String(label ?? "");
+  if (title) btn.title = String(title);
+  btn.style.cssText = [
+    "margin-left:auto", "cursor:pointer", "color:#8ab4ff",
+    "font-weight:normal", "padding:0 6px", "line-height:1.4",
+    "border:1px solid transparent", "border-radius:4px",
+  ].join(";");
+  btn.addEventListener("mouseenter", () => {
+    btn.style.background = "#3a3a3a";
+    btn.style.borderColor = "#7ea6ff";
+  });
+  btn.addEventListener("mouseleave", () => {
+    btn.style.background = "transparent";
+    btn.style.borderColor = "transparent";
+  });
+  // 클릭이 문서(바깥 클릭 닫기)로 새지 않게 막고 호출자 동작을 돌린다.
+  btn.addEventListener("click", (e) => {
+    e?.stopPropagation?.();
+    onClick?.(e);
+  });
+  return btn;
+}
+
+/** 팝업 하나. 기능 위젯(shot·lens …)과 저장 버튼이 **같은 구현**을 쓴다.
+ *
+ * 셋째 인자 opts 는 선택이다 — 없으면 예전과 완전히 같다(기능 위젯 팝업).
+ *
+ *   opts.title      헤더 좌측 문자열      (기본: widget.name)
+ *   opts.values     본문 항목 원천        (기본: widget.options.values)
+ *   opts.selected   처음 체크할 값들      (기본: 위젯 값을 콤마로 가른 것 —
+ *                                          저장 창은 "체크해 둔 프리셋 이름")
+ *   opts.emptyText  항목이 0개일 때 안내  (기본: 아무것도 안 그림)
+ *   opts.extraHead  헤더와 본문 사이 줄   (기본: 없음 — 저장 창의 이름 입력칸)
+ *   opts.onToggle   체크 변화 처리        (기본: commitMultiValue 로 위젯에 씀)
+ *   opts.rowAction  줄 우측에 붙일 요소    (기본: 없음 — 저장 창의 휴지통)
+ *                   ({value, label}) => 요소
+ *   opts.right      헤더 우측 끝 버튼      (기본: ↻ 프리셋 되돌리기)
+ *                   {label, title, onClick}
+ *
+ * 돌려주는 요소에는 `_goriRefill(items)` 가 붙는다 — 본문 목록만 갈아끼우는
+ * 함수다(헤더·추가 줄은 그대로). 저장 창이 서버 목록을 받은 뒤 쓴다.
+ *
+ * 왜(Why) 팝업을 두 벌 만들지 않나: 위치·줌 추적·바깥 클릭 닫기·휠 라우팅·
+ * 스크롤 캡을 복제하면 곧 어긋난다. 저장 팝업은 opts 만 다르다.
+ */
+function openMultiPopup(node, widget, opts) {
   closeMultiPopup();
   ensureMultiPopupCloseHook();
-  const values = Array.isArray(widget.options?.values)
+  // 본체 위젯의 원본 values — 기능 위젯 팝업의 커밋(commitMultiValue)에 쓴다.
+  // opts.values 는 표시용이므로 여기에 섞지 않는다.
+  const rawValues = Array.isArray(widget?.options?.values)
     ? widget.options.values : [];
-  if (!values.length) return;
-  const selected = new Set(splitMultiValue(widget.value));
+  const items = popupItemList(widget, opts);
+  // 기능 위젯은 예전과 같은 조건으로 연다 — 콤보 values 가 비면 열지 않는다.
+  // 저장 팝업은 opts.values(빈 배열 포함) 또는 안내 문구가 있으면 **연다**
+  // (항목이 아직 0개여도 팝업 자체는 보여야 한다 — 사용자 요구 2026-10-28).
+  if (!rawValues.length && !Array.isArray(opts?.values) && !opts?.emptyText) {
+    return undefined;
+  }
+  const selected = new Set(
+    Array.isArray(opts?.selected) ? opts.selected : splitMultiValue(widget.value)
+  );
   const menu = document.createElement("div");
-  menu.className = "gori-multi-popup";
+  menu.className = "gori-popup";
   menu.style.cssText = [
     "position:fixed", "z-index:100000", "background:#232323",
     "border:1px solid #666", "border-radius:4px", "padding:4px",
@@ -1601,78 +1694,116 @@ function openMultiPopup(node, widget) {
     "box-shadow:0 4px 12px rgba(0,0,0,.5)", "user-select:none",
   ].join(";");
 
-  // 헤더 = 위젯 이름(좌) + 새로고침 버튼(우). 어떤 기능을 설정하는지 알아야
-  // 한다 (사용자 요구). '자동 (auto)' 는 노드 본체 위젯이 값으로 표시하므로
-  // 팝업에서는 두지 않는다.
+  // 헤더 = 이름(좌) + 우측 버튼(우). 어떤 기능을 설정하는지 알아야 한다
+  // (사용자 요구). '자동 (auto)' 는 노드 본체 위젯이 값으로 표시하므로
+  // 팝업에서는 두지 않는다. 우측 버튼은 기능 팝업이면 ↻(프리셋 되돌리기),
+  // 저장 팝업이면 opts.right(저장) 다 — 같은 빌더를 쓴다.
   const head = document.createElement("div");
-  head.className = "gori-multi-head";
+  head.className = "gori-popup-head";
   head.style.cssText = [
     "display:flex", "align-items:center", "justify-content:space-between",
     "padding:3px 6px", "margin-bottom:2px", "font-weight:bold",
     "color:#cfe8ff", "border-bottom:1px solid #444", "cursor:default",
   ].join(";");
   const headName = document.createElement("span");
-  headName.textContent = String(widget.name || "");
+  headName.textContent = String(opts?.title ?? widget.name ?? "");
   head.appendChild(headName);
-  // 새로고침 버튼 (우측 상단, 사용자 지정 2026-10-23): 프리셋바의 ↻ 와 같은
-  // 모양·호버 동작 — 평소에는 ↻ 아이콘만, 마우스를 올리면 사각 박스
-  // (#3a3a3a 채움 + #7ea6ff 테두리). 누르면 **이 팝업의 위젯 하나만**
-  // 현재 프리셋 기본값으로 되돌린다 — 사용자가 체크로 바꾼 부분만 리셋되고
-  // 프리셋이 제공하는 값은 유지된다(runPresetWidgetReset 참조).
-  const headReset = document.createElement("span");
-  headReset.textContent = "↻";
-  headReset.title = "이 항목을 프리셋 기본값으로 되돌리기";
-  headReset.style.cssText = [
-    "margin-left:auto", "cursor:pointer", "color:#8ab4ff",
-    "font-weight:normal", "padding:0 6px", "line-height:1.4",
-    "border:1px solid transparent", "border-radius:4px",
-  ].join(";");
-  headReset.addEventListener("mouseenter", () => {
-    headReset.style.background = "#3a3a3a";
-    headReset.style.borderColor = "#7ea6ff";
-  });
-  headReset.addEventListener("mouseleave", () => {
-    headReset.style.background = "transparent";
-    headReset.style.borderColor = "transparent";
-  });
-  headReset.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (!runPresetWidgetReset(node, widget.name)) return;
-    // 팝업 체크 상태를 리셋된 값에 맞춘다 — 행을 다시 만들지 않고 같은
-    // 체크박스를 그대로 두므로 스크롤 위치도 유지된다.
-    const fresh = splitMultiValue(widget.value);
-    selected.clear();
-    fresh.forEach((v2) => selected.add(v2));
-    for (const r of checkRows) r.cb.checked = selected.has(r.value);
-  });
-  head.appendChild(headReset);
+
+  // checkRows 는 ↻ 버튼이 체크 상태를 되돌릴 때 쓴다 (아래에서 채운다).
+  const checkRows = [];
+
+  // 새로고침 버튼 (우측 상단, 사용자 지정 2026-10-23): 누르면 **이 팝업의
+  // 위젯 하나만** 현재 프리셋 기본값으로 되돌린다 — 사용자가 체크로 바꾼
+  // 부분만 리셋되고 프리셋이 제공하는 값은 유지된다
+  // (runPresetWidgetReset 참조).
+  const headRight = (opts?.right && typeof opts.right.onClick === "function")
+    ? buildPopupHeadButton(opts.right.label, opts.right.title, opts.right.onClick)
+    : buildPopupHeadButton("↻", "이 항목을 프리셋 기본값으로 되돌리기", () => {
+        if (!runPresetWidgetReset(node, widget.name)) return;
+        // 팝업 체크 상태를 리셋된 값에 맞춘다 — 행을 다시 만들지 않고 같은
+        // 체크박스를 그대로 두므로 스크롤 위치도 유지된다.
+        const fresh = splitMultiValue(widget.value);
+        selected.clear();
+        fresh.forEach((v2) => selected.add(v2));
+        for (const r of checkRows) r.cb.checked = selected.has(r.value);
+      });
+  head.appendChild(headRight);
   menu.appendChild(head);
 
-  // 항목: '자동 (auto)' 은 제외한다 (헤더가 그 자리를 대신한다).
-  // checkRows 는 리셋 버튼이 체크 상태를 되돌릴 때 쓴다.
-  const checkRows = [];
-  values.filter((v) => v !== MULTI_AUTO_LABEL).forEach((v) => {
-    const row = document.createElement("div");
-    row.className = "gori-multi-row";
-    row.style.cssText =
-      "display:flex;align-items:center;gap:6px;padding:2px 6px;";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = selected.has(v);
-    cb.style.cssText = "margin:0;cursor:pointer;";
-    const lb = document.createElement("span");
-    lb.textContent = v;
-    lb.style.cssText = "cursor:default;";
-    cb.addEventListener("change", () => {
-      if (cb.checked) selected.add(v);
-      else selected.delete(v);
-      commitMultiValue(node, widget, values, selected);
+  // 헤더와 본문 사이의 추가 줄 — 저장 창의 `preset name` 입력칸이다.
+  // 기존 기능 팝업(opts 없음)에는 아무것도 붙지 않아 예전과 완전히 같다.
+  const extraHead = (typeof opts?.extraHead === "function")
+    ? opts.extraHead()
+    : opts?.extraHead;
+  if (extraHead) menu.appendChild(extraHead);
+
+  // 본문 상자를 따로 두는 이유: 목록을 나중에 갈아끼울 때(저장 창이 서버
+  // 목록을 받은 뒤) 헤더·입력칸·스크롤 위치를 건드리지 않기 위해서다.
+  const body = document.createElement("div");
+  body.className = "gori-popup-body";
+
+  // 항목이 없을 때의 안내 문구. 빈 상자만 뜨면 고장으로 오해한다
+  // (사용자 요구 2026-10-28).
+  const addEmptyText = () => {
+    body.appendChild(buildPopupEmptyLine(opts.emptyText));
+  };
+
+  // 항목: 항목마다 체크박스 줄. checkRows 는 ↻ 버튼이 체크 상태를 되돌릴 때
+  // 쓴다.
+  const addRows = (list) => {
+    list.forEach(({ value, label }) => {
+      const row = document.createElement("div");
+      row.className = "gori-popup-row";
+      row.style.cssText =
+        "display:flex;align-items:center;gap:6px;padding:2px 6px;";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = selected.has(value);
+      cb.style.cssText = "margin:0;cursor:pointer;";
+      const lb = document.createElement("span");
+      lb.textContent = label;
+      lb.style.cssText = "cursor:default;";
+      cb.addEventListener("change", () => {
+        if (cb.checked) selected.add(value);
+        else selected.delete(value);
+        if (typeof opts?.onToggle === "function") {
+          // 저장 팝업 등: 담을 곳이 호출자에게 있다 — 여기서 위젯 값을 건드리면
+          // 자동화 위젯(규칙/LLM) 값이 망가진다.
+          opts.onToggle(value, cb.checked, { node, widget });
+        } else {
+          commitMultiValue(node, widget, rawValues, selected);
+        }
+      });
+      row.appendChild(cb);
+      row.appendChild(lb);
+      // 줄 우측 부착물(선택) — 저장 창의 휴지통. 주지 않으면 예전과 완전히
+      // 같다(기능 위젯 팝업에는 아무것도 붙지 않는다).
+      if (typeof opts?.rowAction === "function") {
+        const act = opts.rowAction({ value, label });
+        if (act) row.appendChild(act);
+      }
+      body.appendChild(row);
+      checkRows.push({ value, cb });
     });
-    row.appendChild(cb);
-    row.appendChild(lb);
-    menu.appendChild(row);
-    checkRows.push({ value: v, cb });
-  });
+  };
+
+  addRows(items);
+  if (!items.length && opts?.emptyText) addEmptyText();
+  menu.appendChild(body);
+
+  /** 본문 목록만 갈아끼운다 — 헤더·입력칸·스크롤은 그대로다.
+   * 저장 창이 서버에서 목록을 받았거나 저장·삭제를 마쳤을 때 부른다. */
+  menu._goriRefill = (list) => {
+    while (body.children.length) body.removeChild(body.children[0]);
+    checkRows.length = 0;
+    const next = Array.isArray(list) ? list : [];
+    // 새 목록에 없는 이름은 고른 것에서도 뺀다 — 지운 프리셋이 체크 상태로
+    // 남으면 화면과 폴더가 갈라져 보인다 (2026-10-28).
+    const alive = new Set(next.map((it) => it && it.value));
+    for (const v of Array.from(selected)) if (!alive.has(v)) selected.delete(v);
+    addRows(next);
+    if (!next.length && opts?.emptyText) addEmptyText();
+  };
 
   document.body.appendChild(menu);
   multiPopupEl = menu;
@@ -1731,6 +1862,695 @@ function openMultiPopup(node, widget) {
 
   // 캔버스 변환(이동·줌) 추적 시작 — 노드와 같이 움직인다 (2026-10-17).
   multiPopupRaf = requestAnimationFrame(multiPopupTick);
+  return menu;
+}
+
+const SAVE_POPUP_TITLE = "user preset";
+const SAVE_POPUP_EMPTY_TEXT = "아직 설정 항목이 없습니다";
+
+/* ------------------------------------------------------------------ */
+/* 사용자 프리셋 저장 (2026-10-28)                                      */
+/* ------------------------------------------------------------------ */
+/* 왜(Why) 서버를 거치나 (사용자 결정): 브라우저는 파일을 쓸 수 없다. 저장한
+ * 프리셋은 **설치한 카메라 노드 폴더 안** user_presets/ 에 남아야 하므로 서버
+ * 라우트(cam_presets.py 의 GET·POST /gori_user_presets)와 주고받는다.
+ *
+ * 왜(Why) 목록을 캐시하나: 저장 아이콘 클릭이 네트워크를 기다리면 창이 늦게
+ * 뜬다. 저장 버튼을 설치할 때 미리 받아 두고, 클릭은 캐시로 즉시 그린다.
+ * 캐시가 아직 없으면 창을 먼저 열고, 응답이 오면 목록만 갈아끼운다
+ * (헤더·입력칸은 그대로라 타이핑이 끊기지 않는다).
+ * ------------------------------------------------------------------------- */
+
+/** 서버 경로 — cam_presets.py 의 USER_PRESET_ROUTE 와 같아야 한다. */
+const USER_PRESET_ROUTE = "/gori_user_presets";
+
+/** 창 안 이름 입력칸의 안내 글씨 (placeholder).
+ *
+ * 왜(Why) 이름표(라벨)를 두지 않나: 입력칸 안에 같은 글씨가 이미 보이는데
+ * 옆에 굵은 이름표까지 있으면 같은 말이 두 번 나온다 (사용자 지시 2026-10-28:
+ * 라벨에 파란 동그라미를 치고 지우라고 표시). */
+const PRESET_NAME_PLACEHOLDER = "preset name";
+const PRESET_NAME_EMPTY_HINT = "이름을 먼저 입력하세요";
+const PRESET_SAVE_FAILED_HINT = "저장하지 못했습니다. 잠시 뒤 다시 눌러 주세요.";
+
+/** 목록 줄 우측 휴지통 (사용자 지시 2026-10-28: "우측에는 휴지통 아이콘").
+ *
+ * 글리프 1자를 이스케이프로 적는 이유: 소스 파일에 이모지 바이트를 두지
+ * 않는다(인코딩 사고 방지). DOM 이라 노드 아이콘(↻)처럼 좌표 계산이 없다. */
+const PRESET_DELETE_ICON = "\u{1F5D1}";
+const PRESET_DELETE_TITLE = "이 프리셋을 지웁니다 (묻고 나서 지움)";
+const PRESET_DELETE_CONFIRM = "이 프리셋을 지울까요?";
+const PRESET_DELETE_FAILED_HINT = "지우지 못했습니다. 잠시 뒤 다시 눌러 주세요.";
+
+/** 저장 버튼의 글씨와 설명 (저장 창 헤더 우측 끝). 저장 창이 쓴다 —
+ * 드롭다운 아래 칸에는 저장 버튼이 없다(사용자 그림 확정, 2026-10-28). */
+const PRESET_SAVE_LABEL = "저장";
+const PRESET_SAVE_TITLE = "지금 카메라 값을 이 이름으로 저장";
+
+/** 프리셋 드롭다운 아래에 붙는 user preset 칸의 표식 (클래스 이름).
+ *
+ * 왜(Why) 표식이 필요한가: 같은 클릭이 두 경로(onClick·mouse)로 두 번 들어와도
+ * 칸은 하나만 붙어야 한다. 붙인 메뉴 뿌리에 이 표식을 남기고 다시 보면 안다. */
+const PRESET_MENU_SECTION_CLASS = "gori-menu-preset";
+const PRESET_MENU_ROOT_FLAG = "_goriPresetSection";
+
+/** user preset 칸의 겉모양. 네이티브 메뉴(어두운 배경·12px)에 이어 붙으므로
+ * 위쪽에만 경계선을 그어 목록과 구분한다 (사용자 그림 "변경 후"). */
+const PRESET_MENU_SECTION_STYLE = [
+  "margin-top:6px", "border-top:1px solid #555", "padding-top:4px",
+  "font-size:12px", "color:#e0e0e0", "min-width:180px",
+].join(";");
+
+/** 칸 헤더 줄 — `user preset` 하나만 (왼쪽 정렬). */
+const PRESET_MENU_HEAD_STYLE = [
+  "padding:2px 6px 4px", "font-size:13px", "font-weight:bold", "color:#fff",
+].join(";");
+
+/** 서버가 준 목록 {이름: {필드: 값}}. null = 아직 못 받았다(모름). */
+let userPresetCache = null;
+/** 목록을 받는 중인가 — 같은 요청을 겹쳐 보내지 않는다. */
+let userPresetLoading = false;
+
+/** 캐시 → 팝업 본문 항목. 캐시가 없으면 빈 배열(창은 그래도 연다). */
+function userPresetItems() {
+  if (!userPresetCache || typeof userPresetCache !== "object") return [];
+  return Object.keys(userPresetCache).map((name) => ({ value: name, label: name }));
+}
+
+/** 체크 상태를 담는 node.properties 키. litegraph 의 configure 가 임의 키를 전부
+ * 복사하므로(실측 2026-10-17 — LLM_FOLD_PROP 과 같은 근거) 워크플로 파일에 남고,
+ * 새로고침·재시작 뒤에도 되살아난다. */
+const USER_PRESET_CHECKED_PROP = "gori_user_preset_checked";
+
+/** 노드마다 "지금 체크해 둔 user preset 이름" — 프리셋 드롭다운 아래 칸이 보여준다.
+ *
+ * 왜(Why) 노드에 매다는가 (사용자 요구 2026-10-28 원문): 체크는 **플로피 저장
+ * 창**에서 일어나고, 그 이름을 보여주는 곳은 **메인 프리셋 드롭다운** 아래 칸이다.
+ * 창을 닫아도 이름이 남아야 드롭다운이 알 수 있다.
+ *
+ * 왜(Why) WeakMap 만으로는 부족한가 (사용자 요구 2026-10-28): "플로피 체크박스에
+ * 체크된 거 새로고침이나 컴피 다시 실행해도 체크 해제 안되게 해". WeakMap 은
+ * 페이지를 새로 고치면 사라진다. 그래서 집합을 노드의 **properties 에도 쓴다** —
+ * 워크플로 파일에 남아 다시 열 때 되살아나고, WeakMap 은 그 저장본을 한 번 읽어
+ * 둔 캐시일 뿐이다. */
+const userPresetCheckedByNode = new WeakMap();
+
+/** node.properties 에 저장된 체크 이름들 (배열이 아니면 빈 배열). */
+function readCheckedFromProperties(node) {
+  const raw = node && node.properties
+    ? node.properties[USER_PRESET_CHECKED_PROP]
+    : null;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((x) => typeof x === "string" && x);
+}
+
+/** 이 노드가 지금 체크해 둔 user preset 이름들의 집합.
+ * 처음 물을 때 저장본(properties)에서 되살린다 — 새로고침·재시작에도 남는다. */
+function userPresetChecked(node) {
+  if (!node || typeof node !== "object") return new Set();
+  let set = userPresetCheckedByNode.get(node);
+  if (!set) {
+    set = new Set(readCheckedFromProperties(node));
+    userPresetCheckedByNode.set(node, set);
+  }
+  return set;
+}
+
+/** 지금 집합을 워크플로 파일(node.properties)에 저장한다.
+ * 저장에 실패해도 화면 동작은 그대로여야 하므로 조용히 넘어간다. */
+function persistUserPresetChecked(node) {
+  try {
+    if (!node || typeof node !== "object") return false;
+    if (!node.properties || typeof node.properties !== "object") node.properties = {};
+    node.properties[USER_PRESET_CHECKED_PROP] = Array.from(userPresetChecked(node));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 서버에서 사용자 프리셋 목록을 받아 캐시를 채운다.
+ *
+ * 실패해도 reject 하지 않는다 — 목록을 못 받았다고 저장 아이콘이 안 먹으면
+ * 안 된다. 그때는 창에 안내 문구만 뜬다. */
+function refreshUserPresets() {
+  if (userPresetLoading) return Promise.resolve(userPresetCache);
+  userPresetLoading = true;
+  return fetch(USER_PRESET_ROUTE, { method: "GET" })
+    .then((res) => (res && typeof res.json === "function" ? res.json() : null))
+    .then((data) => {
+      if (data && data.ok && data.presets && typeof data.presets === "object") {
+        userPresetCache = data.presets;
+      }
+      return userPresetCache;
+    })
+    .catch(() => userPresetCache)
+    .then((value) => {
+      userPresetLoading = false;
+      return value;
+    });
+}
+
+/** 프리셋 하나를 서버에 저장한다. 응답(전체 목록)을 그대로 돌려준다. */
+function postUserPreset(name, fields) {
+  return fetch(USER_PRESET_ROUTE, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: String(name ?? ""), fields: fields || {} }),
+  }).then((res) => (res && typeof res.json === "function" ? res.json() : null));
+}
+
+/** 프리셋 하나를 서버에서 지운다. 응답(남은 전체 목록)을 그대로 돌려준다.
+ *
+ * 왜(Why) 경로가 아니라 질의 문자열인가: 이름에 한글·공백·기호가 들어올 수
+ * 있어 경로 조각으로 넣으면 서버가 URL 을 한 번 더 풀어야 한다. aiohttp 의
+ * `request.query` 가 대신 풀어 준다 (cam_presets 의 DELETE 라우트 참조).
+ * 파일도 서버가 지운다 — 사용자 요구: "폴더 안에서도 지워져야 해". */
+function deleteUserPreset(name) {
+  const url = USER_PRESET_ROUTE
+    + "?name=" + encodeURIComponent(String(name ?? ""));
+  return fetch(url, { method: "DELETE" })
+    .then((res) => (res && typeof res.json === "function" ? res.json() : null));
+}
+
+/** "지울까요?" 를 묻는다 (사용자 요구: 묻고 OK 를 누르면 지운다).
+ *
+ * 왜(Why) 확인 창을 못 여는 환경에서 그냥 진행하나: 물어볼 수단이 없다고
+ * 삭제가 아예 막히면 사용자는 휴지통이 고장 났다고 본다. 그때만 묻지 않고
+ * 지운다 — 이 결정은 F32 가 고정한다. */
+function confirmPresetDelete(name) {
+  const msg = PRESET_DELETE_CONFIRM + "\n\n" + String(name ?? "");
+  const ask = globalThis.confirm;
+  if (typeof ask !== "function") return true;
+  try {
+    return !!ask(msg);
+  } catch (_) {
+    return true;
+  }
+}
+
+/** 저장 창의 줄 우측 휴지통 버튼.
+ *
+ * 왜(Why) 상자(box)를 받나: 줄을 만드는 순간에는 openMultiPopup 이 아직
+ * 창을 돌려주지 않아 menu 를 참조할 수 없다. 클릭 시점에 box.menu 를 읽어
+ * 목록 재그리기(_goriRefill)를 부른다. */
+function buildPresetDeleteButton(name, nameRow, box) {
+  const btn = document.createElement("span");
+  btn.className = "gori-popup-row-del";
+  btn.textContent = PRESET_DELETE_ICON;
+  btn.title = PRESET_DELETE_TITLE;
+  btn.style.cssText = [
+    "margin-left:auto", "cursor:pointer", "color:#e0a0a0",
+    "padding:0 4px", "border:1px solid transparent", "border-radius:3px",
+    "line-height:1.2",
+  ].join(";");
+  btn.addEventListener("mouseenter", () => {
+    btn.style.background = "#3a3a3a";
+    btn.style.borderColor = "#7ea6ff";
+  });
+  btn.addEventListener("mouseleave", () => {
+    btn.style.background = "transparent";
+    btn.style.borderColor = "transparent";
+  });
+  // 클릭이 문서(바깥 클릭 닫기)로 새지 않게 막는다 — 헤더 버튼과 같은 방식.
+  btn.addEventListener("click", (e) => {
+    e?.stopPropagation?.();
+    runUserPresetDelete(name, nameRow, box);
+  });
+  return btn;
+}
+
+/** 프리셋 하나를 지운다 — **먼저 묻고**, 확인했을 때만 서버에 보낸다.
+ *
+ * 왜(Why) 보내기 전에 묻나: 거절하면 요청 자체가 없으므로 실수로 지울 수
+ * 없다. 지우기가 되돌릴 수 없는 동작이라 이 순서가 중요하다. */
+function runUserPresetDelete(name, nameRow, box) {
+  const nm = String(name ?? "");
+  if (!nm || !confirmPresetDelete(nm)) return;
+  deleteUserPreset(nm)
+    .then((data) => {
+      if (!data || !data.ok) {
+        nameRow?.showHint?.(PRESET_DELETE_FAILED_HINT);
+        return;
+      }
+      if (data.presets && typeof data.presets === "object") {
+        userPresetCache = data.presets;
+      }
+      nameRow?.showHint?.("");
+      const menu = box?.menu;
+      if (menu && typeof menu._goriRefill === "function") {
+        menu._goriRefill(userPresetItems());
+      }
+    })
+    .catch(() => {
+      nameRow?.showHint?.(PRESET_DELETE_FAILED_HINT);
+    });
+}
+
+/** 저장된 프리셋의 값을 카메라 노드 10칸에 넣는다 — 사용자가 그 프리셋을
+ * 쓰는 상태가 된다 (사용자 요구 2026-10-28: "선택을 하면 … 설정 값들도 같이
+ * 적용이 되어야겠지"). 값이 없으면 아무것도 하지 않는다.
+ *
+ * 왜(Why) applyPresetFields 를 그대로 쓰나: 내장 프리셋을 고를 때와 ↻ 되돌리기가
+ * 쓰는 바로 그 함수다. 값 적용 규칙(자동이면 자동, 캔버스 다시 그리기)을 두 벌로
+ * 만들면 한쪽만 손질되어 곧 갈라진다. */
+function applyUserPresetToNode(node, name) {
+  const fields = userPresetCache && userPresetCache[name];
+  if (!fields || typeof fields !== "object") return false;
+  return applyPresetFields(node, fields);
+}
+
+/** user preset 을 "고른" 상태로 만든다 — 값 적용 + 노드 맨 위 `preset` 위젯에 이름 표시.
+ *
+ * 왜(Why) preset 위젯 값까지 바꾸나 (사용자 요구 2026-10-28): 위 칸이 늘
+ * `자동 (auto)` 로 남아 있으면 어느 프리셋이 골라졌는지 알 수 없다. 사용자는
+ * 위 칸 이름도 `내 프리셋` 으로 바뀌어야 한다고 정했다.
+ *
+ * 왜(Why) 값 적용의 **반환값을 안 보나** (실브라우저 제보 2026-10-28): 이름이 이
+ * 칸에 보이려면 먼저 저장 창에서 체크해야 하고, 체크가 값을 이미 적용해 둔다.
+ * 그래서 여기서 누를 때는 바뀌는 값이 하나도 없다 — `applyPresetFields` 가 false 를
+ * 돌려준다. 그 반환값을 "이 프리셋이 없다" 로 오해하고 일찍 돌아서면 preset 칸이
+ * `자동 (auto)` 로 그대로 남았다 (사용자: "설정값들은 적용이 되는데 preset 이름이
+ * 자동으로 계속 있어"). 그래서 **프리셋의 존재만** 캐시로 확인하고, 이름은 값이
+ * 같았어도 항상 바꾼다.
+ *
+ * 왜(Why) `_goriLastPreset` 과 기억을 같이 맞추나: 400ms 감시 루프(§아래)가
+ * preset 위젯 값이 바뀐 것을 "프리셋 전환" 으로 보고 들어오는 프리셋의 기본값을
+ * 덮어쓴다. user preset 이름은 내장 표(CAMERA_PRESETS)에 없어 기본값이 전부
+ * '자동 (auto)' 이므로, 그대로 두면 방금 적용한 값이 다음 틱에 지워진다.
+ * 기억을 채우고 마지막 프리셋을 맞춰 "전환" 으로 안 보이게 한다. */
+function selectUserPreset(node, name) {
+  const fields = userPresetCache && userPresetCache[name];
+  if (!fields || typeof fields !== "object") return false;
+  applyUserPresetToNode(node, name); // 값 적용 — 이미 같은 값이면 아무 일도 없다
+  const pw = presetWidget(node);
+  if (pw) {
+    pw.value = name; // 이름은 값이 같았어도 항상 바꾼다
+    // 값이 이미 같으면 applyPresetFields 가 setDirty 를 안 부른다 — 그러면 바뀐
+    // 이름이 화면에 안 그려져 예전 글자('자동 (auto)')가 그대로 남는다. 이름만
+    // 바뀐 경우에도 다시 그리게 여기서 한 번 부른다.
+    app.canvas?.setDirty?.(true, true);
+  }
+  snapshotIntoPresetMemory(node, name);
+  return true;
+}
+
+/** 체크를 풀면 카메라를 자동으로 되돌린다 (사용자 요구 2026-10-28):
+ * "플로피에서 체크박스 체크 해제 하면 preset 자동으로 바뀌고, shot, lens, angle,
+ * composition 여기 설정 값들도 다 자동으로 바뀌게 하자".
+ *
+ * 왜(Why) 내장 '자동 (auto)' 프리셋과 같은 함수를 쓰나: 되돌리기 결과가 "자동
+ * 프리셋을 고른 것" 과 같아야 한다. `presetDefaultFields(MULTI_AUTO_LABEL)` 은
+ * 전 필드를 자동으로 돌려주는 바로 그 규칙이라, 규칙을 두 벌로 만들지 않는다.
+ *
+ * 왜(Why) `_goriLastPreset` 과 기억을 맞추나: 400ms 감시 루프가 preset 위젯
+ * 값이 바뀐 것을 "프리셋 전환" 으로 보고 자동 기본값을 한 번 더 적용한다.
+ * 여기서는 결과가 같아 눈에 띄지 않지만, 마지막 프리셋을 맞춰 두면 루프가
+ * 헛돌지 않고 값이 두 번 다시 그려지지도 않는다 (selectUserPreset 과 같은 이유). */
+function resetUserPresetToAuto(node) {
+  applyPresetFields(node, presetDefaultFields(MULTI_AUTO_LABEL));
+  const pw = presetWidget(node);
+  if (pw) {
+    pw.value = MULTI_AUTO_LABEL;
+    // 값이 이미 자동이면 applyPresetFields 가 setDirty 를 안 부른다 — 이름이
+    // 바뀐 것을 화면에 그리려면 여기서 한 번 청해야 한다 (selectUserPreset 과 같다).
+    app.canvas?.setDirty?.(true, true);
+  }
+  snapshotIntoPresetMemory(node, MULTI_AUTO_LABEL);
+  return true;
+}
+
+/** 팝업 본문이 비었을 때의 안내 한 줄 (회색·작은 글씨).
+ *
+ * 왜(Why) 함수로 두나: 저장 창이 프리셋 목록을 못 받았을 때와, 드롭다운 아래
+ * user preset 칸이 늘 보여 주는 그 줄이 **같은 모양**이어야 한다. 클래스
+ * (`gori-popup-empty`)와 겉모양이 한 곳에서 나온다. */
+function buildPopupEmptyLine(text) {
+  const empty = document.createElement("div");
+  empty.className = "gori-popup-empty";
+  empty.textContent = String(text);
+  empty.style.cssText = "padding:2px 6px;color:#999;";
+  return empty;
+}
+
+/** 이름 입력칸 줄. 아래에 안내(빨간 글씨) 한 줄이 붙는다.
+ *
+ * 왜(Why) 이름표가 없나: 입력칸 안에 `preset name` 이 placeholder 로 이미
+ * 보이므로 옆에 굵은 이름표를 두면 같은 말이 두 번 나온다 (사용자 지시
+ * 2026-10-28: 라벨을 지우라고 표시). 입력칸이 줄 전체 폭을 쓴다.
+ *
+ * el 을 openMultiPopup 의 opts.extraHead 로 넘겨 헤더 바로 아래에 넣는다. */
+function buildPresetNameRow() {
+  const wrap = document.createElement("div");
+  wrap.className = "gori-popup-namebox";
+  const row = document.createElement("div");
+  row.className = "gori-popup-namerow";
+  row.style.cssText = "display:flex;align-items:center;padding:3px 6px;"
+    + "border-bottom:1px solid #444;margin-bottom:2px;";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "gori-popup-name";
+  input.placeholder = PRESET_NAME_PLACEHOLDER;
+  input.style.cssText = "flex:1;min-width:0;background:#1b1b1b;color:#e0e0e0;"
+    + "border:1px solid #555;border-radius:3px;padding:1px 4px;font-size:12px;";
+  row.appendChild(input);
+  wrap.appendChild(row);
+  const hint = document.createElement("div");
+  hint.className = "gori-popup-hint";
+  hint.style.cssText = "padding:0 6px 2px;color:#ff9c9c;display:none;";
+  wrap.appendChild(hint);
+  const showHint = (text) => {
+    hint.textContent = String(text || "");
+    hint.style.display = text ? "block" : "none";
+  };
+  return { el: wrap, input, hint, showHint };
+}
+
+/** 저장 버튼 → 이름을 확인하고 지금 값 10칸을 그 이름으로 저장한다.
+ *
+ * 이름이 비면 저장하지 않고 안내만 보여준다 (사용자 요구: 빈 이름 저장 금지).
+ * 저장이 끝나면 목록만 갈아끼우고 입력칸을 비운다 — 창을 닫았다 열지 않으므로
+ * 스크롤 위치와 마우스 위치가 그대로다. */
+function runUserPresetSave(node, widget, nameRow, menu) {
+  const name = String(nameRow?.input?.value ?? "").trim();
+  if (!name) {
+    nameRow?.showHint?.(PRESET_NAME_EMPTY_HINT);
+    return;
+  }
+  const fields = snapshotPresetFields(node);
+  postUserPreset(name, fields)
+    .then((data) => {
+      if (!data || !data.ok) {
+        nameRow?.showHint?.(PRESET_SAVE_FAILED_HINT);
+        return;
+      }
+      if (data.presets && typeof data.presets === "object") {
+        userPresetCache = data.presets;
+      }
+      nameRow?.showHint?.("");
+      if (nameRow?.input) nameRow.input.value = "";
+      if (menu && typeof menu._goriRefill === "function") {
+        menu._goriRefill(userPresetItems());
+      }
+    })
+    .catch(() => {
+      nameRow?.showHint?.(PRESET_SAVE_FAILED_HINT);
+    });
+}
+
+/** 저장 팝업 — 저장 아이콘을 누르면 **저장 버튼 오른쪽**에 뜬다 (사용자 지시
+ * 2026-10-28). 기존 기능 팝업과 **같은 구현**(openMultiPopup)에 opts 만 채워
+ * 연다 — 팝업을 두 벌 만들면 위치 추적·바깥 클릭 닫기·휠 라우팅을 복제해야
+ * 하고 곧 어긋난다.
+ *
+ * 헤더 좌측 = 'user preset', 우측 끝 = 저장 버튼. 헤더 **아래**에 `preset name`
+ * 입력칸, 본문에는 저장해 둔 프리셋이 체크박스 줄로 쌓인다 (체크 = 그 프리셋을
+ * 쓰는 것, 2026-10-28). 저장된 프리셋이 하나도 없으면 본문에 안내 한 줄만 뜬다.
+ *
+ * 체크한 이름은 `userPresetChecked(node)` 에 남긴다 — 프리셋 드롭다운 아래 칸이
+ * 그 이름을 보여준다 (사용자 요구 2026-10-28: "메인 preset … user preset 밑의 칸
+ * 에 … 추가가 되는거야"). 창을 다시 열면 그 이름들이 체크된 채로 나온다.
+ *
+ * 앵커는 automation 위젯이라 팝업이 저장 버튼이 있는 줄에 붙고 노드 오른쪽
+ * 끝에서 시작한다. */
+function openSavePopup(node, widget) {
+  const nameRow = buildPresetNameRow();
+  // menu 는 openMultiPopup 이 돌려준 뒤에 채워진다 — 저장 클릭은 그 뒤에만
+  // 일어나므로 상자 하나를 두고 나중에 참조한다.
+  const box = { menu: null };
+  const menu = openMultiPopup(node, widget, {
+    title: SAVE_POPUP_TITLE,
+    values: userPresetItems(),
+    // 지금 체크해 둔 프리셋 이름으로 시작한다 (창을 다시 열어도 체크가 유지된다).
+    selected: Array.from(userPresetChecked(node)),
+    extraHead: nameRow.el,
+    // 저장된 프리셋이 0개일 때의 안내 한 줄 (빈 상자만 뜨면 고장으로 오해한다).
+    emptyText: SAVE_POPUP_EMPTY_TEXT,
+    right: {
+      label: PRESET_SAVE_LABEL,
+      title: PRESET_SAVE_TITLE,
+      onClick: () => { runUserPresetSave(node, widget, nameRow, box.menu); },
+    },
+    onToggle: (value, checked) => {
+      /* 체크 = "드롭다운의 user preset 칸에 이름 올리기" **만** 한다.
+       * 값 적용도 위 preset 위젯 이름 변경도 하지 않는다 (사용자 정정 2026-10-28):
+       * "플로피에서 내 프리셋 체크하면 shot, lens, angle, composition 이곳에 바로
+       * 설정 값이 들어 가고 있어~ preset 드롭다운 메뉴에서 내 프리셋을 선택하면
+       * 설정 값이 들어가야 하는데". 그래서 둘 다 드롭다운에서 이름을 눌렀을 때
+       * (selectUserPreset)만 일어난다.
+       * **체크를 풀면** 반대로 카메라를 자동으로 되돌린다 (사용자 요구
+       * 2026-10-28): "체크 해제 하면 preset 자동으로 바뀌고, shot, lens, angle,
+       * composition 여기 설정 값들도 다 자동으로 바뀌게 하자". */
+      const checkedNames = userPresetChecked(node);
+      if (checked) {
+        checkedNames.add(value);
+      } else {
+        checkedNames.delete(value);
+        resetUserPresetToAuto(node);
+      }
+      // 워크플로 파일(node.properties)에 남긴다 — 새로고침·재시작에도 체크가 남는다.
+      persistUserPresetChecked(node);
+    },
+    // 줄 우측 휴지통 (사용자 지시 2026-10-28). 묻고 나서 지우며, 지우면
+    // 폴더의 파일도 함께 사라진다(서버 담당).
+    rowAction: (item) => buildPresetDeleteButton(item?.value, nameRow, box),
+  });
+  box.menu = menu;
+  return menu;
+}
+
+/** 저장 아이콘 클릭용 — 캐시가 없으면 목록을 받아온 뒤 **본문만** 새로 그린다.
+ * 받아오지 못해도 창은 이미 열려 있다 (안내 문구가 그대로 보인다). */
+function openSavePopupFresh(node, widget) {
+  const menu = openSavePopup(node, widget);
+  if (userPresetCache === null) {
+    refreshUserPresets().then(() => {
+      // 받아오는 사이에 닫혔거나 다른 창이 떴으면 건드리지 않는다.
+      if (multiPopupEl !== menu || !menu) return;
+      if (typeof menu._goriRefill === "function") menu._goriRefill(userPresetItems());
+    });
+  }
+  return menu;
+}
+
+/* ------------------------------------------------------------------ */
+/* user preset 칸을 프리셋 드롭다운 **아래**에 붙인다 (2026-10-28)      */
+/* ------------------------------------------------------------------ */
+/* 왜(Why) 붙이나 (사용자 그림 "변경 후"): 프리셋 줄을 눌러 펼친 목록
+ * (Filter list + 자동/시네마틱 …) **바로 아래**에 user preset 칸이 이어져
+ * 보여야 한다. 별도 창을 띄우면 그림과 달라진다.
+ *
+ * 어떻게 붙이나: 프리셋 콤보 위젯의 onClick 을 감싸, 원본이 네이티브 메뉴를
+ * 만든 **직후** 새로 생긴 메뉴 뿌리(.litecontextmenu)를 찾아 칸을 덧붙인다.
+ * 메뉴의 클래스·동작(바깥 클릭 닫기·필터 입력)은 프런트엔드 것이므로 건드리지
+ * 않는다. 붙인 요소는 메뉴 뿌리 **안쪽**이라 눌러도 메뉴가 닫히지 않는다
+ * (LiteGraph ContextMenu 는 root.contains 로 바깥 클릭을 판정한다 — 1.55.18
+ * 번들 실측).
+ * ------------------------------------------------------------------ */
+
+/** 지금 화면에 떠 있는 네이티브 메뉴 뿌리들.
+ *
+ * 왜(Why) 찍어 두나: 메뉴에는 어느 위젯에서 열렸는지가 담기지 않는다. 만들기
+ * **전** 목록을 찍어 두고 만든 뒤와 견주면 새로 생긴 하나를 정확히 고른다
+ * (프런트엔드 자신의 필터 확장도 같은 방식으로 활성 노드를 찾는다). */
+function contextMenuRoots() {
+  const out = new Set();
+  try {
+    const doc = globalThis.document;
+    const list = doc?.querySelectorAll?.(".litecontextmenu") || [];
+    for (const el of Array.from(list)) out.add(el);
+  } catch (_) {
+    /* DOM 이 없으면 빈 집합 — 붙일 대상도 없다 */
+  }
+  return out;
+}
+
+/** before 에 없던 메뉴 뿌리 하나 (없으면 null).
+ * 뒤에서부터 본다 — 방금 만든 것이 마지막에 붙기 때문이다. */
+function newContextMenuRoot(before) {
+  try {
+    const doc = globalThis.document;
+    const list = Array.from(doc?.querySelectorAll?.(".litecontextmenu") || []);
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      if (!before?.has?.(list[i])) return list[i];
+    }
+  } catch (_) {
+    /* 못 찾으면 붙이지 않는다 — 프리셋 목록은 원래대로 쓸 수 있다 */
+  }
+  return null;
+}
+
+/** 메뉴가 화면 밖으로 밀리지 않게 위로 당긴다.
+ *
+ * 왜(Why) 필요한가: 네이티브 메뉴는 **자기 항목만** 재어 위치를 정한다
+ * (top = 클릭 지점, 넘치면 위로 밀어 올림). 우리 칸은 그 뒤에 붙으므로 그
+ * 높이가 계산에 없다. 그대로 두면 화면 아래쪽에서 연 메뉴의 마지막 줄이
+ * 잘린다. 못 고쳐도 칸은 그대로 쓸 수 있다. */
+function reflowContextMenu(root) {
+  try {
+    const rect = root?.getBoundingClientRect?.();
+    const vh = globalThis.innerHeight || 0;
+    if (!rect || !vh || !(rect.height > 0)) return;
+    if (rect.bottom <= vh) return;
+    const top = Number.parseFloat(root.style?.top);
+    const next = Math.max(0, (Number.isFinite(top) ? top : 0)
+      - (rect.bottom - vh) - 4);
+    if (root.style) root.style.top = next + "px";
+  } catch (_) {
+    /* 위치를 못 고쳐도 칸은 그대로 쓸 수 있다 */
+  }
+}
+
+/** 열려 있는 프리셋 드롭다운 메뉴를 닫는다.
+ *
+ * 왜(Why) 코어 함수를 먼저 부르나: 네이티브 메뉴는 자기 항목(`.litemenu-entry`)
+ * 을 눌렀을 때만 닫힌다. 우리가 덧붙인 이름 줄은 그 클래스가 아니라서 눌러도
+ * 안 닫힌다. 코어의 `closeAllContextMenus` 가 `.close()` 까지 불러 뒷정리를
+ * 하므로 그것을 먼저 쓰고, 없는 환경(구버전·테스트)에서는 뿌리를 직접 지운다.
+ * 못 닫아도 값은 이미 적용됐으므로 조용히 넘어간다. */
+function closeUserPresetMenu() {
+  try {
+    const canvas = globalThis.app?.canvas;
+    const fn = canvas?.closeAllContextMenus
+      || globalThis.LGraphCanvas?.closeAllContextMenus
+      || globalThis.LiteGraph?.closeAllContextMenus;
+    if (typeof fn === "function") {
+      fn.call(canvas || globalThis, globalThis);
+      return;
+    }
+  } catch (_) {
+    /* 코어가 바뀌어도 아래 폴백이 있다 */
+  }
+  try {
+    const list = globalThis.document?.querySelectorAll?.(".litecontextmenu") || [];
+    for (const el of Array.from(list)) el?.remove?.();
+  } catch (_) {
+    /* 못 닫아도 값은 적용됐다 */
+  }
+}
+
+/** 프리셋 드롭다운 아래 칸에 나오는, **체크해 둔 user preset 이름 한 줄.**
+ *
+ * 누르면 그 프리셋 값이 카메라 노드에 들어가고, 노드 맨 위 `preset` 위젯 이름도
+ * 그 프리셋 이름으로 바뀌고, 드롭다운이 닫힌다 (사용자 요구 2026-10-28: "내 프리셋
+ * 이거 클릭해서 선택하게 해줘" + "preset 에 이름도 … 내 프리셋 으로 바껴야 어떤
+ * 프리셋이 선택이 되었는지 알 수 있지"). 값이 들어가면 노드의 shot·lens·angle·
+ * composition … 칸이 그 값을 그대로 보여준다 — 선택 표시를 따로 그리지 않는다.
+ *
+ * 왜(Why) 체크박스·휴지통이 없나: 그 둘은 플로피 저장 창이 맡는다 (사용자 확정
+ * 2026-10-28). 이 줄은 누르면 고르는 이름표다. */
+function buildPresetCheckedRow(name, node) {
+  const row = document.createElement("div");
+  row.className = "gori-popup-checked";
+  row.textContent = String(name ?? "");
+  row.title = String(name ?? "");
+  row.style.cssText = "padding:1px 6px;color:#e0e0e0;cursor:pointer;";
+  // 마우스를 올리면 밝아진다 — 누를 수 있다는 것을 알린다.
+  row.addEventListener("mouseenter", () => { row.style.background = "#3a3a3a"; });
+  row.addEventListener("mouseleave", () => { row.style.background = ""; });
+  row.addEventListener("click", (e) => {
+    e?.stopPropagation?.();
+    selectUserPreset(node, name);
+    closeUserPresetMenu();
+  });
+  return row;
+}
+
+/** user preset 칸 본체. 돌려주는 el 을 프리셋 메뉴 뿌리에 덧붙인다.
+ *
+ * 구성(위→아래): 헤더 `user preset` · 그 아래에 **지금 체크해 둔 프리셋 이름**들.
+ * 체크한 것이 없으면 `아직 설정 항목이 없습니다` 한 줄.
+ *
+ * 왜(Why) 체크한 이름을 보여주나 (사용자 요구 2026-10-28 원문): "저장된 내 프리셋
+ * 좌측의 체크박스에 체크를 하면 메인 preset … user preset 밑의 칸에 아직 설정
+ * 항목이 없습니다 의 항목에 추가가 되는거야". 즉 플로피 창에서 체크한 이름이
+ * 여기 나타난다. 체크는 `userPresetChecked(node)` 에 남아 있어 창을 닫아도 유지된다.
+ *
+ * 왜(Why) 저장·이름칸·체크 줄은 여기 없나 (사용자 그림 "변경 후"): 그 셋은 그림에
+ * 없어 사용자가 파란 표시로 지시해 뺐다. 저장·삭제는 플로피 아이콘 창이 맡고, 이
+ * 칸은 **이름표**다 — 다만 이름을 **누르면 그 프리셋이 골라진다**(값 적용 + 닫기).
+ * 작은 회색 안내 줄은 저장 창과 **같은 조각**(buildPopupEmptyLine)으로 만든다 —
+ * 모양이 한 곳에서 나온다. */
+function buildUserPresetSection(node) {
+  const el = document.createElement("div");
+  el.className = PRESET_MENU_SECTION_CLASS;
+  el.style.cssText = PRESET_MENU_SECTION_STYLE;
+
+  const head = document.createElement("div");
+  head.className = "gori-popup-head";
+  head.style.cssText = PRESET_MENU_HEAD_STYLE;
+  const headName = document.createElement("span");
+  headName.textContent = SAVE_POPUP_TITLE;
+  head.appendChild(headName);
+  el.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "gori-popup-body";
+  // 지금 체크해 둔 이름만 보여준다. 캐시에 없는 이름(폴더에서 지운 등)은 뺀다 —
+  // 화면에 유령 이름이 남으면 폴더와 갈라져 보인다.
+  const names = Array.from(userPresetChecked(node))
+    .filter((n) => !userPresetCache
+      || Object.prototype.hasOwnProperty.call(userPresetCache, n));
+  if (!names.length) {
+    body.appendChild(buildPopupEmptyLine(SAVE_POPUP_EMPTY_TEXT));
+  } else {
+    for (const name of names) body.appendChild(buildPresetCheckedRow(name, node));
+  }
+  el.appendChild(body);
+  return el;
+}
+
+/** 프리셋 위젯 하나 (없으면 null). */
+function presetWidget(node) {
+  return (node?.widgets || []).find((w) => w && w.name === "preset") || null;
+}
+
+/** 새로 열린 프리셋 메뉴 뿌리를 찾아 user preset 칸을 덧붙인다.
+ *
+ * before = 메뉴가 만들어지기 전에 화면에 있던 뿌리 집합(contextMenuRoots).
+ * 메뉴가 없거나(리셋 버튼 클릭 등) 이미 칸이 붙었으면 아무것도 하지 않는다. */
+function attachUserPresetSection(node, before) {
+  if (!node) return null;
+  const root = newContextMenuRoot(before);
+  if (!root || root[PRESET_MENU_ROOT_FLAG]) return null;
+  root[PRESET_MENU_ROOT_FLAG] = true;
+  const el = buildUserPresetSection(node);
+  root.appendChild(el);
+  reflowContextMenu(root);
+  return el;
+}
+
+/** 프리셋 위젯에 "드롭다운 아래 user preset 칸" 을 설치한다.
+ *
+ * 클릭 경로는 리셋 버튼(installPresetResetButton)과 같은 두 갈래를 감싼다:
+ * 새 litegraph 는 onClick, 구버전은 mouse 다. 어느 쪽이 원본을 부르든, 부른
+ * **뒤**에 새 메뉴를 찾으므로 순서가 어긋나지 않는다. 리셋 스트립 클릭이면
+ * 메뉴가 만들어지지 않으므로 붙일 것도 없다. */
+function installPresetMenuPanel(node) {
+  const pw = presetWidget(node);
+  if (!pw || pw._goriPresetMenuPanel) return false;
+  const origOnClick = typeof pw.onClick === "function" ? pw.onClick : null;
+  const origMouse = typeof pw.mouse === "function" ? pw.mouse : null;
+  if (!origOnClick && !origMouse) return false;
+  pw._goriPresetMenuPanel = true;
+
+  if (origOnClick) {
+    pw.onClick = function (arg) {
+      const before = contextMenuRoots();
+      const out = origOnClick.call(this, arg);
+      attachUserPresetSection(arg?.node || node, before);
+      return out;
+    };
+  }
+  if (origMouse) {
+    pw.mouse = function (event, pos, n) {
+      const before = contextMenuRoots();
+      const out = origMouse.call(this, event, pos, n);
+      attachUserPresetSection(n || node, before);
+      return out;
+    };
+  }
+  return true;
 }
 
 /** 기능 위젯 하나를 다중 선택 위젯으로 교체한다. */
@@ -1862,6 +2682,17 @@ function snapshotPresetFields(node) {
     if (w) snap[name] = w.value;
   }
   return snap;
+}
+
+/** 지금 값과 "마지막 프리셋" 을 한 이름 아래 기억에 남긴다.
+ *
+ * 왜(Why) 둘을 묶나: user preset 을 고르면(§selectUserPreset) 값이 방금 바뀌므로,
+ * 그 이름의 기억을 채우고 `_goriLastPreset` 까지 맞춰야 감시 루프가 "프리셋 전환"
+ * 으로 보고 값을 덮어쓰지 않는다 (안 맞추면 내장 표에 없는 이름이라 기본값
+ * 전부 '자동' 으로 지워진다). */
+function snapshotIntoPresetMemory(node, name) {
+  presetMemoryOf(node)[name] = snapshotPresetFields(node);
+  node._goriLastPreset = name;
 }
 
 /** 기능 필드에 값을 적용한다. null 은 건드리지 않는다. */
@@ -2404,6 +3235,15 @@ function installPresetSaveButton(node) {
   if (!aw || aw._goriPresetSave) return false;
   aw._goriPresetSave = true;
 
+  // 사용자 프리셋 목록을 미리 받아 둔다 (2026-10-28). 저장 아이콘 클릭은
+  // 캐시로 즉시 그리므로 창이 네트워크를 기다리지 않는다. 실패해도 조용히
+  // 넘어간다 — 라우트가 없는 환경(구버전 노드)에서는 창이 안내 문구만 보여준다.
+  try {
+    refreshUserPresets();
+  } catch (_) {
+    /* 목록 없이도 저장 창은 열린다 */
+  }
+
   const origDraw = typeof aw.draw === "function" ? aw.draw : null;
   aw.draw = function (ctx, n, width, y, H, lowQuality) {
     this.y = y;
@@ -2441,7 +3281,9 @@ function installPresetSaveButton(node) {
           ? this._goriSaveSlotH
           : PRESET_RESET_SLOT_FALLBACK_H;
         if (width > 0 && presetResetHitX(x, width, slot)) {
-          runWorkflowSave();
+          // 2026-10-28 사용자 지시: 곧바로 저장하지 않고 **저장 팝업**을 연다.
+          // 실제 저장은 팝업 우측 끝 '저장' 버튼이 한다 (openSavePopup).
+          openSavePopupFresh(n, this);
           try {
             arg?.canvas?.setDirty?.(true, true);
           } catch (_) {
@@ -2470,7 +3312,8 @@ function installPresetSaveButton(node) {
           ? this._goriSaveSlotH
           : PRESET_RESET_SLOT_FALLBACK_H;
         if (width > 0 && presetResetHitX(pos[0], width, slot)) {
-          runWorkflowSave();
+          // 2026-10-28: onClick 경로와 동일 — 저장 팝업을 연다.
+          openSavePopupFresh(n, this);
           try {
             app.canvas?.setDirty?.(true, true);
           } catch (_) {
@@ -2603,20 +3446,27 @@ app.registerExtension({
         /* 폭 정합 실패는 조용히 무시 — automation 은 원래 폭으로 그려진다 */
       }
       try {
-        // ↻ 아래 칸(automation 행 스트립)의 저장 버튼 (2026-10-23).
-        // **나중에 쓰려고 미리 만들어 둔 것 — 지금은 숨긴다**(사용자 지정
-        // 2026-10-23 01:04). 코드는 전부 남아 있고 이 호출만 주석으로 막아
-        // 화면에 나타나지 않는다. 다시 쓸 때 아래 줄의 주석을 푼다.
+        // ↻ 아래 칸(automation 행 스트립)의 저장 버튼 (2026-10-23 신설).
+        // 2026-10-23 01:04 에 잠시 숨겼다가 2026-10-28 에 다시 켰다(사용자 지시).
         // 폭 정합 뒤에 설치해야 이중 축소가 없다 (F28 소스 계약).
-        // installPresetSaveButton(node);
+        installPresetSaveButton(node);
       } catch (_) {
         /* 저장 버튼 설치 실패는 조용히 무시 — Ctrl+S 로 저장할 수 있다 */
+      }
+      try {
+        // 프리셋 드롭다운 **아래**에 user preset 칸을 붙인다 (2026-10-28
+        // 사용자 그림 "변경 후"). 리셋 버튼 설치 뒤에 감싸므로 이 래퍼가
+        // 가장 바깥이다 — 원본(리셋 래퍼 → 코어 콤보)이 메뉴를 만든 뒤에
+        // 새 메뉴를 찾는다.
+        installPresetMenuPanel(node);
+      } catch (_) {
+        /* 못 붙여도 프리셋 목록은 원래대로 쓰고, 저장 아이콘 경로도 살아 있다 */
       }
       try {
         // ai_llm_setup 헤더 삽입 — motion2 아래, JS 전용(serialize:false)
         installLlmSetupHeader(node);
       } catch (_) {
-        /* 헤더 설치 실패는 조용히 무시 — LLM 6칸이 그대로 노출된다 */
+        /* 헤더 설치 실패는 조용히 무시 — LLM 5칸이 그대로 노출된다 */
       }
       try {
         // 접힘 상태 적용 (hidden 만 — 크기는 저장된 값을 존중한다). 새 노드는
@@ -2830,6 +3680,49 @@ export {
   drawComboBodyShrunk, installAutomationBarMatch,
   installPresetResetButton,
   runWorkflowSave, drawPresetSaveIcon, installPresetSaveButton,
+  openMultiPopup,
+  openSavePopup,
+  openSavePopupFresh,
+  contextMenuRoots,
+  newContextMenuRoot,
+  reflowContextMenu,
+  buildUserPresetSection,
+  attachUserPresetSection,
+  closeUserPresetMenu,
+  installPresetMenuPanel,
+  PRESET_MENU_SECTION_CLASS,
+  PRESET_SAVE_LABEL,
+  PRESET_SAVE_TITLE,
+  popupItemList,
+  buildPopupHeadButton,
+  SAVE_POPUP_TITLE,
+  SAVE_POPUP_EMPTY_TEXT,
+  USER_PRESET_ROUTE,
+  PRESET_NAME_PLACEHOLDER,
+  PRESET_NAME_EMPTY_HINT,
+  PRESET_SAVE_FAILED_HINT,
+  userPresetItems,
+  userPresetChecked,
+  persistUserPresetChecked,
+  USER_PRESET_CHECKED_PROP,
+  refreshUserPresets,
+  buildPresetCheckedRow,
+  postUserPreset,
+  deleteUserPreset,
+  confirmPresetDelete,
+  buildPresetDeleteButton,
+  runUserPresetDelete,
+  PRESET_DELETE_ICON,
+  PRESET_DELETE_TITLE,
+  PRESET_DELETE_CONFIRM,
+  PRESET_DELETE_FAILED_HINT,
+  applyUserPresetToNode,
+  selectUserPreset,
+  resetUserPresetToAuto,
+  snapshotIntoPresetMemory,
+  buildPopupEmptyLine,
+  buildPresetNameRow,
+  runUserPresetSave,
   findLlmHeaderWidget, llmFoldGroupWidgets, measureLlmFoldFootprint,
   setLlmSectionFolded, toggleLlmSectionFolded, applyLlmFoldFromProperties,
   resolveLlmFolded, installLlmSetupHeader, drawLlmSetupHeader,

@@ -44,7 +44,7 @@ __all__ = [
     "_is_nudity_request", "nudity_anatomy_guard", "coverage_guard",
     "EXPLICIT_COVER_KEYWORDS", "EXPLICIT_REVEAL_KEYWORDS",
     "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "FINGER_SEPARATION_POSITIVE", "SCENE_FINGER_CUE", "scene_finger_cue", "HAND_INTEGRITY_POSITIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_background_dna_slots", "_furniture_background_guard", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_POSITIVE_SLOT", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "FOOTWEAR_BARE_POSITIVE", "FOOTWEAR_BARE_NEGATIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
-    "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "SCENERY_BACKGROUND_POSITIVE", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
+    "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "SCENERY_BACKGROUND_POSITIVE", "BACKGROUND_LIGHT_RECONCILE_POSITIVE", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
     "SEAT_OCCUPANCY_POSITIVE", "SEAT_OCCUPANCY_NEGATIVE", "SEAT_ORIENTATION_POSITIVE", "FURNITURE_PLACEMENT_LOCK_NON_SEAT",
     "GROUND_REF_NEGATIVE", "ground_reference_guard",
     "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio",
@@ -425,15 +425,43 @@ FURNITURE_BACKGROUND_POSITIVE = (
 # `_furniture_background_guard` 가 이어 붙이므로 플래그(furniture_bg)·plan 키
 # (furniture_bg_slots)·짝 negative(OBJECT_DRIFT_NEGATIVE)가 그대로 따라온다.
 SCENERY_BACKGROUND_POSITIVE = (
-    "room fidelity guard: the room surfaces visible in reference image {slots} "
-    "stay as they are there — the same flooring with the same material and the "
-    "same plank or tile pattern running in the same direction, the same rug, "
-    "carpet or mat with the same pattern, texture and colour, the same wall, "
-    "ceiling, window, curtain and door surfaces, and the same lighting "
-    "direction and colour temperature. None of those surfaces is restyled, "
-    "recoloured, covered up or swapped for a different material or pattern — a "
-    "wood plank floor stays a wood plank floor and does not become large pale "
-    "tiles, and the reverse."
+    "surface fidelity guard: the surfaces visible in reference image {slots} "
+    "stay as they are there — the same floor or ground surface, the same "
+    "material and the same pattern or structure running in the same direction, "
+    "the same rug, carpet or mat with the same pattern, texture and colour, "
+    "and the same wall, ceiling, window, curtain and door surfaces. Outdoor "
+    "ground counts as a surface too — dirt, gravel, stone paving, cobblestones, "
+    "sand, grass or rock keeps the ground material, colour, texture and surface "
+    "detail it has in reference image {slots}. None of those surfaces is "
+    "restyled, recoloured, covered up or swapped for a different material or "
+    "pattern — a wood plank floor stays a wood plank floor and does not become "
+    "large pale tiles, a stone paving stays stone paving and does not become "
+    "smooth pale concrete, and the reverse."
+)
+
+
+# 배경 참조 광원 우선 (2026-10-28, 두 번째 수정). 왜(Why) 이 조항이 필요한가:
+# 사용자가 조명을 **자동**으로 두면 카메라가 조명을 스스로 채운다(구도 규칙·
+# 이미지 힌트·기본 창가빛). 그 자동 조명이 참조 배경의 광원과 충돌할 수 있다.
+# 사용자 결정(2026-10-28): 조명이 자동이면 **참조 배경이 기준**이고, 카메라가
+# 자동으로 채운 조명은 **피사체에만** 적용된다. 조명을 직접 고르면 그 설정이
+# 1순위이고 이 조항 자체를 붙이지 않는다(카메라 설정 무력화 금지).
+#
+# 왜(Why) 조명 이름을 나열하지 않나: 위 표면 문구가 "the same light direction and
+# colour temperature" 를 **무조건** 말해 사용자가 고른 조명과 충돌했다. 이름을
+# 나열하는 대신 "이 프롬프트의 다른 조명은 피사체에만" 이라는 일반 종속을 건다 —
+# 창가빛·림라이트·골든아워·이미지 힌트 무엇이든 같은 문장이 덮는다.
+# 발동은 **배경 참조가 있고 사용자가 조명을 명시하지 않았을 때만**이다. 판정은
+# 라벨이 아니라 `light_explicit` 하나다 — 라벨을 다시 해석하면 한쪽만 뒤처진다
+# (직전 커밋이 "스튜디오 라벨이면" 이라는 두 번째 해석으로 정확히 그랬다).
+BACKGROUND_LIGHT_RECONCILE_POSITIVE = (
+    "background light guard: the light of reference image {slots} is the base "
+    "for the scene — its direction, shadow direction and colour temperature "
+    "carry into the result. Any other lighting described in this prompt shapes "
+    "the subject only: it does not flatten, brighten, even out or recolour the "
+    "background, and it does not remove the shadows the reference light casts. "
+    "The described mood may still shift the subject's own light without "
+    "replacing the reference background light."
 )
 
 
@@ -530,9 +558,10 @@ def _furniture_dna_guard(text: str, object_slots, seat_slots=None) -> str:
     return " ".join(parts)
 
 
-def _furniture_background_guard(text: str, background_slots) -> str:
+def _furniture_background_guard(text: str, background_slots,
+                                light_explicit: bool = False) -> str:
     """배경 슬롯 전용 **조건부** 충실 문구. 대상이 없으면 "".
-    두 문구를 이어 붙인다 — 가구·사물(R189) + 방 표면(R190, 2026-10-22).
+    두 문구를 이어 붙인다 — 가구·사물(R189) + 표면(R190, 2026-10-22).
 
     _furniture_dna_guard 와 문구를 나눠 쓰는 이유: 그쪽은 "그 사물이 화면에
     있다" 를 전제하는 접촉·방향·개수 문구를 포함하고, 2026-10-19 사용자 제보
@@ -541,10 +570,16 @@ def _furniture_background_guard(text: str, background_slots) -> str:
     모델이 사전 지식으로 다시 그렸다(2026-10-22 실측). 그래서 선택은
     `_background_dna_slots` 가 따로 하고 문구는 여기서 조건문으로 낸다.
 
-    방 문구(SCENERY_BACKGROUND_POSITIVE)를 따로 둔 이유: 사용자가 시드 7 을
+    표면 문구(SCENERY_BACKGROUND_POSITIVE)를 따로 둔 이유: 사용자가 시드 7 을
     탈락시킨 것이 바닥 재질이었고(2026-10-22), R189 문구는 가구만 지명해
     바닥·러그·벽에 구체 요구가 없었다. 문구를 나눠 두면 한쪽만 조정할 수 있고
     R189 핀이 흔들리지 않는다.
+
+    light_explicit (2026-10-28, 선택): 사용자가 조명·그레이드를 **직접** 골랐는가.
+    False(기본)면 참조 배경 광원 우선 조항을 붙인다 — 조명이 자동일 때 참조가
+    기준이라는 사용자 결정이다. True 면 붙이지 않는다 — 사용자가 고른 설정이
+    1순위이고 참조가 그것을 덮으면 안 된다. 생략하면 종전과 **바이트 동일**하다
+    (기존 호출·검사가 아무것도 바뀌지 않는다).
     """
     try:
         slots = sorted(int(x) for x in set(background_slots or []))
@@ -559,8 +594,13 @@ def _furniture_background_guard(text: str, background_slots) -> str:
            for k in NON_OBJECT_SLOT_KEYWORDS):
         return ""
     listed = ", ".join(str(x) for x in slots)
-    return (FURNITURE_BACKGROUND_POSITIVE.format(slots=listed)
-            + " " + SCENERY_BACKGROUND_POSITIVE.format(slots=listed))
+    out = (FURNITURE_BACKGROUND_POSITIVE.format(slots=listed)
+           + " " + SCENERY_BACKGROUND_POSITIVE.format(slots=listed))
+    # 조명이 자동일 때만 참조 광원을 기준으로 삼는다. 사용자가 조명을 골랐으면
+    # (light_explicit) 그 설정이 1순위다 — 참조가 덮지 않는다.
+    if not light_explicit:
+        out += " " + BACKGROUND_LIGHT_RECONCILE_POSITIVE.format(slots=listed)
+    return out
 
 
 # 참조 사물 외형 고정 (2026-10-16 실측, 파란 동그라미): 의자 참조(image_2)의
@@ -2157,15 +2197,35 @@ GROUND_REF_NEGATIVE = (
 )
 
 
-def ground_reference_guard(text):
+def ground_reference_guard(text, background_slots=None):
     """배경-참조 지정이 있으면 (positive, negative), 아니면 ("", "").
 
-    text: 판정 소스(한글 가능). 배경 지정 문구가 있는지 cam_translate 의
-    background_ref_slot 로 본다 — 번역 보정(fix_background_clause)과 같은
-    감지 한 줄을 쓴다.
+    text: 판정 소스(한글 가능).
+    background_slots: 배경 충실 가드가 판정한 슬롯 집합(선택). 주어지면 그
+    최솟값을 쓰고, 비어 있으면 종전대로 cam_translate 의 background_ref_slot
+    로 문장형 배경 지정("배경은 이미지4번의 배경으로")을 본다 — 번역 보정
+    (fix_background_clause)과 같은 감지 한 줄을 쓴다.
+
+    왜(Why) background_slots 를 받나 (2026-10-28 사용자 실측): 배경 슬롯을
+    알아보는 판정이 두 벌이었다. 배경 충실 가드는 `_background_dna_slots`
+    (= `_background_role_slots`) 로 **슬롯 목록형**("4번: 배경")을 알아보는데,
+    이 지면 가드만 문장형 감지기로 발동해 목록형을 놓쳤다. 그래서 같은 실행
+    에서 "배경 참조 사물 충실 가드 활성(4번)" 은 켜지고 "배경 지면 고정 가드
+    활성" 은 **없었다** — 발밑 지면을 참조에 묶는 문구가 통째로 빠져 앞쪽
+    바닥만 밝은 사각 타일로 바뀌었다. 호출부가 배경 충실 가드와 **같은 슬롯
+    집합**을 넘기면 둘이 어긋날 수 없다.
+
+    우선순위 — background_slots 가 비어 있지 않으면 그 최솟값, 아니면
+    background_ref_slot(text). 한 인자로 부르는 기존 호출은 슬롯이 None 이라
+    종전과 같다(R137 핀).
     """
     try:
-        slot = background_ref_slot(text or "")
+        slots = []
+        try:
+            slots = sorted(int(x) for x in set(background_slots or []))
+        except (TypeError, ValueError):
+            slots = []
+        slot = slots[0] if slots else background_ref_slot(text or "")
         if not slot:
             return "", ""
         return GROUND_REF_POSITIVE.format(n=slot), GROUND_REF_NEGATIVE
