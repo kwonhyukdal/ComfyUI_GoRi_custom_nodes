@@ -501,8 +501,73 @@ _POSE_STATE_KO = ("앉", "서 있", "서있", "선 채", "눕", "누워", "엎�
                   "춤추")
 
 
+# 앉기 자세 보강 문장 (R257, 2026-10-30). 왜(Why) 필요한가: 약한 "앉아" 표현만
+# 으로는 서 있는 참조의 포즈 prior 를 못 이긴다(실측: 같은 시드·3MP 에서 4번 중
+# 3번 섰음). 한글 원문에 엉덩이·무릎·발의 역학까지 쓴 강한 문장은 **참조 사진을
+# 그대로 둔 채** 같은 조건에서 4번 모두 앉았다(코드 변경 0). 그래서 약한 입력에만
+# 그 역학을 장면 문장 위치에 대신 채워 준다.
+# 표면(의자·바닥)에 중립적인 말로 쓴다 — 좌석을 선언하지 않는 바닥 앉기도 덮고,
+# 문형이 의자 전용이 되어 바닥 앉기가 어긋나는 것을 막는다.
+# positive 전용: 이 워크플로는 cfg 1.0 이라 negative 가 무효다(같은 파일의
+# _POSE_DIVERGENCE 와 cam_guards R226·R255 관례).
+_SIT_POSTURE_EN = (
+    "Sitting posture: the person's hips are lowered and their weight settles "
+    "down onto the surface they sit on, the knees bent at a clear angle and "
+    "both feet resting on the ground — an unmistakably seated pose, clearly "
+    "sitting, not standing and not hovering above the surface."
+)
+
+# 앉기 지시 검출 표지 — 한글·영문을 함께 본다(번역 부재 환경 포함).
+# 한글 표지는 위 `_POSE_SIT_VERB`("앉")를 **그대로 쓴다** — 같은 사실을 두 곳에
+# 두면 한쪽만 늘어나 판정이 갈라진다(저장소 관례). "site"·"visit"·"situated"
+# 오탐은 영문 쪽 \b 로 막는다.
+_SIT_MARKERS_KO = _POSE_SIT_VERB
+_SIT_MARKERS_EN = (r"\bsitting\b", r"\bseated\b", r"\bsits?\b",
+                   r"\bsat\b", r"\bsit\s+down\b")
+
+# 사용자가 이미 구체 자세를 쓴 표지 (강한 표현 → 보강 생략).
+# 왜(Why) 생략하나: 강한 문장은 이미 4/4 로 검증된 입력이다. 여기에 자동 문장을
+# 겹치면 검증되지 않은 조합이 되어 괜한 변동만 만든다.
+_EXPLICIT_POSTURE_KO = ("무릎", "엉덩이", "골반", "허벅지")
+_EXPLICIT_POSTURE_EN = (r"\bknees?\b", r"\bhips?\b", r"\bpelvis\b", r"\bthighs?\b")
+
+
+def _sit_requested(ko_text, en_low) -> bool:
+    """앉기 지시가 있는가 (약한 "앉아" 포함). en_low 는 소문자 영문 장면.
+
+    실패해도 False (절대 크래시 금지 — 보강은 있으면 좋은 것이지 필수가 아니다).
+    """
+    try:
+        if ko_text and any(m in ko_text for m in _SIT_MARKERS_KO):
+            return True
+        e = en_low or ""
+        return any(re.search(p, e) for p in _SIT_MARKERS_EN)
+    except Exception:
+        return False
+
+
+def _explicit_posture_present(ko_text, en_low) -> bool:
+    """사용자가 이미 구체 자세(무릎·엉덩이 등)를 썼는가 — 보강 생략 판정.
+
+    실패해도 False (보강을 한다). 판정이 안 되면 도움이 되는 쪽으로 기운다.
+    """
+    try:
+        if ko_text and any(w in ko_text for w in _EXPLICIT_POSTURE_KO):
+            return True
+        e = en_low or ""
+        return any(re.search(p, e) for p in _EXPLICIT_POSTURE_EN)
+    except Exception:
+        return False
+
+
 def add_pose_divergence(en_text, image_count, ko_text=""):
-    """포즈 분기 문장 추가 (조건 불충족이면 입력 그대로)."""
+    """포즈 분기 문장 추가 (+ 앉기 자세 보강). 조건 불충족이면 입력 그대로.
+
+    한 함수가 둘을 함께 하는 이유(R257, 2026-10-30): 호출 지점이 둘(base run·
+    prompt_in run)이라, 앉기 보강을 **별도 함수로 두면 두 경로가 각자 판정**하게
+    되고 한쪽만 갱신되면 방어가 조용히 어긋난다(저장소가 R255 에서 겪은 실패
+    유형). 그러니 조립 지점 하나를 유지하고, 판정만 작은 헬퍼로 나눈다.
+    """
     try:
         if not en_text or not isinstance(en_text, str):
             return en_text
@@ -524,6 +589,17 @@ def add_pose_divergence(en_text, image_count, ko_text=""):
         out = en_text.rstrip()
         if not out.endswith("."):
             out += "."
+        # 앉기 자세 보강 (R257, 2026-10-30). 약한 "앉아" 표현은 서 있는 참조의
+        # 포즈 prior 를 못 이긴다 — 구체 역학(엉덩이·무릎·발)을 장면 문장 위치에
+        # 대신 채운다. 이미 구체 자세를 쓴 입력은 건드리지 않는다(검증된 강한
+        # 입력 보존). 멱등: 같은 문장이 있으면 다시 붙이지 않는다.
+        if (_sit_requested(ko_text, low)
+                and not _explicit_posture_present(ko_text, low)
+                and _SIT_POSTURE_EN not in out):
+            out = out + " " + _SIT_POSTURE_EN
+            _log("[Camera Director] 앉기 자세 보강 문장 추가 — 약한 '앉아' 표현을 "
+                 "구체 자세(엉덩이·무릎·발)로 보강합니다 (서 있는 참조의 "
+                 "포즈 우선 방어)")
         out = out + " " + _POSE_DIVERGENCE
         _log("[Camera Director] 포즈 분기 문장 추가 — 묘사 쪽으로 당깁니다 "
              "(PROVISIONAL: 샘플러 추종은 사용자 A/B 확인)")

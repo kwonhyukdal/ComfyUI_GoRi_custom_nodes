@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-gori-custom-nodes"
 description = "GoRi ComfyUI custom nodes — Camera Director (camera-aware prompts and conditioning for Qwen-Image 2.1)."
-version = "1.9.22"
+version = "1.9.23"
 license = {text = "MIT"}
 dependencies = []
 # 포즈 모델(pose_landmarker_lite.task)은 참조 자동 분류(사람 찾기)에 쓰는
