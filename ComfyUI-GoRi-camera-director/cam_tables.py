@@ -10,7 +10,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clauses", "split_multi", "has_any_label", "normalize_multi_value", "grade_clauses", "build_clauses", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning"
+"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clauses", "split_multi", "has_any_label", "normalize_multi_value", "grade_clauses", "build_clauses", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning", "_ANALYSIS_MAX_SIDE", "_analysis_downscale"
 ]
 
 
@@ -261,6 +261,42 @@ def preset_names() -> list:
 # auto tier — 한/영 병기 키워드 규칙 (최소 백업 사전)
 # ---------------------------------------------------------------------------
 
+_ANALYSIS_MAX_SIDE = 512
+
+
+def _analysis_downscale(px, target=_ANALYSIS_MAX_SIDE):
+    """지표 계산 전용 솎기 뷰. 긴 변 <= target 이면 입력 객체를 그대로 돌려준다.
+
+    왜(Why) 복사가 아니라 솎기인가 (2026-10-30 실측): 밝기·대비·채도·삼분할·
+    8x8 블록 평균은 전부 **통계값**이라 원본 해상도가 필요 없다. 그런데 예전엔
+    원본을 float32 로 통째 바꾼 뒤 그 위에서 통계를 돌렸다 — 6732x4437 참조
+    1장이 변환 한 번에 약 360MB, `image_metrics` 386ms 였다. 솎은 뒤에는
+    같은 사진이 3.6ms 다. 사용자 참조 4장에서 **지표 4개 값이 수정 전과
+    0.0000 차이**로 동일했다.
+
+    왜(Why) 긴 변 <= target 은 손대지 않나: 솎기가 항등이면 기존 테스트
+    픽스처(전부 소형)의 결과가 **비트 동일**해져 회귀 위험이 0 이 된다.
+
+    반환은 torch 텐서/numpy 배열의 **뷰**일 수 있다. 호출자는 **읽기 전용**으로
+    다룬다 (cam_sheet._np_as_rgb 의 같은 계약).
+    """
+    try:
+        if getattr(px, "ndim", 0) == 4:
+            px = px[0]
+        if getattr(px, "ndim", 0) < 3:
+            return px
+        h, w = int(px.shape[0]), int(px.shape[1])
+        if h < 1 or w < 1:
+            return px
+        # 올림 나눗셈 — 긴 변이 정확히 target 이하가 되게 한다.
+        step = max(1, -(-max(h, w) // int(target)))
+        if step <= 1:
+            return px
+        return px[::step, ::step]
+    except Exception:
+        return px
+
+
 def image_metrics(image) -> dict:
     """입력 IMAGE(ComfyUI 텐서/배열) → 4개 저비용 수치. 실패 시 {} (노드는 계속 동작).
 
@@ -279,6 +315,9 @@ def image_metrics(image) -> dict:
         px = (image[0] if isinstance(image, _t.Tensor) and image.ndim == 4
               else image)
         px = px.detach().cpu() if hasattr(px, "detach") else px
+        # 변환 전에 솎는다 (2026-10-30). 지표는 통계값이라 원본 해상도가
+        # 필요 없고, 원본을 통째 float32 로 바꾸면 360MB/386ms 였다.
+        px = _analysis_downscale(px)
         # 한 번만 float32 배열로 바꾼다. 예전엔 채널마다 asarray 를 따로
         # 불렀는데(3회) 같은 이미지를 세 번 변환했다. 4K 참조 이미지는
         # 채널마다 수 MB 라 세 번 변환한 비용이 그대로 컸다.
@@ -429,6 +468,8 @@ def _reference_lighting_flow(image):
             arr = arr[0]
         if hasattr(arr, "detach"):
             arr = arr.detach().cpu()
+        # 변환 전에 솎는다 (2026-10-30) — image_metrics 와 같은 이유.
+        arr = _analysis_downscale(arr)
         arr = arr.numpy() if hasattr(arr, "numpy") else _np.asarray(arr)
         arr = _np.asarray(arr, dtype=_np.float32)
         if arr.ndim != 3 or arr.shape[-1] < 3:

@@ -269,6 +269,52 @@ function restoreAll(node) {
   }
 }
 
+/* --- 아직 완성되지 않은 소켓을 화면에서만 감춘다 (2026-10-30) ---------------
+ *
+ * 왜(Why) 이 목록이 필요한가: pose_image(포즈 맵)는 로직과 실행 경로가 이미
+ * 있지만 결과 품질이 아직 쓸 만한 수준이 아니다. 사용자 요청으로 **화면에서만**
+ * 감추고, 쓸 만해지면 이 목록에서 이름을 빼서 다시 꺼낸다.
+ *
+ * 왜(Why) camera_director.py 를 안 고치나: INPUT_TYPES 에서 지우면 저장된
+ * 워크플로의 링크와 실행 경로가 함께 사라진다. 정의는 그대로 두고 인스턴스에서만
+ * 덜어낸다 — image_2~10 과 같은 방식이다.
+ *
+ * 왜(Why) removeInput 인가: 캔버스 렌더러가 소켓의 `hidden` 플래그를 읽지 않는다
+ * (이 파일 머리 주석과 같은 이유). hidden 은 위젯 전용이다.
+ *
+ * 안전성: pose_image 는 optional 소켓 중 **맨 뒤**라 제거해도 다른 소켓의
+ * target_slot 이 밀리지 않는다(R134 · R199-13 실측). 위젯은 소켓 뒤에 따로
+ * 놓이므로 저장된 위젯 값 순서도 변하지 않는다.
+ *
+ * 되살릴 때: HIDDEN_INPUT_NAMES 에서 이름만 빼면 다음 로드부터 소켓이 보인다.
+ * 제거한 스펙은 노드의 _goriHiddenInputs 에 남겨 둔다(나중에 복원할 근거). */
+const HIDDEN_INPUT_NAMES = ["pose_image"];
+
+/** HIDDEN_INPUT_NAMES 의 소켓을 인스턴스에서만 덜어낸다 (멱등).
+ *  소켓이 없거나 removeInput 이 없으면 조용히 지나간다 — 노드를 못 쓰게
+ *  되는 사태보다 "소켓이 하나 더 보이는" 쪽이 낫다. */
+function hideUnreadyInputs(node) {
+  const inputs = node?.inputs;
+  if (!Array.isArray(inputs)) return;
+  for (const name of HIDDEN_INPUT_NAMES) {
+    const idx = inputs.findIndex((inp) => inp && inp.name === name);
+    if (idx < 0) continue;
+    const spec = inputs[idx];
+    try {
+      node._goriHiddenInputs = node._goriHiddenInputs || {};
+      node._goriHiddenInputs[name] = {
+        type: spec.type,
+        label: spec.label,
+        localized_name: spec.localized_name,
+        tooltip: spec.tooltip,
+      };
+    } catch (_) {
+      /* 스펙 기억 실패는 조용히 무시 — 숨기는 일은 계속한다 */
+    }
+    if (typeof node.removeInput === "function") node.removeInput(idx);
+  }
+}
+
 /* --- 소켓 가시성 갱신 스케줄러 (디바운스) ---
  *
  * 왜(Why) 디바운스인가 (2026-10-02): 코어는 링크를 **하나씩** 연결/해제할 때마다
@@ -3396,6 +3442,14 @@ app.registerExtension({
      * DOM 위젯은 첫 드로잉 때 마운트되므로 여러 시점에 재시도한다. */
     const afterLifecycle = (node) => {
       try {
+        // 완성되지 않은 소켓은 화면에서 감춘다 (2026-10-30, 사용자 요청).
+        // onNodeCreated(새 노드)와 onConfigure(불러온 워크플로) 둘 다 이 지점을
+        // 지나므로 한 곳만 손대면 두 경로가 함께 처리된다.
+        hideUnreadyInputs(node);
+      } catch (_) {
+        /* 숨기기 실패는 조용히 무시 — 소켓이 보일 뿐 실행은 그대로 된다 */
+      }
+      try {
         if (!node._goriImageTemplate?.length) node._goriImageTemplate = template;
         updateVisibility(node);
       } catch (_) {
@@ -3659,6 +3713,7 @@ app.registerExtension({
 export {
   imageNumber, countImageSockets, lastLinkedImageNumber, lastImageSocketIndex,
   isDraggingLink, updateVisibility, restoreAll, topicElement, shrinkNewNode,
+  hideUnreadyInputs, HIDDEN_INPUT_NAMES,
   restoreSavedSize,
   applyFixedTextareaHeight, textareaFixedHeight, topicWidgetHeight,
   ensureFixedTextareaDrawHook, FIXED_TEXTAREA_LINES,

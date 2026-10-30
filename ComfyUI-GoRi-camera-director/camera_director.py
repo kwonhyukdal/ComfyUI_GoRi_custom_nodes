@@ -27,7 +27,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.90"
+__version__ = "1.9.91"
 
 
 import json
@@ -634,6 +634,16 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         "hand_placement": HAND_PLACEMENT_POSITIVE if hand_placement else "",
         "furniture": furniture_pos,
         "furniture_bg": furniture_bg_pos,
+        # 무대 채택 (2026-10-30) — 배경 슬롯이 있고 분위기 전용이 아닐 때만.
+        # run() 은 꼬리에, run_prompt() 는 **장면 문장 바로 뒤**에 붙인다 —
+        # 꼬리에서는 배경 충실 가드처럼 뒤 조항에 희석된다(R239 실측).
+        "scene_adopt": background_scene_adopt_guard(text, furniture_bg_slots),
+        # 배경 가구의 지지(받침) 조항 (2026-10-30 R254) — R252·R253 이 꼬리에
+        # 실었으나 같은 워크플로·시드 재생성에서도 상판 아래가 비었다. 문구는
+        # 그대로 두고 위치만 옮긴다(scene_adopt 와 **같은 규칙**): run_prompt 는
+        # 장면 문장 바로 뒤, base run 은 꼬리. 근거·게이트는 cam_guards 의
+        # background_support_scene_guard 참조.
+        "support_scene": background_support_scene_guard(text, furniture_bg_slots),
         # 좌석 접촉점 (2026-10-24, R226) — 좌석 슬롯이 있을 때만 나간다.
         # run() 은 body-object 경계 **뒤에** 이 조각을 붙인다(경계 → 접촉점).
         # run_prompt() 는 2026-10-25 R239 부터 **장면 문장 바로 뒤**에 붙인다 —
@@ -1124,9 +1134,34 @@ class CameraDirector:
         # 포즈 지정 슬롯은 topic 텍스트로 판정한다 (이미지가 없어도 참조 슬롯
         # 번호가 텍스트에 있으면 유효하므로).
         _pose_slots = _pose_role_slots(analysis)
-        if primary_image is not None:
+        # 자동 조명·그레이드 지표를 어느 참조에서 읽을지 (2026-10-30, ㉮ — R248 부원인).
+        # 왜(Why): 배경 참조를 선언해도 지표를 1번(주제 참조)에서 읽어, 사람 사진의
+        # 어두운 스튜디오 배경이 밝은 장면에 로우키를 불러 넣었다(실측: 사람
+        # dark=0.635 >= 0.62 -> 로우키, 배경 0.359). 장면의 톤은 장면 참조의
+        # 것이므로, 배경 슬롯이 선언돼 있으면 그 슬롯에서 읽는다. 2026-10-28
+        # 원칙("조명이 자동이면 참조 배경 광원이 기준")이 문구뿐 아니라 지표에도
+        # 적용된다. `primary_image`(1번)는 그대로 둔다 — 간격 측정과 image_out 이 쓴다.
+        # 판정 소스는 resolve_guard_plan 이 쓰는 것과 **같은 글**이다(_guard_src 에서
+        # LLM 확장 scene 만 뺀 형태). prompt_in 이 연결돼 topic 칸에만 슬롯 선언을
+        # 적은 사용자(흔한 경우)가 배경 슬롯을 잃지 않도록 topic 칸 원문도 함께 본다
+        # — 아니면 "배경 충실 가드는 켜지는데 지표만 1번에서 오는" 이음새 결함이 된다.
+        _metric_src = analysis or ""
+        if external and _topic_field:
+            _metric_src = _metric_src + " " + _topic_field
+        _metric_img = primary_image
+        _metric_slot = scene_metric_slot(_metric_src, image_labels, image_count)
+        if _metric_slot is not None and reference_items:
+            for _mlabel, _mimg in reference_items:
+                if int(str(_mlabel)) == int(_metric_slot):
+                    _metric_img = _mimg
+                    break
+        if _metric_img is not primary_image:
+            _log("[Camera Director] 자동 조명·그레이드 지표는 배경 참조 "
+                 + str(_metric_slot) + "번에서 읽습니다 (주제 참조의 어두운 "
+                 "배경이 장면 톤을 덮지 않도록)")
+        if _metric_img is not None:
             try:
-                metrics = image_metrics(primary_image)
+                metrics = image_metrics(_metric_img)
             except Exception:
                 metrics = {}
             img_sig = hash(str(sorted((metrics or {}).items())))
@@ -1873,12 +1908,42 @@ class CameraDirector:
             _log("[Camera Director] 가구·사물 DNA 가드 활성 ("
                  + "/".join(str(x) for x in sorted(_plan["furniture_slots"]))
                  + "번 — 형태·재질·색·비율 원본 유지)")
+        # 무대 채택 (2026-10-30) — 배경 슬롯이 있으면 "이 샷의 장소는 참조 N" 을
+        # 말한다. base run() 은 R226 좌석 조항과 같은 자리(꼬리)에 둔다. 실패
+        # 경로인 run_prompt 는 이 조항을 **장면 문장 바로 뒤**로 옮긴다(아래).
+        _adopt_text = _gpos.get("scene_adopt", "")
+        if _adopt_text:
+            positive = positive.rstrip(". ") + ". " + _adopt_text + "."
+            _log("[Camera Director] 무대 채택 가드 활성 (배경 "
+                 + "/".join(str(x) for x in
+                            sorted(_plan["furniture_bg_slots"]))
+                 + "번의 장소를 무대로, 주제 참조의 배경은 쓰지 않음)")
+            # 장소 설명이 없으면 알린다 (2026-10-30 ㉡, 로그 전용). 판정 입력은
+            # 사용자가 적은 글(_declared_topic)이다 — 우리가 채운 글을 보면
+            # 경고의 목적("무엇을 더 적으면 되는가")이 사라진다. 문구는 건드리지
+            # 않는다(근거 없는 자동 문장 생성 금지 — R191 과 같은 판단).
+            if not place_description_present(_declared_topic):
+                _log("[Camera Director] ⚠ 배경 참조 "
+                     + "/".join(str(x) for x in
+                                sorted(_plan["furniture_bg_slots"]))
+                     + "번을 지정하셨는데 장면 글에 장소 설명이 없습니다 — 참조 "
+                     + "/".join(str(x) for x in
+                                sorted(_plan["furniture_bg_slots"]))
+                     + "번의 장소를 무대로 채택하도록 지시했습니다. 더 정확한 "
+                     "결과를 원하시면 topic 에 장소를 함께 적어 주세요 (예: "
+                     "\"배경은 바다가 보이는 지중해 골목, 돌담과 돌바닥\")")
         # 배경 참조의 사물 충실 (2026-10-22 실측) — 위 사물 DNA 와 달리 **존재를
         # 요구하지 않는** 조건문이다. 있으면 참조 그대로, 없으면 만들지 말 것.
         # 왜 배경에만 붙는지는 cam_guards 의 FURNITURE_BACKGROUND_POSITIVE 참조.
         _fbg_text = _gpos.get("furniture_bg", "")
         if _fbg_text:
             positive = positive.rstrip(". ") + ". " + _fbg_text + "."
+            # 지지 조항은 따로 실린다 (2026-10-30 R254). base run 은 R248(무대
+            # 채택)과 **같은 규칙**으로 꼬리에 둔다 — 실패 경로인 run_prompt 가
+            # 이 조항을 장면 문장 바로 뒤로 옮긴다(아래 run_prompt 분기).
+            _sup_tail = _gpos.get("support_scene", "")
+            if _sup_tail:
+                positive = positive.rstrip(". ") + ". " + _sup_tail + "."
             _log("[Camera Director] 배경 참조 사물 충실 가드 활성 ("
                  + "/".join(str(x) for x in
                             sorted(_plan["furniture_bg_slots"]))
@@ -2772,6 +2837,28 @@ class CameraDirectorEncode(CameraDirector):
                               + ". " + _item_pos_pi)
                 _log("[Camera Director] 의류 색상 고정 가드 활성 (positive "
                      "고정 + negative 오색)")
+            # 무대 채택 조항을 장면 문장 **뒤**에 둔다 (2026-10-30, R248).
+            # 왜(Why) 위치가 여기인가: 같은 문구를 꼬리에 두면 뒤 조항 15개에
+            # 희석된다(R239 실측). 배경 참조(2번)를 지정했는데 장면 글에 장소
+            # 설명이 없으면 모델이 주제 참조(1번)의 평범한 배경을 그대로
+            # 유지했다(사용자 실측 07:44 실패 → 08:00 장소 한 줄 추가 후 성공).
+            # 좌석 조항(R239)보다 **앞**에 둔다 — 무대는 장면 문장에 가장 가까운
+            # 자리여야 하고, 좌석 조항의 위치도 그대로 지킨다.
+            if _gpos_pi.get("scene_adopt"):
+                _user_text = (_user_text.rstrip().rstrip(".")
+                              + ". " + _gpos_pi["scene_adopt"])
+            # 배경 가구의 지지 조항도 장면 문장 **뒤**에 둔다 (2026-10-30 R254).
+            # R252·R253 이 꼬리에 실었으나 같은 워크플로·시드 재생성에서도 상판
+            # 아래가 비었다(로그로 새 코드가 돌은 것을 먼저 확인했다 — 원인은
+            # 문구가 아니라 위치다). 위 무대 채택·아래 좌석 접촉점과 **같은
+            # 근거**다: 꼬리에서는 뒤 조항 15개에 희석된다(R239 실측).
+            if _gpos_pi.get("support_scene"):
+                _user_text = (_user_text.rstrip().rstrip(".")
+                              + ". " + _gpos_pi["support_scene"])
+                _log("[Camera Director] 배경 가구 지지 조항을 장면 문장 뒤로 "
+                     "옮김 (" + "/".join(str(x) for x in
+                                        sorted(_plan_pi["furniture_bg_slots"]))
+                     + "번 — 꼬리 조항 15개에 희석되지 않도록)")
             # 좌석 접촉점을 장면 문장 **뒤**로 옮긴다 (2026-10-25, R239).
             # 왜(Why) — 실측 A/B (같은 실행 그래프, seed 42, tier=규칙, 참조 4장).
             # 네 실행 모두 좌석·가구 가드가 동일하게 발동했는데 의자(2번 참조)

@@ -36,6 +36,10 @@ Menu         HF Skills / Camera
 Picking a preset fills all ten camera fields for you. If you have reference
 photos, connect them from `image_1` upward. The sections below explain each step.
 
+> New here? See the bundled **[setting guide](SETTING_GUIDE.md)** (Korean) too —
+> one page of recommended values, a symptom-by-symptom tuning table, and common
+> mistakes.
+
 ---
 
 ## 1. Install
@@ -752,8 +756,12 @@ word like `multiple characters` always wins over that judgment.
 There is nothing to switch on. The node adds only what the situation needs.
 
 - **People**: finger and toe counts, limb separation, skin texture, face structure.
-- **Scenes without people**: for a landscape or an object (or an animal-only
-  scene), people-only phrases such as finger and skin wording are left out.
+- **Scenes without people**: when the subject is neither a person nor an animal
+  and no person is detected in the references, people-only phrases such as finger
+  and skin wording are left out — and so are the face-structure and
+  body-proportion keep phrases. If even one reference shows a person, the keep
+  phrases stay, so a landscape, product or car reference cannot spawn a person
+  who was never there (an animal scene likewise gets no people-only wording).
 - **Pose requests**: asking for a new pose makes the model redraw the face. A
   face-lock phrase goes into the negative so it does not become someone else.
 - **Facing the camera**: wording such as `facing forward` or `looking at the
@@ -768,7 +776,10 @@ There is nothing to switch on. The node adds only what the situation needs.
 - **Object and furniture references**: shape, material, color and proportions kept
   from the original, including "similar but different furniture" swaps.
 - **Contact and action wording**: `pushed against`, `holding`, `throwing`,
-  `running` are translated into contact, weight and mid-action instructions.
+  `running` are translated into contact, weight and mid-action instructions. On an
+  animal subject, however, human joint and gait wording is not added (a `running
+  horse` does not get human-leg phrasing). Scenes that include a person are
+  unchanged.
 - **Removal scenes**: no half-removed pieces or floating fragments left behind.
 - **Coverage and nudity**: applied only when you ask. Writing `cover it up` adds a
   coverage phrase to the positive, while `show it` suppresses it. If you say

@@ -186,6 +186,15 @@ def physics_contact_guard(topic: str) -> tuple:
         t = (topic or "").lower()
         if not t:
             return "", ""
+        # 동물 주제에는 사람 관절·보행 문장을 붙이지 않는다 (2026-10-30 감사 F2).
+        # 아래 규칙 문장은 전부 사람 해부를 전제한다("legs split mid-stride,
+        # arms driving"). 같은 파일 physics_grounding_guard 는 _is_human_subject
+        # 로 막는데 이 접촉·동작 경로는 안 막아, "달리는 말" 에 사람 다리 문장이
+        # 붙었다(실측: "a horse running along the beach" -> human-motion text).
+        # 사람이 함께 명시되면 _is_animal_subject 가 False 이므로(사람 우선)
+        # 사람 장면은 그대로 둔다.
+        if _is_animal_subject(t):
+            return "", ""
         for keywords, pos, neg in PHYSICS_CONTACT_RULES:
             if _kw_hit(t, keywords):
                 # 시간·속도 축: 빠른 동작일 때만 중간 프레임을 명시한다.

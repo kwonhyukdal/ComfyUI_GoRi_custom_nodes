@@ -44,7 +44,7 @@ __all__ = [
     "_is_nudity_request", "nudity_anatomy_guard", "coverage_guard",
     "EXPLICIT_COVER_KEYWORDS", "EXPLICIT_REVEAL_KEYWORDS",
     "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "FINGER_SEPARATION_POSITIVE", "SCENE_FINGER_CUE", "scene_finger_cue", "HAND_INTEGRITY_POSITIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_background_dna_slots", "_furniture_background_guard", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_POSITIVE_SLOT", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "FOOTWEAR_BARE_POSITIVE", "FOOTWEAR_BARE_NEGATIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
-    "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "SCENERY_BACKGROUND_POSITIVE", "BACKGROUND_LIGHT_RECONCILE_POSITIVE", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
+    "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "FURNITURE_SUPPORT_POSITIVE", "FURNITURE_BACKGROUND_NEGATIVE", "SCENERY_BACKGROUND_POSITIVE", "BACKGROUND_LIGHT_RECONCILE_POSITIVE", "BACKGROUND_SCENE_ADOPT_POSITIVE", "_is_mood_only_background", "background_scene_adopt_guard", "background_support_scene_guard", "PLACE_DESCRIPTION_WORDS", "_ascii_word_in", "place_description_present", "scene_metric_slot", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
     "SEAT_OCCUPANCY_POSITIVE", "SEAT_OCCUPANCY_NEGATIVE", "SEAT_ORIENTATION_POSITIVE", "FURNITURE_PLACEMENT_LOCK_NON_SEAT",
     "GROUND_REF_NEGATIVE", "ground_reference_guard",
     "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio",
@@ -409,6 +409,61 @@ FURNITURE_BACKGROUND_POSITIVE = (
 )
 
 
+# 배경 가구의 **지지(받침) 구조** (2026-10-30 사용자 실측). 왜(Why) 위 문구와
+# 나눠 쓰나: 위 FURNITURE_BACKGROUND_POSITIVE 는 접지를 "참조에서와 같은 방식"
+# (reference-relative)으로만 말한다. 사용자 생성물에서 책상이 배경 슬롯(2번)이라
+# 이 문구만 나갔고, 참조의 다리는 오른쪽에 있는데 구도에서 그 자리에 인물이 앉아
+# 가려졌다 — 왼쪽 다리의 기준이 사라져 상판이 바닥 위에 떠 보였다.
+# 그 문구는 "보이면 참조대로" 라는 조건문이라, 상판을 그리되 그 아래 받침을
+# **바닥까지 완성해서 연결하라**는 요구가 없었다(재현: _workspace/probe_desk.py).
+#
+# R158 규칙은 유지한다 — 조건문("if ... appears")으로 쓰고 "none is added" 로
+# 존재 요구를 명시적으로 부정한다. 없는 가구를 만들라고 요구하지 않는다.
+# R190 과 같은 이유로 문구를 나눈다 — R189 핀이 흔들리지 않고 한쪽만 조정된다.
+#
+# R253 (2026-10-30, 두 번째 수정): 이 조항이 있어도 다리가 안 보였다. 사용자가
+# v1.9.90 로 다시 생성했는데도 상판 아래가 비어 보였고, ComfyUI 로그로 새 코드가
+# 실제로 쓰인 것을 확인했다(코드 문제가 아니다). 원인은 조항이 "받침이 상판
+# 아래에서 바닥까지 이어진다"고만 말하고 **화면에 보여야 한다**는 요구가 없는
+# 것이다 — 그 구간이 사람 다리·러그로 채워지면 "비어 있지 않다"로 통과한다.
+# 그래서 "열린 바닥에서 보이는 다리"를 따로 요구한다. 이 워크플로는 cfg 1.0
+# (Qwen-Image 2.1 turbo)이라 negative 는 무시되므로 lever 는 이 positive 뿐이다.
+#
+# R254 (2026-10-30, 세 번째 수정 — 위치): R253 을 넣고도 다리가 안 보였다
+# (같은 워크플로·시드 재생성, 새 코드가 돌은 것을 로그로 먼저 확인). 문구는
+# 그대로 두고 **위치만 옮긴다** — 꼬리(배경 가드 안)에서 **장면 문장 뒤**로.
+# 근거는 R239(좌석 접촉점)·R248(무대 채택)과 같다: 꼬리에서는 뒤 조항 15개에
+# 희석된다. 호출은 `background_support_scene_guard` 가 한다.
+FURNITURE_SUPPORT_POSITIVE = (
+    "support structure lock: if furniture from reference image {slots} appears "
+    "in the frame standing on the floor, it keeps its complete load-bearing "
+    "structure — its legs, pedestal or frame run as one connected piece from "
+    "under the top all the way down to the floor and visibly hold that top up. "
+    "At least one of its legs or supports is fully visible in the open floor "
+    "area beneath the top: it stands there in plain sight, not cropped by the "
+    "edge of the picture and not hidden behind the seated person, the chair or "
+    "any other object, so the viewer can see what holds the top up. "
+    "The space directly beneath a visible tabletop, desk top or counter top is "
+    "never left empty, and such a top is never left hovering with its supports "
+    "missing, cut short of the floor or detached from it. If no such furniture "
+    "is present in the reference, none is added."
+)
+
+# 위 지지 조항의 짝 negative. emit 지점은 _assemble_negative 의
+# `if flags.get("furniture_bg")` 블록이다(OBJECT_DRIFT_NEGATIVE 와 함께).
+# 실 실행 워크플로는 cfg 1.0 이라 negative 가 약하지만, 저장소 관례대로 다른
+# cfg 워크플로를 위해 positive/negative 짝을 만든다.
+FURNITURE_BACKGROUND_NEGATIVE = (
+    "unsupported tabletop, tabletop with no visible legs, table top hovering "
+    "with nothing underneath, missing table leg, missing desk leg, table leg "
+    "that stops short of the floor, table leg fading out into the floor, leg "
+    "disconnected from the tabletop, tabletop and base detached from each "
+    "other, furniture resting on invisible legs, empty unsupported space under "
+    "a table, table with no leg in sight, table leg completely hidden behind "
+    "the person, table leg cropped out of the picture"
+)
+
+
 # R190 (2026-10-22): 배경으로 지정한 참조의 **방(바닥·러그·벽)** 이 가드 밖이었다.
 #
 # 왜(Why): 사용자가 시드 7 생성물을 탈락시켰다 — "바닥 타일이 바뀌었다".
@@ -463,6 +518,90 @@ BACKGROUND_LIGHT_RECONCILE_POSITIVE = (
     "The described mood may still shift the subject's own light without "
     "replacing the reference background light."
 )
+
+
+# 무대 채택 (2026-10-30 사용자 실측). 왜(Why) 이 조항이 필요한가: 사용자가 배경
+# 참조(2번)를 지정했는데 **장면 글에 장소 설명이 없으면** 결과가 그 장소가 아니라
+# 주제 참조(1번)의 평범한 배경(회색 스튜디오)을 그대로 유지했다. 배경 충실·표면·
+# 광원 가드(위 세 문구)는 모두 "보이는 사물·표면·광원을 지켜라" 를 말할 뿐
+# **무대가 어디인가**는 말하지 않는다. 사용자가 장소를 한 줄 더 적으면(장면
+# 51자 → 157자, 나머지 동일) 같은 실행이 성공했다 — 즉 문구가 아니라 "무대가
+# 어디인가" 를 말하는 문장의 부재가 원인이다.
+# 위치: 위 문구들처럼 꼬리에 두면 뒤 조항 15개에 희석된다(R239 실측). 그래서
+# `background_scene_adopt_guard` 는 run_prompt 가 **장면 문장 바로 뒤**에 둔다.
+BACKGROUND_SCENE_ADOPT_POSITIVE = (
+    "scene adoption guard: the location of this shot is the place shown in "
+    "reference image {slots}, and the whole frame stands in that place. The "
+    "background behind the other reference images is not the scene — a plain "
+    "studio or plain wall backdrop there does not carry over, and the "
+    "background of the result is the place of reference image {slots}."
+)
+
+
+# 장소·배경 설명 어휘 (2026-10-30). ㉡ 경고의 판정에만 쓴다 — 문구 생성에는
+# 쓰지 않는다. 왜(Why) 목록을 짧고 분명한 낱말로 제한하나: 이 판정은 "장소
+# 설명이 없다" 를 알리는 **로그**라 오탐이 쌓이면 사용자가 경고를 무시하게 된다.
+# 그래서 몸·사물·동작·역할 낱말과 겹치는 것은 넣지 않는다:
+#   다리(leg/distance) · 방(방법) · 문(문장) · 길(길이) · 산(산들) · 집(집중) ·
+#   시장(mayor) · 사원(employee) · 배경/장소/setting/background(역할 선언에 늘 나옴)
+# 놓치는 쪽(recall)을 감수하고 틀린 경고(FP)를 줄이는 쪽을 택한다.
+PLACE_DESCRIPTION_WORDS = (
+    # 한국어 — 실내 공간
+    "실내", "실외", "골목", "골목길", "뒷골목", "광장", "마당", "테라스",
+    "발코니", "옥상", "부엌", "주방", "침실", "거실", "서재", "복도", "계단",
+    "카페", "식당", "상점", "가게", "도서관", "박물관", "사무실", "교실",
+    "병원", "성당", "교회", "궁궐", "화장실", "창고", "무대", "부두",
+    # 한국어 — 야외·지형
+    "바다", "해변", "해안", "해수욕장", "강가", "호수", "계곡", "사막",
+    "들판", "초원", "숲", "정글", "항구", "마을", "시골", "도심", "풍경",
+    "자연", "공원", "운동장", "경기장", "수영장", "바닷가", "해수면",
+    # 영문
+    "alley", "street", "plaza", "garden", "yard", "terrace", "balcony",
+    "rooftop", "kitchen", "bedroom", "living room", "hallway", "corridor",
+    "staircase", "stairs", "cafe", "restaurant", "market", "shop", "store",
+    "library", "museum", "office", "classroom", "church", "temple",
+    "beach", "shore", "coast", "lake", "valley", "desert", "meadow",
+    "forest", "jungle", "harbor", "harbour", "village", "countryside",
+    "city", "downtown", "seaside", "scenery", "landscape", "interior",
+    "exterior", "indoors", "outdoors", "park", "courtyard", "ruins",
+)
+
+
+def _ascii_word_in(t: str, w: str) -> bool:
+    """영문 낱말 w 가 t 안에 **단어 경계**로 있는가 (t 는 소문자 가정).
+
+    왜(Why) re 를 안 쓰나: 이 모듈은 re 를 함수 안에서만 지연 import 한다
+    (위 gaze 판정 참조). 여기서도 같은 방식을 유지하려고 경계를 직접 본다 —
+    "park" 이 "parking" 에, "shop" 이 "shopping" 에 걸리는 것을 막는다.
+    """
+    start = 0
+    n = len(w)
+    while True:
+        i = t.find(w, start)
+        if i < 0:
+            return False
+        before = t[i - 1] if i > 0 else ""
+        after = t[i + n] if i + n < len(t) else ""
+        if not ("a" <= before <= "z") and not ("a" <= after <= "z"):
+            return True
+        start = i + 1
+
+
+def place_description_present(text: str) -> bool:
+    """장면 글에 장소 설명이 있는가 (㉡ 경고 판정 전용, 2026-10-30).
+
+    한글은 부분 일치, 영문은 **단어 경계**로 본다 — "park" 이 "parking" 에,
+    "shop" 이 "shopping" 에 걸리는 것을 막는다. 놓치는 쪽을 감수하고 오탐을
+    줄이는 판정이다(위 목록 주석 참조).
+    """
+    t = (text or "").lower()
+    for w in PLACE_DESCRIPTION_WORDS:
+        if _ascii_only(w):
+            if _ascii_word_in(t, w):
+                return True
+        elif w in t:
+            return True
+    return False
 
 
 def _furniture_dna_guard(text: str, object_slots, seat_slots=None) -> str:
@@ -558,10 +697,25 @@ def _furniture_dna_guard(text: str, object_slots, seat_slots=None) -> str:
     return " ".join(parts)
 
 
+def _is_mood_only_background(text: str) -> bool:
+    """배경 슬롯 지정이 분위기·스타일 전용인가 (사물·장소가 아님).
+
+    왜(Why) 헬퍼로 뽑나 (2026-10-30): `_furniture_background_guard` 와
+    `background_scene_adopt_guard` 가 **같은 게이트**를 써야 한다 — 두 벌로
+    적으면 한쪽만 갱신돼 "배경 충실 가드는 꺼졌는데 무대 채택은 켜지는" 어긋남이
+    생긴다(이 저장소가 여러 번 겪은 이음새 결함).
+    """
+    t = (text or "").lower()
+    return any((_ko_word_present(t, k) if not _ascii_only(k) else k in t)
+               for k in NON_OBJECT_SLOT_KEYWORDS)
+
+
 def _furniture_background_guard(text: str, background_slots,
                                 light_explicit: bool = False) -> str:
     """배경 슬롯 전용 **조건부** 충실 문구. 대상이 없으면 "".
     두 문구를 이어 붙인다 — 가구·사물(R189) + 표면(R190, 2026-10-22).
+    (지지 구조 조항(R252)은 2026-10-30 R254 에서 **장면 문장 뒤**로 옮겼다 —
+    `background_support_scene_guard` 참조. 꼬리에서는 뒤 조항 15개에 희석된다.)
 
     _furniture_dna_guard 와 문구를 나눠 쓰는 이유: 그쪽은 "그 사물이 화면에
     있다" 를 전제하는 접촉·방향·개수 문구를 포함하고, 2026-10-19 사용자 제보
@@ -589,9 +743,7 @@ def _furniture_background_guard(text: str, background_slots,
         return ""
     # 분위기 전용 지정이면 형상을 요구하지 않는다 — _furniture_dna_guard 의
     # 완화와 **같은 판정**을 쓴다(두 곳이 갈라지면 한쪽만 발동한다).
-    t = (text or "").lower()
-    if any((_ko_word_present(t, k) if not _ascii_only(k) else k in t)
-           for k in NON_OBJECT_SLOT_KEYWORDS):
+    if _is_mood_only_background(text):
         return ""
     listed = ", ".join(str(x) for x in slots)
     out = (FURNITURE_BACKGROUND_POSITIVE.format(slots=listed)
@@ -601,6 +753,65 @@ def _furniture_background_guard(text: str, background_slots,
     if not light_explicit:
         out += " " + BACKGROUND_LIGHT_RECONCILE_POSITIVE.format(slots=listed)
     return out
+
+
+def background_scene_adopt_guard(text: str, background_slots) -> str:
+    """배경 참조의 **장소**를 무대로 채택하는 조항. 대상이 없으면 "".
+
+    왜(Why) 별도 문구인가 (2026-10-30 사용자 실측): 배경 참조(2번)를 지정했는데
+    장면 글에 장소 설명이 없으면 결과가 그 장소가 아니라 **주제 참조(1번)의
+    평범한 배경**(회색 스튜디오)을 그대로 유지했다. 기존 배경 가드 셋
+    (`_furniture_background_guard` 가 내는 문구들)은 모두 "보이는 사물·표면·광원을
+    지켜라" 를 말할 뿐 **무대가 어디인가**는 말하지 않는다. 사용자가 장소를 한 줄
+    더 적으면(장면 51자 → 157자, 나머지 동일) 같은 실행이 성공했다 — 즉 원인은
+    문구가 아니라 그 문장의 부재다.
+
+    위치: 꼬리에 두면 뒤 조항 15개에 희석된다(R239 실측). 그래서 run_prompt 가
+    이 조항을 **장면 문장 바로 뒤**에 둔다(`_user_text`).
+
+    판정: `_furniture_background_guard` 와 **같은 게이트**(배경 슬롯 + 분위기 전용
+    제외)를 쓴다 — 두 벌이면 한쪽만 갱신돼 어긋난다(이 저장소의 이음새 결함).
+    """
+    try:
+        slots = sorted(int(x) for x in set(background_slots or []))
+    except (TypeError, ValueError):
+        return ""
+    if not slots:
+        return ""
+    if _is_mood_only_background(text):
+        return ""
+    return BACKGROUND_SCENE_ADOPT_POSITIVE.format(
+        slots=", ".join(str(x) for x in slots))
+
+
+def background_support_scene_guard(text: str, background_slots) -> str:
+    """배경 가구의 **지지(받침)** 조항 — 장면 문장 뒤에 두는 몫. 없으면 "".
+
+    왜(Why) `_furniture_background_guard` 에서 떼어내나 (2026-10-30 R254 실측):
+    R252·R253 이 그 조항을 꼬리에 실었는데, 사용자가 같은 워크플로·시드(42)로
+    두 번 재생성해도 상판 아래가 비어 있었다. ComfyUI 로그로 새 코드가 돌은 것을
+    먼저 확인했으므로(12:38 v1.9.90 loaded → 12:39·12:40 생성) 원인은 코드가 아니라
+    **위치**다. 이 저장소는 같은 형태를 이미 두 번 실측했다 — 좌석 접촉점(R239)과
+    무대 채택(R248) 모두 **문구는 옳고 위치가 틀렸다**: 꼬리에서는 뒤 조항 15개에
+    희석되고 장면 문장 뒤에서는 살아났다(의자 소실 → 회복). 그래서 문구는 한 글자도
+    바꾸지 않고 **위치만** 옮긴다.
+
+    판정: `_furniture_background_guard`·`background_scene_adopt_guard` 와 **같은
+    게이트**(배경 슬롯 + 분위기 전용 제외)를 쓴다 — 두 벌이면 한쪽만 발동한다.
+
+    호출 지점: run_prompt 는 장면 문장 뒤(scene_adopt 다음)에 두고, base run 은
+    꼬리에 둔다 — R248 과 **같은 배치 규칙**이다(실패 경로가 run_prompt 이다).
+    """
+    try:
+        slots = sorted(int(x) for x in set(background_slots or []))
+    except (TypeError, ValueError):
+        return ""
+    if not slots:
+        return ""
+    if _is_mood_only_background(text):
+        return ""
+    return FURNITURE_SUPPORT_POSITIVE.format(
+        slots=", ".join(str(x) for x in slots))
 
 
 # 참조 사물 외형 고정 (2026-10-16 실측, 파란 동그라미): 의자 참조(image_2)의
@@ -823,6 +1034,38 @@ def _background_dna_slots(topic: str, image_labels, image_count: int) -> set:
         return {x for x in labels if x in bg and x not in excluded}
     except Exception:
         return set()
+
+
+def scene_metric_slot(text: str, image_labels, image_count: int):
+    """자동 조명·그레이드 지표를 어느 참조 이미지에서 읽을지 고른다 (2026-10-30, ㉮).
+
+    참조 슬롯 번호(int) 또는 None 을 돌려준다. None 이면 호출자가 종전대로
+    1번(주제 참조)에서 읽는다.
+
+    왜(Why) 필요한가 — R248 의 부원인 실측(2026-10-30): 배경 참조(2번)를
+    선언해도 자동 조명 지표는 `primary_image`(1번 = 사람)에서 나왔다. 사람
+    사진의 어두운 스튜디오 배경이 dark=0.635 (>= 0.62) 로 로우키를 불러 넣는
+    동안 정작 장면(2번)은 dark=0.359 로 밝았다. 2026-10-28 사용자 원칙
+    ("조명이 자동이면 참조 배경 광원이 기준")은 **문구**에만 적용돼 있었고,
+    그 문구가 붙은 판단(로우키)을 만드는 **지표 자체**는 여전히 사람 참조에서
+    나왔다 — 문구와 지표가 서로 다른 곳을 가리켰다.
+
+    판정은 `_background_dna_slots`(배경 슬롯 한 벌)에 맡기고, 분위기 전용
+    제외도 `_furniture_background_guard` 와 **같은 게이트**를 쓴다 — 두 벌이면
+    한쪽만 갱신돼 어긋난다(이 저장소가 여러 번 겪은 이음새 결함).
+
+    배경이 여럿이면 **가장 낮은 번호** 하나를 쓴다. 지금 실패 사례는 배경이
+    하나고, 평균은 "무대가 둘" 이라는 뜻이 되어 어느 쪽 톤도 아니게 된다.
+    """
+    try:
+        slots = _background_dna_slots(text or "", image_labels, image_count)
+        if not slots:
+            return None
+        if _is_mood_only_background(text):
+            return None
+        return min(int(x) for x in slots)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _remove_item_guard(text: str) -> str:
@@ -1641,6 +1884,8 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
         # OBJECT_INSTANCE_NEGATIVE 는 넣지 않는다 — 우리가 요구하지 않은
         # "단일 인스턴스" 의 짝이라 맞지 않는다.
         neg.append(OBJECT_DRIFT_NEGATIVE)
+        # 지지 구조 조항의 짝 (2026-10-30) — 받쳐지지 않은 상판·끊긴 다리.
+        neg.append(FURNITURE_BACKGROUND_NEGATIVE)
     if flags.get("remove_item"):
         # 빈 문자열을 세면 join 이 ", " 꼬리를 남긴다(2026-10-07 라운드 2 —
         # _remove_item_guard 는 비인물 topic 에 "" 를 돌려준다).

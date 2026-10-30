@@ -280,22 +280,31 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
     # 언급만 본다. 오탐보다 누락이 안전하다 (누락이면 기존 동작 그대로).
     if _is_empty_scene(topic or ""):
         return ""
-    # 사람도 동물도 아닌 주제(풍경·사물)이면서, 참조 어느 칸에도 사람이 없고
-    # 힌트가 사물/제품 슬롯을 하나라도 찾았으면 사람 신원 조항을 내지 않는다
-    # (2026-10-25 감사). 왜(Why) 위의 유령 인물 실측과 같은 이유다: 사람이
-    # 없는 참조에 "same facial structure, same hairstyle, same exact outfit" 을
-    # 내보내면 모델이 그 사물에서 사람을 만들어낸다. 실측 재현 — 토픽
-    # "나무 의자 제품 샷" + 단색 배경 참조 1장에서, 사물 보존을 맡는 자동 역할
-    # 문장("is an isolated item") 과 사람 신원 조항이 한 프롬프트에 나란히 붙어
-    # 서로 모순됐다. **사람이 검출된 참조(_hint_person_slots 가 비어 있지 않음)
-    # 나 사람·동물 주제는 그대로 둔다** — R147·R172·R210 은 참조에 사람이 있고,
-    # R82 는 힌트가 없어(사물 판정이 아님) 종전 동작이 유지된다. 사물 보존
-    # 문장은 auto_reference_roles_positive 가 따로 담당하므로 여기서는 빈
-    # 문자열이 맞다.
-    if (not _is_human_subject(topic or "")
-            and not _is_animal_subject(topic or "")
+    # 사람도 동물도 아닌 주제(풍경·사물·제품)이면서 참조에 사람이 하나도 없으면
+    # 사람 신원 조항을 내지 않는다. 왜(Why) 위의 유령 인물 실측과 같은 이유다:
+    # 사람이 없는 참조에 "same facial structure, same hairstyle, same exact
+    # outfit" 을 내보내면 모델이 그 사물에서 사람을 만들어낸다. 실측 — 토픽
+    # "나무 의자 제품 샷" + 단색 배경 참조 1장에서 사물 보존 문장("is an
+    # isolated item") 과 사람 신원 조항이 한 프롬프트에 나란히 붙어 모순됐다.
+    #
+    # 참조 분류가 object/item 이든 **unknown 이든** 똑같이 적용한다 (2026-10-30
+    # 감사 F1). unknown 은 "사람이 있다" 가 아니라 "모른다" 이고, 기본 경로
+    # (automation=규칙 + vision 없음)의 참조 1장은 늘 unknown 또는 item 이다 —
+    # 종전 조건은 object/item 만 봐서 unknown 인 참조에서 사람 조항이 새어
+    # 나갔다 (실측: 노이즈 참조 1장 + "a red sports car parked on the street").
+    # 사람이 검출된 참조(_hint_person_slots 가 비어 있지 않음)나 사람·동물 주제는
+    # 그대로 둔다. 빈 topic 은 제외한다 — 설명이 없는 사람 사진일 수 있어 종전
+    # 동작(사람 조항 유지, R82)을 보존한다. 의상 교체를 요청하는 topic 도
+    # 제외한다 — 옷을 갈아입는 대상은 사람이므로 얼굴·체형 유지를 남겨야 한다
+    # (R82 "교체해도 얼굴 유지는 남김"). 그리고 분류가 **아예 돌지 않은** 직접
+    # 호출은 건드리지 않는다(`_hint_no_person_classified` 가 False).
+    _non_human_topic = (bool((topic or "").strip())
+                        and not _is_human_subject(topic or "")
+                        and not _is_animal_subject(topic or ""))
+    if (_non_human_topic
             and not _hint_person_slots()
-            and _hint_object_slots()):
+            and not _is_text_outfit_change(topic or "")
+            and _hint_no_person_classified()):
         return ""
     labels = [str(i) for i in (image_labels or list(range(1, image_count + 1)))]
     plan = _person_object_plan(topic, labels)

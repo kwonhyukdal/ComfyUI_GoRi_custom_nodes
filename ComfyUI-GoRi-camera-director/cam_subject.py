@@ -15,7 +15,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 __all__ = [
 "HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "HUMAN_PRONOUN_KEYWORDS", "_human_pronoun_present", "ANIMAL_SUBJECT_KEYWORDS", "_animal_keyword_present", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_declared_slots", "_CLOTHING_COLON_PATTERN", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_wants_barefoot", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
-"_hint_person_slots", "_hint_pose_slots", "_hint_object_slots", "_text_names_slots", "intent_core",
+"_hint_person_slots", "_hint_pose_slots", "_hint_object_slots", "_hint_no_person_classified", "_text_names_slots", "intent_core",
 "_normalize_slots",
 "footwear_noun_mismatch", "_KO_WEAR_ITEMS", "_KO_CLOTHING_ROLE_WORDS",
 "_KO_WEAR_BASIC_WORDS", "_KO_WEAR_ACCESSORIES", "_WEAR_NOUN_KO",
@@ -147,6 +147,26 @@ def _hint_object_slots() -> list:
     """
     kinds = getattr(_KIND_HINT, "kinds", None) or {}
     return sorted(int(k) for k, v in kinds.items() if v in ("object", "item"))
+
+
+def _hint_no_person_classified() -> bool:
+    """분류가 돌았고(kinds 가 있음) 사람 슬롯이 **하나도 없으면** True (2026-10-30).
+
+    왜(Why) object/item 만 보던 것을 넓히나 (F1): 참조 자동 분류는 사람도 사물도
+    못 찾으면 `unknown` 을 낸다. 그때 종전 판정(`_hint_object_slots`)은 빈 목록이라
+    "사람이 없다" 는 근거를 못 읽었고, 사람도 동물도 아닌 주제(풍경·차량·정물)에
+    사람 신원 조항("same facial structure ...")이 새어 나갔다 — 실측: 노이즈 참조
+    1장 + "a red sports car parked on the street" 에서 붙었다. unknown 은 "사람이
+    있다" 가 아니라 "모른다" 이므로 object/item 과 같은 근거로 본다.
+
+    **kinds 가 아예 없으면 False** 를 돌려준다. 분류가 돌지 않은 직접 호출(테스트·
+    텍스트 단독 경로)에서 사람 신원 조항을 함부로 빼지 않기 위해서다 — 의상 교체
+    주제처럼 사람이 있다는 신호가 따로 있는 경우도 있다(R82).
+    """
+    kinds = getattr(_KIND_HINT, "kinds", None) or {}
+    if not kinds:
+        return False
+    return not any(v == "person" for v in kinds.values())
 
 
 def _text_names_slots(text: str) -> bool:
