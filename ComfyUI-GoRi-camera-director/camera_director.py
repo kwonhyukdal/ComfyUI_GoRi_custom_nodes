@@ -27,7 +27,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.91"
+__version__ = "1.9.92"
 
 
 import json
@@ -649,6 +649,13 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         # run_prompt() 는 2026-10-25 R239 부터 **장면 문장 바로 뒤**에 붙인다 —
         # 꼬리에서는 뒤따르는 조항에 희석돼 의자가 소실됐다(실측 A/B).
         "seat": (SEAT_OCCUPANCY_POSITIVE if seat_slots else ""),
+        # 배경 사진 속 좌석에 앉음 (2026-10-30 R255) — `2번: 배경, 의자` 처럼 좌석이
+        # 배경 슬롯에 함께 선언되면 위 `seat` 가드는 꺼진다(좌석 슬롯이 비어서).
+        # 그 구멍을 메운다. run() 은 꼬리에, run_prompt() 는 **장면 문장 바로 뒤**에
+        # 붙인다(scene_adopt·support_scene·seat 와 같은 규칙). 회전을 지시하는
+        # SEAT_ORIENTATION_POSITIVE 는 쓰지 않는다 — 배경 사진 속 가구는 그대로.
+        # 근거·게이트는 cam_guards 의 background_seat_guard 참조.
+        "seat_bg": background_seat_guard(text, furniture_bg_slots, seat_slots),
         "character_sheet": sheet_text,
         "pose": pose_pos,
         "spacing": spacing_pos,
@@ -1944,6 +1951,14 @@ class CameraDirector:
             _sup_tail = _gpos.get("support_scene", "")
             if _sup_tail:
                 positive = positive.rstrip(". ") + ". " + _sup_tail + "."
+            # 배경 사진 속 좌석 점유 조항 (2026-10-30 R255) — 꼬리. base run 은
+            # R248(무대 채택)·R254(지지 조항)와 **같은 규칙**으로 꼬리에 둔다 —
+            # 실패 경로인 run_prompt 가 이 조항을 장면 문장 바로 뒤로 옮긴다.
+            _sb_tail = _gpos.get("seat_bg", "")
+            if _sb_tail:
+                positive = positive.rstrip(". ") + ". " + _sb_tail + "."
+                _log("[Camera Director] 배경 좌석 점유 가드 활성 (배경 사진 속 "
+                     "좌석에 앉음 — 체중·발·등받이 부착·가구 회전 없음)")
             _log("[Camera Director] 배경 참조 사물 충실 가드 활성 ("
                  + "/".join(str(x) for x in
                             sorted(_plan["furniture_bg_slots"]))
@@ -2018,7 +2033,7 @@ class CameraDirector:
         if _gpos["ground"]:
             positive = positive.rstrip(". ") + ". " + _gpos["ground"] + "."
             _log("[Camera Director] 배경 지면 고정 가드 활성 (참조 지면으로 "
-                 "통일 + 콘크리트/실내 매끈 바닥 방어)")
+                 "통일 + 콘크리트/실내 매끈 바닥 방어 + 바닥을 배경으로 세우지 않음)")
         # hint_defense/mix_guard/body_balance 는 _last_guard_plan 안에 있다.
         # 개별로 저장하면 plan 과 값이 어긋날 수 있고(그러면 짝인 negative 가
         # 사라진다), 읽는 곳도 plan 이므로 중복이다.
@@ -2880,6 +2895,15 @@ class CameraDirectorEncode(CameraDirector):
                                 sorted(_plan_pi["seat_slots"]))
                      + "번 — 장면 문장 뒤로 이동, 체중이 좌석 쿠션에, "
                      "팔걸이 걸터앉음 방어)")
+            # 배경 사진 속 좌석 점유 조항도 장면 문장 **뒤**에 둔다 (2026-10-30 R255).
+            # 좌석이 배경 슬롯에 함께 선언되면 위 좌석 접촉점 가드가 꺼진다 — 그
+            # 구멍을 여기서 메운다. 위 무대 채택·지지 조항과 같은 자리다.
+            if _gpos_pi.get("seat_bg"):
+                _user_text = (_user_text.rstrip().rstrip(".")
+                              + ". " + _gpos_pi["seat_bg"])
+                _log("[Camera Director] 배경 좌석 점유 조항을 장면 문장 뒤로 옮김 "
+                     "(배경 사진 속 좌석에 앉음 — 체중·발·등받이 부착·가구 "
+                     "회전 없음)")
             base_text = self._combine_prompt_text(base_text, _user_text)
             positive_text = self._combine_prompt_text(base_text, camera_text)
         else:
@@ -3122,7 +3146,7 @@ class CameraDirectorEncode(CameraDirector):
                 positive_text = self._combine_prompt_text(
                     positive_text, _gpos_pi["ground"])
                 _log("[Camera Director] 배경 지면 고정 가드 활성 (참조 지면으로 "
-                     "통일 + 콘크리트/실내 매끈 바닥 방어)")
+                     "통일 + 콘크리트/실내 매끈 바닥 방어 + 바닥을 배경으로 세우지 않음)")
             # 품질 가드도 prompt_in 경로에 병합한다 (base run의
             # assemble → add_quality_guard 에 해당. 왜(Why): 이 경로에만
             # 빠져 있어 prompt_in 실행에서 품질 지시가 없었다

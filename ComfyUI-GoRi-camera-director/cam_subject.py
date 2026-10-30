@@ -29,7 +29,7 @@ __all__ = [
 "_footwear_slots", "_KO_FOOTWEAR_WORDS", "_EN_FOOTWEAR_WORDS",
 "_FOOTWEAR_ROLE_PATTERNS",
 "_KO_SEAT_WORDS", "_EN_SEAT_WORDS", "SEAT_WORDS", "_SEAT_VERBS",
-"_SEAT_ROLE_PATTERNS", "_seat_slots",
+"_SEAT_ROLE_PATTERNS", "_seat_slots", "_background_seat_slots",
 ]
 
 
@@ -1789,6 +1789,49 @@ def _seat_slots(text: str) -> set:
     except Exception:
         # 배경 슬롯 판정 실패는 좌석 관계를 뒤집지 않는다 — 어휘 슬롯만 유지.
         return slots
+
+
+# 배경 슬롯에 **함께 선언된** 좌석 (2026-10-30, R255). 왜(Why) `_seat_slots` 로는
+# 못 잡나: 6번 콜론 패턴은 `N번:` **바로 뒤**에 좌석 어휘를 요구한다. 사용자가
+# `2번: 배경, 의자` 로 쓰면 그 자리에 "배경" 이 오고 쉼표 뒤에 "의자" 가 오므로
+# 매칭되지 않는다(_collect_role_slots == set()). 그래서 배경 사진 속 의자에 사람이
+# 앉는 장면(패턴 B)에서 좌석 접촉점·가구 DNA 가드가 통째로 꺼졌다(2026-10-30 실측:
+# 등받이 판자 분리·부유, 참조에 없는 짚 지붕 생성, 가구 정면 회전).
+# 판정: `N번:` 선언 한 줄에 배경 어휘와 좌석 어휘가 **함께** 있으면 그 슬롯이다.
+# 쉼표 목록(`배경, 의자`)까지 잡되, 좌석 어휘가 없는 배경 슬롯(`배경, 바다`)은 잡지
+# 않는다 — 잡으면 참조에 없는 의자를 만들어낸다(R158 이 배경 사물 가드를 끈 이유).
+# 착석 동사도 요구한다(`_seat_slots` 와 같은 규칙 — 명사만으로는 "빈 의자 옆에 선
+# 사람" 이다). `.lower()` 를 먼저 태우는 이유도 `_collect_role_slots` 와 같다:
+# 영문 `Background` 는 대문자라 소문자화 없이는 배경 어휘에 안 잡힌다(실측).
+_BG_SEAT_DECL_RE = re.compile(r"(\d{1,2})\s*(?:번|번째)\s*[:：]\s*([^\n]*)")
+
+
+def _background_seat_slots(text: str) -> set:
+    """좌석 어휘가 **배경 슬롯에 함께 선언된** 번호(예: `2번: 배경, 의자`). 없으면 set()."""
+    t = _normalize_slots((text or "").lower())
+    if not t:
+        return set()
+    try:
+        if not re.search(_SEAT_VERBS, t):
+            return set()
+        seat_re = _compile_re(SEAT_WORDS)
+        bg_re = _compile_re(_BACKGROUND_WORDS)
+        slots = set()
+        for m in _BG_SEAT_DECL_RE.finditer(t):
+            body = m.group(2) or ""
+            if not (seat_re.search(body) and bg_re.search(body)):
+                continue
+            try:
+                n = int(m.group(1))
+            except ValueError:
+                continue
+            if 1 <= n <= 10:
+                slots.add(n)
+        return slots
+    except (ValueError, re.error):
+        return set()
+    except Exception:
+        return set()
 
 
 def _topic_changes_shoes(text: str) -> bool:

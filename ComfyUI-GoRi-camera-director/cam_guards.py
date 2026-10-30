@@ -44,7 +44,7 @@ __all__ = [
     "_is_nudity_request", "nudity_anatomy_guard", "coverage_guard",
     "EXPLICIT_COVER_KEYWORDS", "EXPLICIT_REVEAL_KEYWORDS",
     "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "FINGER_SEPARATION_POSITIVE", "SCENE_FINGER_CUE", "scene_finger_cue", "HAND_INTEGRITY_POSITIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_background_dna_slots", "_furniture_background_guard", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_POSITIVE_SLOT", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "FOOTWEAR_BARE_POSITIVE", "FOOTWEAR_BARE_NEGATIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
-    "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "FURNITURE_SUPPORT_POSITIVE", "FURNITURE_BACKGROUND_NEGATIVE", "SCENERY_BACKGROUND_POSITIVE", "BACKGROUND_LIGHT_RECONCILE_POSITIVE", "BACKGROUND_SCENE_ADOPT_POSITIVE", "_is_mood_only_background", "background_scene_adopt_guard", "background_support_scene_guard", "PLACE_DESCRIPTION_WORDS", "_ascii_word_in", "place_description_present", "scene_metric_slot", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
+    "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "FURNITURE_SUPPORT_POSITIVE", "FURNITURE_BACKGROUND_NEGATIVE", "SCENERY_BACKGROUND_POSITIVE", "BACKGROUND_LIGHT_RECONCILE_POSITIVE", "BACKGROUND_SCENE_ADOPT_POSITIVE", "_is_mood_only_background", "background_scene_adopt_guard", "background_support_scene_guard", "BACKGROUND_SEAT_POSITIVE", "BACKGROUND_SEAT_NEGATIVE", "background_seat_guard", "PLACE_DESCRIPTION_WORDS", "_ascii_word_in", "place_description_present", "scene_metric_slot", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
     "SEAT_OCCUPANCY_POSITIVE", "SEAT_OCCUPANCY_NEGATIVE", "SEAT_ORIENTATION_POSITIVE", "FURNITURE_PLACEMENT_LOCK_NON_SEAT",
     "GROUND_REF_NEGATIVE", "ground_reference_guard",
     "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio",
@@ -538,6 +538,48 @@ BACKGROUND_SCENE_ADOPT_POSITIVE = (
 )
 
 
+# 배경 사진 속 좌석에 사람이 앉는 경우 (2026-10-30, R255). 왜(Why) 별도 문구인가:
+# 사용자가 `2번: 배경, 의자` 로 쓰면 좌석 어휘가 배경 슬롯에 함께 선언된다. 그때
+# `_seat_slots` 는 빈 집합이 되어 좌석 접촉점(seat)·가구 DNA(furniture) 가드가 통째로
+# 꺼진다(6번 콜론 패턴이 `N번:` 바로 뒤의 좌석 어휘를 요구하기 때문 — cam_subject 의
+# `_background_seat_slots` 주석과 실측 참조). 그래서 배경 사진 속 벤치에 사람을 앉히는
+# 장면이 무방비가 됐다: 참조에 없는 짚 지붕이 생기고, 등받이 판자가 상판과 분리돼
+# 부유하고, 가운데 지지가 사라지고, 가구가 정면으로 돌아갔다(2026-10-30 실측).
+#
+# SEAT_ORIENTATION_POSITIVE(회전 지시)를 **재사용하지 않는다**: 그 문구는 의자를 앉는
+# 사람 쪽으로 **돌리라고** 지시한다. 배경 사진 속 가구는 그 자리·각도 그대로여야 한다 —
+# 사용자 실패가 바로 "벤치가 카메라 정면으로 돌아간" 것이다. 그래서 점유(체중·발)와
+# 형태 유지(등받이 부착·없는 구조물 금지·회전 금지)만 새 문구로 세운다.
+BACKGROUND_SEAT_POSITIVE = (
+    "background seat lock: the seated person takes the seat that already "
+    "exists in reference image {slots} — the pelvis and thighs rest on that "
+    "seat surface and both feet reach the floor in front of it. That furniture "
+    "keeps the exact construction it has in reference image {slots}: its "
+    "backrest stays joined to the seat and to its frame, its seat stays "
+    "supported by the same legs and supports shown there with nothing left "
+    "empty under it, and its material, colour and surface finish stay the "
+    "same. No roof, canopy, pergola, beam, post or other structure is added "
+    "above, behind or beside it that is not present in reference image "
+    "{slots}. The furniture is not turned, rotated or swung to face the "
+    "camera: it keeps the same position and the same angle it has in "
+    "reference image {slots}."
+)
+
+
+# 위 배경 좌석 조항의 짝 negative. emit 지점은 _assemble_negative 의
+# `if flags.get("furniture_bg")` 블록이다(지지 조항의 짝과 같은 자리).
+# 실 실행 워크플로는 cfg 1.0 이라 negative 가 약하지만, 저장소 관례대로 다른
+# cfg 워크플로를 위해 positive/negative 짝을 만든다.
+BACKGROUND_SEAT_NEGATIVE = (
+    "seat rotated to face the camera, furniture turned around to the front, "
+    "bench swung toward the viewer, invented structure above the furniture, "
+    "added roof, added pergola, added canopy, beam added over the furniture, "
+    "floating backrest, backrest detached from the seat, backrest separated "
+    "from the frame, missing middle support under the seat, empty space under "
+    "the seat, bench hovering above the ground"
+)
+
+
 # 장소·배경 설명 어휘 (2026-10-30). ㉡ 경고의 판정에만 쓴다 — 문구 생성에는
 # 쓰지 않는다. 왜(Why) 목록을 짧고 분명한 낱말로 제한하나: 이 판정은 "장소
 # 설명이 없다" 를 알리는 **로그**라 오탐이 쌓이면 사용자가 경고를 무시하게 된다.
@@ -812,6 +854,46 @@ def background_support_scene_guard(text: str, background_slots) -> str:
         return ""
     return FURNITURE_SUPPORT_POSITIVE.format(
         slots=", ".join(str(x) for x in slots))
+
+
+def background_seat_guard(text: str, background_slots, seat_slots=None) -> str:
+    """배경 사진 속 좌석에 사람이 앉는 경우의 **점유** 조항. 대상이 없으면 "".
+
+    왜(Why) 이 조항이 필요한가 (2026-10-30 R255 사용자 실측): `2번: 배경, 의자` 로 쓰면
+    좌석이 배경 슬롯에 함께 선언되어 `_seat_slots` 가 빈 집합이 되고, 좌석 접촉점(seat)
+    · 가구 DNA(furniture) 가드가 둘 다 꺼진다. 그 구멍에서 참조에 없는 짚 지붕·분리된
+    등받이·정면으로 돌아간 가구가 나왔다. 문구·근거는 BACKGROUND_SEAT_POSITIVE 참조.
+
+    판정:
+      - 배경 슬롯이 있어야 한다(없으면 ""). `_background_seat_slots` 로 좁힌 뒤 실제
+        연결된 배경 슬롯과 교집합을 낸다(선언만 되고 연결이 없는 슬롯 배제).
+      - 분위기 전용 배경은 형제 가드와 **같은 게이트**로 제외한다(두 벌이면 한쪽만
+        발동한다 — 이 저장소의 이음새 결함).
+      - 좌석이 **사물 슬롯**으로 따로 있으면(seat_slots 비어 있지 않음) 이 조항은 나가지
+        않는다 — 그때는 좌석 접촉점 가드(seat)가 같은 요구를 이미 낸다(중복 금지).
+      - 좌석 어휘가 **배경 슬롯에 함께 선언**되고 착석 동사가 있을 때만 나간다.
+
+    위치: 형제(scene_adopt·support_scene·seat)와 같다 — run_prompt 는 **장면 문장 바로
+    뒤**, base run 은 꼬리. 꼬리에서는 뒤 조항 15개에 희석된다(R239·R248·R254 실측).
+    """
+    try:
+        bg = set(int(x) for x in set(background_slots or []))
+    except (TypeError, ValueError):
+        return ""
+    if not bg:
+        return ""
+    if _is_mood_only_background(text):
+        return ""
+    try:
+        if set(int(x) for x in set(seat_slots or [])):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    seats = _background_seat_slots(text) & bg
+    if not seats:
+        return ""
+    return BACKGROUND_SEAT_POSITIVE.format(
+        slots=", ".join(str(x) for x in sorted(seats)))
 
 
 # 참조 사물 외형 고정 (2026-10-16 실측, 파란 동그라미): 의자 참조(image_2)의
@@ -1886,6 +1968,11 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
         neg.append(OBJECT_DRIFT_NEGATIVE)
         # 지지 구조 조항의 짝 (2026-10-30) — 받쳐지지 않은 상판·끊긴 다리.
         neg.append(FURNITURE_BACKGROUND_NEGATIVE)
+        # 배경 좌석 점유 조항의 짝 (2026-10-30 R255) — 가구 회전·떠 있는 등받이·
+        # 빈 하부. positive 는 좌석이 배경 슬롯에 함께 선언될 때만 나가지만, 짝은
+        # 지지 조항과 **같은 곡선**(furniture_bg 플래그)을 탄다 — cfg 1.0 에서는
+        # 무효이고, 저장소 관례대로 다른 cfg 워크플로를 위해 둔다.
+        neg.append(BACKGROUND_SEAT_NEGATIVE)
     if flags.get("remove_item"):
         # 빈 문자열을 세면 join 이 ", " 꼬리를 남긴다(2026-10-07 라운드 2 —
         # _remove_item_guard 는 비인물 topic 에 "" 를 돌려준다).
@@ -2427,18 +2514,39 @@ def gaze_forward_guard(text, en_text):
 # 전경 지면은 참조와 무관하게 따로 그린 결과다 — 프롬프트에 지면 고정이 없었다.
 # 배경-참조가 지정된 실행에서만 발동한다: 지면을 참조와 같다고 못박지 않은
 # 실행(새 배경 창작 등)에 개입하지 않는다. negative 는 실측된 실패(콘크리트/
-# 실내 매끈 바닥) 위주로만 적는다 — 다른 소재는 추측이라 넣지 않는다.
+# 실내 매끈 바닥, 그리고 아래 R256 의 수직 재사용) 위주로만 적는다 — 다른 소재는
+# 추측이라 넣지 않는다.
+#
+# R256 (2026-10-30 실측, 사용자 제보): B 패턴(배경 사진 속 의자에 사람을 앉힘)에서
+# 프레임을 넓게(16:9) 잡으면 앞쪽 바닥(자갈)이 화면 위쪽 배경 자리로 올라갔다.
+# 실패 실행의 최종 positive(_workspace/probe_bench.txt)에 이 조항이 **실려 있었고**,
+# 그 문구가 원인이었다: "one continuous ground plane running from the foreground
+# ... straight into the far background, foreground floor identical to the background
+# floor" — 바닥을 **먼 배경까지 이으라**고 말하고, 하늘·잎벽 같은 배경을 "뒤 바닥"
+# 으로 지명한다(그 자리에 바닥 재질이 없으면 모델이 바닥을 끌어다 채운다).
+# 그래서 (1) 바닥이 배경 **앞에서 끝난다**고 좁히고(straight into the far
+# background 제거), (2) 바닥은 수평 바닥으로만 남으며 수직 배경으로 재사용되지
+# 않는다고 못박는다. 새 심볼·새 배선은 만들지 않는다 — search-first: extend.
 GROUND_REF_POSITIVE = (
     "ground continuity guard: the ground under and around the subject is the "
-    "exact ground of reference image {n}, same dirt, stones, moss and surface "
-    "texture, one continuous ground plane running from the foreground under "
-    "the subject's feet straight into the far background, foreground floor "
-    "identical to the background floor"
+    "exact ground of reference image {n} — same dirt, stones, moss and surface "
+    "texture — one continuous flat ground plane lying horizontal under the "
+    "subject's feet and running back to the far edge of the ground. The ground "
+    "stays flat and horizontal: it is never tilted, bent upward, folded, "
+    "stood on end or reused as a vertical surface, wall, backdrop or sky, and "
+    "the ground's material never covers the area above that far edge. What "
+    "rises above the far edge of the ground — sky, trees, foliage, wall or "
+    "building — keeps the exact material and structure it has in reference "
+    "image {n}, and is not built out of the ground's material"
 )
 GROUND_REF_NEGATIVE = (
     "concrete floor, cement floor, smooth polished indoor floor, flat "
     "man-made flooring, foreground floor different from the background floor, "
-    "ground not matching the reference ground"
+    "ground not matching the reference ground, ground texture used as a "
+    "vertical wall, floor material standing up behind the subject, ground "
+    "plane bent upward into the background, ground surface tilted up, gravel "
+    "or floor pattern covering the sky or foliage area, backdrop made of the "
+    "floor material, background built out of the ground"
 )
 
 
