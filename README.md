@@ -4,6 +4,8 @@
 
 GoRi 제작 ComfyUI 커스텀 노드 배포 저장소입니다.
 
+[youtu.be/yPitz8dpjto](https://youtu.be/yPitz8dpjto)
+
 ## 포함된 노드
 
 | 노드 | 설명 | 설치 폴더 |
