@@ -37,7 +37,14 @@ __all__ = [
 # "던지"는 "던진다·던져·던졌다"에 문자열로 들어가지 **않는다**(던지→던진+다).
 # 그래서 활용 형태를 여러 개 적거나, 끝 자음이 있는 어간(뛰/달리/당기/끌/잡)을 쓴다.
 # 이걸 놓치면 무협 액션 장면이 그대로 "나란히 서 있기"로 수렴한다.
-# 물리 접촉/동작 → (positive 물리 상태, negative 되돌림 방지)
+# 물리 접촉/동작 → (positive 물리 상태, negative 되돌림 방지, object_veto)
+# object_veto (2026-11-10, R263): 영어 동사가 무생물 사물을 목적어로 가질 때 이
+# 규칙을 끌지 여부다. 왜(Why) 규칙 밖 인덱스가 아니라 튜플 안인가: 인덱스로 두면
+# 규칙 순서를 바꿀 때 조용히 어긋난다. PHYSICS_CONTACT_RULES 를 푸는 곳은 이
+# 파일뿐이다(리포 전체 확인: 다른 사용처 0). True 는 "안기" 규칙 하나다 — 그
+# 긍정문이 전부 "사람을 안는" 상태라 무생물 목적어면 통째로 틀린다.
+# 던지기 규칙(throw)은 object_veto=False 다: 물건을 던질 때도 주체의 자세
+# (thrower's weight shifted onto the back leg)는 유효해 단순 차단이 손실을 낳는다.
 PHYSICS_CONTACT_RULES = (
     (("밀어붙", "밀어", "붙여", "붙여넣", "벽에", "누르", "눌러", "가뒀", "가두",
       "붙잡", "붙들", "조인다", "꽉 잡", "press against", "pin against",
@@ -46,39 +53,45 @@ PHYSICS_CONTACT_RULES = (
      "between them, one person's body braced against a surface while the other "
      "leans into them, overlapping silhouettes, weight visibly transferred",
      "standing apart, empty space between the two people, both standing upright "
-     "and separate, no contact"),
+     "and separate, no contact", False),
     (("안고", "안는", "안은", "안키", "안김", "품에", "감싸", "hold",
       "hug", "embrace", "carried"),
      "close hold: arms wrapped around the other person's body, bodies pressed "
      "together, the held person lifted with feet clear of the ground",
-     "standing separately, arms at sides, no embrace, both feet on the ground"),
+     "standing separately, arms at sides, no embrace, both feet on the ground",
+     True),
     (("던지", "던진다", "던져", "던졌", "던짐", "던질", "투척", "채비", "throw",
       "hurl", "toss", "fling"),
      "throwing motion: the thrown figure is airborne with both feet off the "
      "ground and the body rotated, the thrower's weight shifted onto the back "
      "leg with the torso leaning away, limbs trailing",
-     "both people standing normally, nobody airborne, static pose, no throwing"),
+     "both people standing normally, nobody airborne, static pose, no throwing",
+     False),
     (("뛰", "달리", "달렸", "질주", "전력질주", "sprint", "run", "dash",
       "chase", "race"),
      "running motion: the body pitched forward, legs split mid-stride, one foot "
      "off the ground, arms driving, clothing and hair pushed backward by motion",
-     "standing still, feet together, static posture, no motion"),
+     "standing still, feet together, static posture, no motion",
+     False),
     (("넘어", "넘었", "추락", "쓰러", "쓰러져", "굴러", "무너", "fall",
       "tumble", "collapse", "trip"),
      "falling motion: the body tilted off axis and mid-collapse, limbs flung "
      "outward for balance, the ground plane clearly visible beneath",
-     "upright standing, balanced on both feet, no fall"),
+     "upright standing, balanced on both feet, no fall",
+     False),
     (("부딪", "충돌", "충격", "격돌", "튕겨", "부딪혀", "부딪히", "몰아붙",
       "impact", "collide", "slam", "crash", "strike"),
      "impact moment: the bodies locked together at the point of collision, "
      "compressed posture at the contact point, force visibly transferred "
      "through the limbs, hair and clothing whipping away from the blow",
-     "gentle contact, relaxed posture, no impact, calm static scene"),
+     "gentle contact, relaxed posture, no impact, calm static scene",
+     False),
     (("당기", "끌어", "끌고", "잡아당", "grab", "pull", "rope", "chain",
       "사슬", "줄을"),
      "grappling: a closed grip around the other person, arms locked and bent, "
      "both bodies leaning into the pull with feet braced apart",
-     "hands at sides, no grip, relaxed arms, no tension"),
+     "hands at sides, no grip, relaxed arms, no tension",
+     False),
     # 무협·격투·전투 — 사용자가 가장 많이 쓰는 시나리오라 맨 뒤(최저 우선순위)에
     # 둔다. 위 규칙(밀어붙/던지/넘어 등)이 있으면 그쪽이 더 구체적이다.
     # "싸"/"검"/"격" 한 글자는 뺐다 — "검은 머리·격차·격리·싸다" 오탐
@@ -94,7 +107,8 @@ PHYSICS_CONTACT_RULES = (
      "mid-exchange, one figure advancing and the other reacting, limbs "
      "interlocked, bodies angled into each other rather than parallel",
      "the two figures standing side by side, facing the same direction, "
-     "relaxed neutral posture, no combat contact"),
+     "relaxed neutral posture, no combat contact",
+     False),
 )
 
 
@@ -175,6 +189,53 @@ def _kw_hit(text: str, keywords) -> bool:
     return False
 
 
+# 무생물 목적어 목록 (2026-11-10, R263). 왜(Why) 목록인가: 오탐이 규칙 수보다
+# 중요하므로 좁게 둔다. 넓히면 "holding a sword"(전투 규칙과 얽힌다) 처럼 다른
+# 규칙의 동작까지 바꾸고, 좁히면 "holding a parasol" 만 못 잡는다. 들고 다니는
+# 개인 사물만 넣고 무기·동물은 넣지 않는다(종전 동작을 바꾸지 않기 위해).
+_INANIMATE_OBJECTS = frozenset((
+    "parasol", "umbrella", "bag", "handbag", "purse", "backpack", "suitcase",
+    "briefcase", "phone", "smartphone", "tablet", "cup", "glass", "mug",
+    "bottle", "vase", "flower", "flowers", "bouquet", "book", "books",
+    "magazine", "camera", "tray", "box", "basket", "fan", "cane", "balloon",
+    "lamp", "lantern", "sign", "placard", "newspaper", "letter", "card",
+    "ticket", "microphone", "mic", "pen", "pencil", "notebook", "wallet",
+    "gift", "present", "plate", "bowl", "spoon", "fork", "pillow", "cushion",
+    "blanket", "teddy", "doll", "plush", "toy", "candle", "brush", "comb",
+    "door",
+))
+
+# 안기 동사 + (관사·소유격을 건너뛴) 목적어 첫 명사.
+_HOLD_VERB_EN = (r"(?:hold|holds|holding|held|carry|carries|carrying|carried|"
+                 r"hug|hugs|hugging|hugged|embrace|embraces|embracing|embraced)")
+_HOLD_OBJECT_RE = re.compile(
+    r"\b" + _HOLD_VERB_EN + r"\b\s+"
+    r"(?:(?:a|an|the|his|her|their|its|my|your|our|this|that|these|those|"
+    r"one|two|\d+)\s+)?([a-z]+)")
+
+
+def _hold_object_only(text: str) -> bool:
+    """영문 안기 동사의 목적어가 **전부** 무생물 사물이면 True.
+
+    왜(Why): "holding a parasol"(양산을 들고) 의 holding 이 어미 허용 정규식으로
+    "사람을 안고 있다" 로 오탐해 긍정문에 "the other person" 을 넣었다. 그래서
+    1인 주제가 2인으로 렌더됐다(2026-11-10 사용자 실측 — 번역 노드가 "들고" 를
+    "holding" 으로 바꾼 뒤 영문 가드가 잡았다). 목적어를 보고 무생물이면 사람을
+    안는 장면이 아니라고 판정한다.
+
+    목적어 패턴이 하나도 없으면 False 다 — 근거 없이 규칙을 끄지 않는다.
+    하나라도 사람 목적어(목록 밖 명사)가 있으면 False 다.
+    """
+    objs = [m.group(1) for m in _HOLD_OBJECT_RE.finditer(text)]
+    if not objs:
+        return False
+    for obj in objs:
+        if (obj not in _INANIMATE_OBJECTS
+                and obj.rstrip("s") not in _INANIMATE_OBJECTS):
+            return False
+    return True
+
+
 def physics_contact_guard(topic: str) -> tuple:
     """(positive, negative). 접촉/동작 신호가 없으면 ("", "").
 
@@ -195,8 +256,11 @@ def physics_contact_guard(topic: str) -> tuple:
         # 사람 장면은 그대로 둔다.
         if _is_animal_subject(t):
             return "", ""
-        for keywords, pos, neg in PHYSICS_CONTACT_RULES:
+        for keywords, pos, neg, object_veto in PHYSICS_CONTACT_RULES:
             if _kw_hit(t, keywords):
+                # 무생물 목적어면 이 규칙만 건너뛴다 (R263). 다음 규칙은 그대로 본다.
+                if object_veto and _hold_object_only(t):
+                    continue
                 # 시간·속도 축: 빠른 동작일 때만 중간 프레임을 명시한다.
                 if _kw_hit(t, FAST_MOTION_KEYWORDS):
                     pos = pos + ", " + PHYSICS_MOTION_POSITIVE

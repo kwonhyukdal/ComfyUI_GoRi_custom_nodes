@@ -14,7 +14,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "HUMAN_PRONOUN_KEYWORDS", "_human_pronoun_present", "ANIMAL_SUBJECT_KEYWORDS", "_animal_keyword_present", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_declared_slots", "_CLOTHING_COLON_PATTERN", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_wants_barefoot", "_topic_item_color", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
+"HUMAN_SUBJECT_KEYWORDS", "_MODEL_OBJECT_PATTERN", "_is_human_subject", "HUMAN_PRONOUN_KEYWORDS", "_human_pronoun_present", "ANIMAL_SUBJECT_KEYWORDS", "_animal_keyword_present", "ANIMAL_SPECIES_POSITIVE", "ANIMAL_ANATOMY_NEGATIVE", "_KO_SUFFIX_CHARS", "_ascii_only", "_ko_word_present", "_ASCII_AMBIGUOUS", "_ascii_word_present", "_is_animal_subject", "MULTI_PERSON_KEYWORDS", "REFLECTION_KEYWORDS", "_REFLECTION_ASCII_WORDS", "_is_reflection_scene", "_is_multi_person_request", "SECOND_PERSON_PATTERNS", "_NUMBER_WORDS", "_ORDINAL_WORDS", "_KO_OBJECT_WORDS", "_EN_OBJECT_WORDS", "OBJECT_WORDS", "_TEMPERED_GAP", "_KO_CLOTHING_WORDS", "_EN_CLOTHING_WORDS", "CLOTHING_WORDS", "_role_patterns", "OBJECT_ROLE_PATTERNS", "CLOTHING_ROLE_PATTERNS", "_OUTFIT_VERB", "_OUTFIT_APPLY_SLOT_PATTERNS", "_OUTFIT_TARGET_ROLE", "OUTFIT_TARGET_PATTERNS", "_KO_POSE_STATE", "_EN_POSE_STATE", "_KO_POSE_WORDS", "_EN_POSE_WORDS", "POSE_ROLE_PATTERNS", "_collect_role_slots", "_clothing_role_slots", "_clothing_declared_slots", "_CLOTHING_COLON_PATTERN", "_has_outfit_apply_verb", "_EN_GARMENT_WORDS", "_is_text_outfit_change", "_topic_changes_shoes", "_topic_wants_barefoot", "_topic_item_color", "_topic_item_colors", "_is_empty_scene", "_outfit_target_slots", "_pose_role_slots", "_second_person_slots", "_is_second_person_request", "_secondary_role_labels", "_object_role_slots", "_person_object_plan", "_is_multi_person_sheet", "_is_character_sheet_request", "CHARACTER_SHEET_TOPICS", "MULTI_PERSON_SHEET_TOPICS", "_reference_items", "_is_outfit_transfer", "OUTFIT_RELATION_PATTERNS", "NON_OBJECT_SLOT_KEYWORDS", "BACKGROUND_ROLE_PATTERNS", "_background_role_slots", "set_reference_kinds", "clear_reference_kinds",
 "_hint_person_slots", "_hint_pose_slots", "_hint_object_slots", "_hint_no_person_classified", "_text_names_slots", "intent_core",
 "_normalize_slots",
 "footwear_noun_mismatch", "_KO_WEAR_ITEMS", "_KO_CLOTHING_ROLE_WORDS",
@@ -1950,6 +1950,9 @@ _ITEM_COLOR_KO = (
     ("초록색", "green"), ("초록", "green"),
     ("노란색", "yellow"), ("노란", "yellow"),
     ("분홍색", "pink"), ("분홍", "pink"),
+    # "핑크" 는 실제로 쓰이는데 표에 없어 두 색 주제에서 통째로 놓쳤다
+    # (2026-11-10 실측: "핑크색이 섞인 원피스" -> 색 감지 실패).
+    ("핑크색", "pink"), ("핑크", "pink"),
     ("회색", "gray"), ("잿빛", "gray"),
     ("갈색", "brown"),
     ("베이지", "beige"),
@@ -1990,6 +1993,41 @@ def _topic_item_color(text):
     없으면 None. 오판이 더 나쁘다(무의미한 색상 보강) — 조건은 인접성
     하나로만 본다. 영문은 같은 문장 안에서 색상어+품목 16자 이내,
     한글은 명사 앞 8자 window 에 색상어.
+
+    이 함수는 **첫 색상 하나**를 돌려주는 동결 계약이다(R136 잠금). 색이
+    둘 이상이면 `_topic_item_colors` 를 쓴다. 여기서는 그 첫 색만 꺼낸다 —
+    로직을 두 벌로 두지 않기 위해 얇게 감싼다.
+    """
+    hit = _topic_item_colors(text)
+    if not hit:
+        return None
+    item, colors = hit
+    return colors[0], item
+
+
+# 한글 두 색 (2026-11-10, R263): "노란색과 핑크색이 섞인 ... 원피스".
+# 왜(Why) 별도 규칙인가: 한글 경로는 품목 앞 8자만 보므로 색이 접속사로 이어지면
+# 첫 색만 잡거나 둘 다 놓친다. 접속사로 이어진 두 색 + 품목을 명시적으로 잡는다.
+# 폭 12자는 "핑크색이 섞인 짧은 원피스" 처럼 색과 품목 사이에 수식어가 끼는
+# 실제 주제를 덮는다. 접속사가 없으면 발동하지 않아 오탐이 없다.
+_KO_COLOR_EN = dict(_ITEM_COLOR_KO)
+_KO_COLOR_ALT = "|".join(re.escape(k) for k, _ in _ITEM_COLOR_KO)
+_MULTI_COLOR_KO_RE = re.compile(
+    r"(" + _KO_COLOR_ALT + r")\s*(?:과|와|이랑|랑|하고|,|및)\s*("
+    + _KO_COLOR_ALT + r")[^.]{0,12}?(" + _ITEM_NOUN_KO + r")")
+
+
+def _topic_item_colors(text):
+    """(품목 영문, [색상 영문...]) — 인접한 색상을 순서대로 전부. 없으면 None.
+
+    왜(Why): 기존 `_topic_item_color` 는 색상어 **하나**만 봤다. 그래서
+    "yellow and pink dress" 에서 첫 색만 굳혀 "pure yellow dress" 를 붙였고,
+    원문(노랑+핑크)과 충돌했다(2026-11-10 사용자 실측). 여기서는 인접한 색을
+    모두 모아 둘 다 유지할 수 있게 한다.
+
+    첫 (색, 품목) 쌍을 찾는 정규식은 `_topic_item_color` 와 **글자 단위로 같다** —
+    품목 선택과 첫 색이 종전과 동일해야 R136 계약이 유지된다. 그 뒤 첫 색의
+    시작부터 품목 시작까지의 구간에서 색상어를 순서대로 모은다.
     """
     t = (text or "").strip()
     if not t:
@@ -1999,14 +2037,26 @@ def _topic_item_color(text):
         r"(?<![\w-])(" + _ITEM_COLOR_EN + r")\b[^.]{0,16}?\b("
         + _ITEM_NOUN_EN + r")\b", low)
     if m:
-        color = "gray" if m.group(1) == "grey" else m.group(1)
         noun = m.group(2)
-        return color, _ITEM_NOUN_EN_MAP.get(noun, noun)
-    for m in re.finditer(_ITEM_NOUN_KO, t):
-        window = t[max(0, m.start() - 8):m.start()]
+        seg = low[m.start(1):m.start(2)]
+        cols = []
+        for c in re.finditer(r"(?<![\w-])(" + _ITEM_COLOR_EN + r")\b", seg):
+            c1 = "gray" if c.group(1) == "grey" else c.group(1)
+            if c1 not in cols:
+                cols.append(c1)
+        if cols:
+            return _ITEM_NOUN_EN_MAP.get(noun, noun), cols
+    m2 = _MULTI_COLOR_KO_RE.search(t)
+    if m2:
+        cols = [c for c in (_KO_COLOR_EN.get(m2.group(1)),
+                            _KO_COLOR_EN.get(m2.group(2))) if c]
+        if cols:
+            return _KO_ITEM_EN.get(m2.group(3), "items"), cols
+    for m3 in re.finditer(_ITEM_NOUN_KO, t):
+        window = t[max(0, m3.start() - 8):m3.start()]
         for ko_color, en_color in _ITEM_COLOR_KO:
             if ko_color in window:
-                return en_color, _KO_ITEM_EN.get(m.group(0), "items")
+                return _KO_ITEM_EN.get(m3.group(0), "items"), [en_color]
     return None
 
 

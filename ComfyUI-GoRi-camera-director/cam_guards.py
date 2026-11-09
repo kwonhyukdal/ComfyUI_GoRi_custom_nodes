@@ -40,17 +40,18 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"QUALITY_GUARD", "QUALITY_GUARD_ANIMAL", "QUALITY_GUARD_SCENE", "quality_guard_text", "FACE_IDENTITY_GUARD", "SKIN_COLOR_GUARD", "NEGATIVE_ANATOMY_GUARD", "NEGATIVE_COLOR_CONTAMINATION_GUARD", "_NEGATIVE_BASE_COMMON", "OUTFIT_GUARD", "NUDITY_KEYWORDS", "NUDITY_PARTIAL_KEYWORDS", "_is_partial_exposure",
+"QUALITY_GUARD", "QUALITY_GUARD_ANIMAL", "QUALITY_GUARD_SCENE", "quality_guard_text", "FACE_IDENTITY_GUARD", "SKIN_COLOR_GUARD", "REALISM_TEXTURE_POSITIVE", "NO_DUPLICATE_NEGATIVE", "PANEL_COLLAGE_NEGATIVE", "NEGATIVE_ANATOMY_GUARD", "NEGATIVE_COLOR_CONTAMINATION_GUARD", "_NEGATIVE_BASE_COMMON", "OUTFIT_GUARD", "NUDITY_KEYWORDS", "NUDITY_PARTIAL_KEYWORDS", "_is_partial_exposure",
     "_is_nudity_request", "nudity_anatomy_guard", "coverage_guard",
     "EXPLICIT_COVER_KEYWORDS", "EXPLICIT_REVEAL_KEYWORDS",
-    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "FINGER_SEPARATION_POSITIVE", "SCENE_FINGER_CUE", "scene_finger_cue", "HAND_INTEGRITY_POSITIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_background_dna_slots", "_furniture_background_guard", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_POSITIVE_SLOT", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "FOOTWEAR_BARE_POSITIVE", "FOOTWEAR_BARE_NEGATIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
+    "_wants_explicit_cover", "_wants_explicit_reveal", "macro_detail_guard", "_camera_failure_modes", "ANATOMY_DETAIL_NEGATIVE", "ANATOMY_COUNT_POSITIVE", "ANATOMY_COUNT_NEGATIVE", "FINGER_SEPARATION_POSITIVE", "SCENE_FINGER_CUE", "scene_finger_cue", "HAND_INTEGRITY_POSITIVE", "LEG_FOOT_INTEGRITY_POSITIVE", "ANATOMY_COUNT_POSITIVE_UPPER", "ANATOMY_COUNT_NEGATIVE_UPPER", "DETAIL_DEFINITION_POSITIVE_UPPER", "DETAIL_DEFINITION_NEGATIVE_UPPER", "SCALE_SHOTS", "SCALE_COHERENCE_POSITIVE", "SCALE_COHERENCE_NEGATIVE", "_needs_scale_guard", "ETHNICITY_GROUPS", "TRADITIONAL_KEYWORDS", "APPEARANCE_DESCRIBED_KEYWORDS", "ETHNICITY_DIVERSITY_POSITIVE", "ETHNICITY_MODERN_WEAR", "ETHNICITY_STEREOTYPE_NEGATIVE", "_ethnicity_identity_locked", "_ethnicity_guard", "FACE_CRITICAL_SHOTS", "FACE_IDENTITY_NEGATIVE", "_topic_requests_pose", "FURNITURE_DNA_POSITIVE", "FURNITURE_DNA_NEGATIVE", "OBJECT_DRIFT_NEGATIVE", "OBJECT_INSTANCE_POSITIVE", "OBJECT_INSTANCE_NEGATIVE", "PARTIAL_OBJECT_NEGATIVE", "_furniture_dna_guard", "_object_dna_slots", "_background_dna_slots", "_furniture_background_guard", "_remove_item_guard", "add_quality_guard", "assemble", "_assemble_negative", "build_camera_negative", "HINT_DEFENSE_NEGATIVE", "MIX_GUARD_POSITIVE", "MIX_GUARD_POSITIVE_BARE", "MIX_GUARD_NEGATIVE", "_pose_reference_guard", "_pose_reference_negative", "build_negative", "APPEARANCE_REF_POSITIVE", "APPEARANCE_REF_NEGATIVE", "APPEARANCE_HAIR_REALISM_POSITIVE", "DETAIL_DEFINITION_POSITIVE", "DETAIL_DEFINITION_NEGATIVE", "BODY_BALANCE_POSITIVE", "BODY_BALANCE_NEGATIVE", "body_proportion_guard", "outfit_guard", "FOOTWEAR_POSITIVE", "FOOTWEAR_POSITIVE_SLOT", "FOOTWEAR_NEGATIVE", "FOOTWEAR_POSITIVE_UPPER", "FOOTWEAR_NEGATIVE_UPPER", "FOOTWEAR_CHANGE_POSITIVE", "FOOTWEAR_BARE_POSITIVE", "FOOTWEAR_BARE_NEGATIVE", "gaze_forward_guard", "color_adherence_guard", "_ITEM_COLOR_POS", "_ITEM_COLOR_POS_MULTI", "_ITEM_COLOR_NEG", "BODY_OBJECT_BOUNDARY_POSITIVE", "BODY_OBJECT_BOUNDARY_NEGATIVE", "BODY_OBJECT_BOUNDARY_POSITIVE_UPPER", "BODY_OBJECT_BOUNDARY_NEGATIVE_UPPER", "GARMENT_BOUNDARY_POSITIVE", "GARMENT_BOUNDARY_NEGATIVE", "GARMENT_BOUNDARY_POSITIVE_UPPER", "GARMENT_BOUNDARY_NEGATIVE_UPPER", "_garment_boundary_guard",     "_footwear_guard", "_body_object_boundary_guard", "parse_dw_pose_map",
     "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "FURNITURE_SUPPORT_POSITIVE", "FURNITURE_BACKGROUND_NEGATIVE", "SCENERY_BACKGROUND_POSITIVE", "BACKGROUND_LIGHT_RECONCILE_POSITIVE", "BACKGROUND_SCENE_ADOPT_POSITIVE", "_is_mood_only_background", "background_scene_adopt_guard", "background_support_scene_guard", "BACKGROUND_SEAT_POSITIVE", "BACKGROUND_SEAT_NEGATIVE", "background_seat_guard", "PLACE_DESCRIPTION_WORDS", "_ascii_word_in", "place_description_present", "scene_metric_slot", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
     "SEAT_OCCUPANCY_POSITIVE", "SEAT_OCCUPANCY_NEGATIVE", "SEAT_ORIENTATION_POSITIVE", "FURNITURE_PLACEMENT_LOCK_NON_SEAT",
     "GROUND_REF_NEGATIVE", "ground_reference_guard",
     "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio",
     "HAND_PLACEMENT_POSITIVE", "HAND_PLACEMENT_NEGATIVE", "HAND_PLACE_MARKERS",
     "hand_placement_marks",
-    "COMPACT_ANATOMY_POSITIVE", "COMPACT_FOOTWEAR_POSITIVE",
+    "COMPACT_ANATOMY_POSITIVE", "REF_FREE_COMPACT_ANATOMY_POSITIVE",
+    "COMPACT_FOOTWEAR_POSITIVE",
     "COMPACT_FOOTWEAR_POSITIVE_SLOT", "COMPACT_BOUNDARY_POSITIVE",
     "compact_footwear_guard"
 ]
@@ -113,13 +114,44 @@ FACE_IDENTITY_GUARD = (
 )
 
 
+# 실사 질감 문구 (슬롯·참조 비의존). 왜(Why) 뽑아 두나: 이 문구가 참조 전용
+# 함수(body_proportion_guard) 안에만 있어 **참조가 없으면 실사 지시가 아예 안
+# 나갔다**(2026-11-10). 모공·미세대비·그레인은 참조 유무와 무관하게 유효하다.
+REALISM_TEXTURE_POSITIVE = (
+    "natural skin tone, realistic skin texture with visible pores and fine detail, "
+    "soft directional lighting that reveals natural skin micro-contrast, subtle film grain"
+)
+
+
 SKIN_COLOR_GUARD = (
     # 카메라 기법으로 피부 질감을 살린다. 왜(Why): "균일·매끈·깨끗" 같은
     # 미화 표현은 모델을 에어브러시 방향으로 밀어 플라스틱 피부가 되므로,
     # 모공·결·지향성 광·그레인 같은 촬영 언어로 현실 질감을 지시한다.
-    "natural skin tone, realistic skin texture with visible pores and fine detail, "
-    "soft directional lighting that reveals natural skin micro-contrast, subtle film grain, "
-    "background color does not tint the skin"
+    #
+    # 2026-11-10: 꼬리("background color does not tint the skin")만 색오염 전용이라
+    # 분리했다. 앞부분(REALISM_TEXTURE_POSITIVE)은 슬롯·참조와 무관한 순수 실사
+    # 문구라 참조가 없을 때도 나갈 수 있다. 합치면 문자열이 이전과 동일하다.
+    REALISM_TEXTURE_POSITIVE + ", background color does not tint the skin"
+)
+
+
+# 복제 금지 negative (슬롯·참조 비의존). 왜(Why) 상수로 뽑나: 종전엔
+# `_assemble_negative` 안에 리터럴로 박혀 있었고, 그 조각이 `single_person_anchor`
+# + `external_prompt` 를 요구해 **참조가 없으면 불가능**했다(2026-11-10).
+NO_DUPLICATE_NEGATIVE = (
+    "multiple people", "duplicate person", "cloned person",
+    "mirrored twin", "background person",
+)
+
+
+# 패널·콜라주(한 화면 분할) 금지어 (2026-11-10 R260). 왜(Why) 여기서 공유하나:
+# 종전엔 9·10번 외양 참조 경로의 APPEARANCE_REF_NEGATIVE 문자열에만 이 조항이
+# 묶여 있었다. 일반 참조-없음 인물 경로는 이 조항이 아예 없어, 같은 인물이 세
+# 칸으로 반복된 콜라주가 나왔다(사용자 실측). 상수로 뽑아 두 경로가 공유하되,
+# APPEARANCE_REF_NEGATIVE 는 이 상수에서 재조립해 **바이트 동일**을 유지한다
+# (R16 테스트가 지킨다). 새 병렬 상수를 만들지 않는다.
+PANEL_COLLAGE_NEGATIVE = (
+    "collage", "inset panel", "split view", "split screen", "duplicated crop",
 )
 
 
@@ -154,6 +186,11 @@ _NEGATIVE_BASE_COMMON = (
     "warped geometry, distorted perspective, broken framing",
     "flat lighting, harsh unflattering light",
     "washed out colors, over-saturated colors",
+    # 뭉뚱그린 품질 억제어 (2026-11-10, R259). 왜(Why) 여기 넣나: 사람 전용이
+    # 아니라 **모든 주제**에 적용된다(두 빌더가 공유). cfg>1 그래프에서 전반적
+    # 조잡함을 민다. 주의: 이 태그는 모델에 따라 효과가 다르다 — 최신 텍스트
+    # 인코더는 잘 모를 수 있다. 사용자 결정으로 측정 없이 추가했다(161절).
+    "worst quality, low quality, lowres",
 )
 
 
@@ -1211,8 +1248,17 @@ def add_quality_guard(prompt: str, image_count: int = 0, topic: str = "", image_
     return ". ".join(p for p in _cleaned if p) + "."
 
 
-def assemble(scene: str, cam: dict, image_count: int = 0, topic: str = "", image_labels=None) -> str:
-    """scene + 카메라 + 그레이드 + 범용 품질/정체성 가드 → 영문 prompt_out."""
+def assemble(scene: str, cam: dict, image_count: int = 0, topic: str = "", image_labels=None,
+             ref_free_compact: bool = False) -> str:
+    """scene + 카메라 + 그레이드 + 범용 품질/정체성 가드 → 영문 prompt_out.
+
+    ref_free_compact (2026-11-10, R261, 선택): 참조 없는 인물 경로인가.
+    참이면 **스케일 일관**과 **품질 가드**를 넣지 않는다. 왜(Why) 이 둘인가:
+    참조 없는 한 명 주제가 3칸 콜라주로 나온 원인은 가드 **문장 수의 누적**이며
+    (실측: 8문장까지 1명, 9문장부터 3명/3칸), 이 두 문장은 그 누적에서
+    **빼도 결과가 망가지지 않는** 몫이었다(렌더 실측). 참조가 있으면
+    호출부가 참을 주지 않으므로 참조 경로는 한 글자도 안 바뀐다.
+    """
     scene = (scene or "").strip().rstrip("., ")
     segs = [", ".join(build_clauses(cam)), grade_clauses(cam)]
     segs = [s for s in segs if s]
@@ -1233,13 +1279,18 @@ def assemble(scene: str, cam: dict, image_count: int = 0, topic: str = "", image
     cover = coverage_guard(topic or scene)
     if cover:
         prompt = prompt.rstrip(". ") + ". " + cover + "."
-    if _needs_scale_guard(topic or scene, cam):
+    if _needs_scale_guard(topic or scene, cam) and not ref_free_compact:
         prompt = prompt.rstrip(". ") + ". " + SCALE_COHERENCE_POSITIVE + "."
     _eth_pos, _ = _ethnicity_guard(topic or scene, image_count, image_labels)
     if _eth_pos:
         prompt = prompt.rstrip(". ") + ". " + _eth_pos + "."
     if _is_animal_subject(topic or scene):
         prompt = prompt.rstrip(". ") + ". " + ANIMAL_SPECIES_POSITIVE + "."
+    if ref_free_compact:
+        # 품질 가드를 뺀다 — 위 스케일과 같은 이유(누적 길이). 사람 품질의
+        # 핵심인 "believable hands with five fingers" 는 해부 가드가,
+        # "natural skin texture" 는 실사 질감 조항이 따로 받는다.
+        return prompt
     return add_quality_guard(prompt, image_count=image_count, topic=topic or scene,
                              image_labels=image_labels)
 
@@ -1774,7 +1825,14 @@ APPEARANCE_DESCRIBED_KEYWORDS = (
 )
 
 
-ETHNICITY_DIVERSITY_POSITIVE = "varied individual facial features within the group"
+# 국가 표현형 positive (2026-11-10 중립화). 종전 문구
+# `varied individual facial features within the group` 는 **"집단 안에서"** 를
+# 말해, "한 명" 주제(예: "30대 한국 여성은 ... 앉아 있다")에도 **여러 명을 전제**
+# 했다 — 그 결과 머리 모양이 각각 다른 여성 3명이 나왔다(실측). 고정관념(획일적
+# 얼굴) 방지는 남기되 **단수에서도 참인** 문구로 바꾼다.
+ETHNICITY_DIVERSITY_POSITIVE = (
+    "distinct individual facial features, not a generic stereotype face"
+)
 
 
 ETHNICITY_MODERN_WEAR = "modern everyday clothing"
@@ -1783,8 +1841,7 @@ ETHNICITY_MODERN_WEAR = "modern everyday clothing"
 ETHNICITY_STEREOTYPE_NEGATIVE = (
     "westernized facial features, forced traditional costume, "
     "historical costume by default, exotic stereotype, "
-    "every person from the same country looking identical, "
-    "one homogenized face type for a whole country"
+    "homogenized generic face type, stereotyped face template"
 )
 
 
@@ -1881,7 +1938,7 @@ def _topic_requests_pose(topic) -> bool:
 def _assemble_negative(cam, topic, image_count, image_labels, flags,
                        noir_phrase, extras=(), physics_neg="",
                        pose_ref=False, prevent_duplicates=False,
-                       aspect_ratio=None) -> str:
+                       panel_guard=False, aspect_ratio=None) -> str:
     """두 negative 빌더가 공유하는 조립 로직.
 
     왜(Why) 하나인가(2026-09-29): `build_negative` 와
@@ -2004,8 +2061,13 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
             and _topic_requests_pose(topic)):
         neg.append(FACE_IDENTITY_NEGATIVE)
     if prevent_duplicates:
-        neg.extend(["multiple people", "duplicate person", "cloned person",
-                    "mirrored twin", "background person"])
+        neg.extend(NO_DUPLICATE_NEGATIVE)
+    # 패널·콜라주(한 화면 분할) 금지 (2026-11-10 R260). prevent_duplicates 와
+    # **다른 플래그**인 이유: prevent_duplicates 는 Skills 경로에서 참조가 있어도
+    # 켜질 수 있어, 거기에 얹으면 참조 경로의 문구가 바뀐다(무변화 위반). 이
+    # 플래그는 참조-없음 인물 경로에서만 plan 이 켠다.
+    if panel_guard:
+        neg.extend(PANEL_COLLAGE_NEGATIVE)
     for src in extras:
         if src and src.strip():
             neg.append(src.strip())
@@ -2033,6 +2095,7 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
                           garment_boundary_upper: bool = False,
                           hand_placement: bool = False,
                           seat: bool = False,
+                          panel_guard: bool = False,
                           aspect_ratio: float = None) -> str:
     """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
     return _assemble_negative(
@@ -2052,7 +2115,8 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
          "garment_boundary_upper": garment_boundary_upper,
          "hand_placement": hand_placement, "seat": seat},
         "unwanted color cast", physics_neg=physics_neg, pose_ref=pose_ref,
-        prevent_duplicates=prevent_duplicates, aspect_ratio=aspect_ratio)
+        prevent_duplicates=prevent_duplicates,
+        panel_guard=panel_guard, aspect_ratio=aspect_ratio)
 
 
 # llm_hint 사용 시 검열 아티팩트 방어어. (Why: 모델이 학습 편향으로
@@ -2171,7 +2235,13 @@ APPEARANCE_REF_POSITIVE = (
 )
 
 
-APPEARANCE_REF_NEGATIVE = "collage, inset panel, split view, split screen, duplicated crop, clumped hair patches, sticker-like body hair, floating hair decals"
+# 2026-11-10 R260: 콜라주 조항을 PANEL_COLLAGE_NEGATIVE 에서 재조립한다.
+# 콜라주 부분은 이제 공용이고, 체모 조항만 외양 참조 전용이다. 재조립 결과는
+# 종전 리터럴과 **바이트 동일**하다(위 상수 정의 + 아래 꼬리).
+APPEARANCE_REF_NEGATIVE = (
+    ", ".join(PANEL_COLLAGE_NEGATIVE)
+    + ", clumped hair patches, sticker-like body hair, floating hair decals"
+)
 
 
 # 외양 참조(9·10번) 실행의 체모 실사감 문구. (Why: 음모 등 체모가 뭉치거나
@@ -2593,6 +2663,15 @@ def ground_reference_guard(text, background_slots=None):
 # negative 는 실측된 실패(흰색->크림/베이지 계열) 위주로만 적는다 —
 # 나머지 색의 오색 목록은 추측이라 넣지 않는다.
 _ITEM_COLOR_POS = "pure {color} {item}, bright clean {color}, {color} kept true to the requested shade"
+
+# 두 색 이상일 때 (2026-11-10, R263). 왜(Why) 별도 문구인가: "pure"(순색) 와
+# "bright clean <색>" 은 한 색일 때만 맞다. "노란색과 핑크색이 섞인 원피스" 에
+# 첫 색만 굳혀 "pure yellow dress" 를 붙여 원문과 충돌했다(사용자 실측 — 두
+# 색이 서로 다른 인물로 갈라진 원인 중 하나). 두 색은 둘 다 유지한다고 말한다.
+_ITEM_COLOR_POS_MULTI = (
+    "the {item} shows both {colors} as requested, both colours kept clean and "
+    "true to the requested shades"
+)
 _ITEM_COLOR_NEG = {
     "white": ("cream shoes, beige shoes, ivory shoes, nude shoes, tan shoes, "
               "off-white shoes, cream-colored clothing, beige clothing"),
@@ -2605,15 +2684,25 @@ def color_adherence_guard(text, en_text):
     """주제가 지정한 의류 색상 고정 (positive 보강문, negative 오색) —
     미지정이면 ("", "").
 
-    text: 원문(한글 가능) — _topic_item_color 가 인접성 판정에 쓴다.
+    text: 원문(한글 가능) — _topic_item_colors 가 인접성 판정에 쓴다.
     en_text: 최종 영문 프롬프트 — positive 중복 제거에 쓴다.
+
+    색이 둘 이상이면 한 색으로 굳히지 않는다 — 두 색을 함께 유지하는 문장만
+    내고, 한 색 전용 오색 negative 는 쓰지 않는다(2026-11-10, R263 — 한 색
+    전용 표를 두 색에 그대로 쓰면 틀린다).
     """
     try:
-        hit = _topic_item_color(text or "")
+        hit = _topic_item_colors(text or "")
         if not hit:
             return "", ""
-        color, item = hit
+        item, colors = hit
         low_en = (en_text or "").lower() if isinstance(en_text, str) else ""
+        if len(colors) >= 2:
+            joined = " and ".join(colors[:3])
+            if (f"pure {joined}" in low_en) or (f"both {joined}" in low_en):
+                return "", ""
+            return _ITEM_COLOR_POS_MULTI.format(colors=joined, item=item), ""
+        color = colors[0]
         pos = ("" if f"pure {color}" in low_en
                else _ITEM_COLOR_POS.format(color=color, item=item))
         neg = _ITEM_COLOR_NEG.get(color, "")
@@ -2663,6 +2752,20 @@ COMPACT_ANATOMY_POSITIVE = (
     "two feet with one foot at the end of each leg, five fingers per hand, one "
     "thumb and four fingers, fingers and limbs separate and whole, no extra or "
     "missing limb, no joined or blended limbs."
+)
+
+# 참조 없는 인물 경로 전용 해부 가드 (2026-11-10, R261).
+# 왜(Why) 위 COMPACT_ANATOMY_POSITIVE 와 따로 두나: 위 문장은 사지 **개수를
+# 숫자로 열거**한다("two arms, two legs, two feet with one foot at the end of
+# each leg"). 참조 없는 한 명 주제에서 그 열거가 **마지막 한 방울**이었다 —
+# 실측: 위 열거 한 조각만 다른 가드 없이 붙여도 여성이 9명 나왔다. 열거를 뺀
+# 이 문장만 바꿔 끼우면(나머지 동일) 같은 주제·시드가 1명으로 돌아온다.
+# 손가락 수("five fingers per hand")는 남긴다 — 손 품질 방어의 핵심이고,
+# 그 조항은 실패를 만들지 않았다(실측 N4 = 1명).
+REF_FREE_COMPACT_ANATOMY_POSITIVE = (
+    "Anatomy stays correct and readable: natural proportions, five fingers per "
+    "hand, one thumb and four fingers, fingers and limbs separate and whole, "
+    "no extra or missing limb, no joined or blended limbs."
 )
 
 # 신발은 선언 슬롯이 있으면 그 번호를 지목한다(원본 FOOTWEAR_POSITIVE_SLOT 과
@@ -2718,9 +2821,17 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
                    garment_boundary_upper: bool = False,
                    hand_placement: bool = False,
                    seat: bool = False,
-                   sheet_kind: str = "") -> str:
+                   sheet_kind: str = "",
+                   prevent_duplicates: bool = False,
+                   panel_guard: bool = False) -> str:
     # 힌트·믹스·외양·발란스 방어는 base 경로 전용이라 조립기가 아니라
     # 여기서 덧붙인다(중복이 아니라 경로별 전용).
+    #
+    # prevent_duplicates (2026-11-10): 복제 금지어를 base 경로에서도 낼 수 있게
+    # 조립기에 넘긴다. 종전엔 build_camera_negative(Skills 경로)에만 인자가
+    # 있었고 그 게이트가 `single_person_anchor + external_prompt` 를 요구해
+    # **참조가 없으면 불가능**했다. run() 이 계획(plan)의 판정을 그대로 넘겨 두
+    # 경로가 같은 조각을 받게 한다.
     tail = []
     if hint_defense:
         tail.append(HINT_DEFENSE_NEGATIVE)
@@ -2747,7 +2858,9 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
          "garment_boundary_upper": garment_boundary_upper,
          "hand_placement": hand_placement, "seat": seat},
         "color tint", extras=tuple(tail) + (llm_extra, extra),
-        physics_neg=physics_neg, pose_ref=pose_ref)
+        physics_neg=physics_neg, pose_ref=pose_ref,
+        prevent_duplicates=prevent_duplicates,
+        panel_guard=panel_guard)
 
 
 # ---------------------------------------------------------------------------

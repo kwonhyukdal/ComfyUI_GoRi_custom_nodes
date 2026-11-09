@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+
 try:
     from .cam_util import *  # noqa: F403
 except ImportError:  # 스탠드얼론/테스트 실행용
@@ -14,7 +16,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"MAX_REFERENCE_IMAGES", "VISION_DETAIL", "VISION_DETAIL_DEFAULT", "vision_detail_px", "GARMENT_RETENTION_POSITIVE", "build_identity_anchor", "build_single_person_anchor", "build_duo_person_anchor", "reference_guard", "build_secondary_role_anchor", "auto_reference_roles_positive"
+"MAX_REFERENCE_IMAGES", "VISION_DETAIL", "VISION_DETAIL_DEFAULT", "vision_detail_px", "GARMENT_RETENTION_POSITIVE", "NO_DUPLICATE_MAIN", "SECONDARY_REF_NO_DUPLICATE", "NO_DUPLICATE_TAIL", "NO_DUPLICATE_POSITIVE", "SINGLE_PERSON_TAIL", "SINGLE_PERSON_POSITIVE", "SINGLE_FRAME_POSITIVE", "_MULTI_PERSON_CONJUNCTIONS", "_MULTI_PERSON_RELATION_NOUNS", "_MULTI_COUNT_PATTERNS", "_has_multi_person_conjunction", "_multi_person_signal", "build_reference_free_anchor", "build_identity_anchor", "build_single_person_anchor", "build_duo_person_anchor", "reference_guard", "build_secondary_role_anchor", "auto_reference_roles_positive"
 ]
 
 
@@ -58,6 +60,59 @@ GARMENT_RETENTION_POSITIVE = (
     "image, including outer layers such as cardigans, jackets and coats; do "
     "not remove, omit, drop or replace any garment, and do not add clothing "
     "that is not in the reference."
+)
+
+
+# ---------------------------------------------------------------------------
+# 슬롯-비의존 가드 조각 (2026-11-10)
+#
+# 왜(Why) 이 상수들이 따로 있나: 복제·군중 금지와 한 명 고정 문구는 **참조
+# 이미지를 지목하지 않는다**. 그래서 참조가 없어도 그대로 쓸 수 있는데,
+# 종전에는 참조 전용 함수(reference_guard·build_single_person_anchor)의 문 하나
+# (`image_count > 0`) 안에 묶여 있어 **참조가 없으면 같이 죽었다**. 그 결과
+# "한 명" 주제에 여러 사람을 막는 문구가 아예 안 나가 3명이 나왔다(실측).
+#
+# 참조 전용 조각(`SECONDARY_REF_NO_DUPLICATE`)만 "secondary references" 를
+# 지목하므로 참조 전용으로 남기고, 나머지는 상수로 뽑아 두 경로가 공유한다.
+# 문자열을 나눠도 합치면 **바이트 동일**이라 참조 경로의 동작은 안 바뀐다.
+NO_DUPLICATE_MAIN = (
+    "do not duplicate the main subject, face, body, outfit, product, or "
+    "background subject"
+)
+
+SECONDARY_REF_NO_DUPLICATE = (
+    "do not turn secondary references into extra people, animals, products, or "
+    "props unless explicitly requested"
+)
+
+NO_DUPLICATE_TAIL = (
+    "no cloned faces, no repeated bodies, no duplicated characters, "
+    "no crowd unless requested, no background people unless requested"
+)
+
+# 참조가 없어도 나가는 복제·군중 금지 (참조 전용 조각을 뺀 형태).
+NO_DUPLICATE_POSITIVE = f"{NO_DUPLICATE_MAIN}, {NO_DUPLICATE_TAIL}"
+
+# 한 명 고정 — 슬롯 지목이 없는 꼬리. 참조 버전(앞에 "using reference image N")
+# 과 꼬리를 공유해 복붙을 막는다.
+SINGLE_PERSON_TAIL = (
+    "Single-person composition. No additional person, copy, or mirrored "
+    "companion."
+)
+
+# 한 명 주제에서 참조 없이 나가는 한 명 고정 문구 (슬롯 지목 없음).
+SINGLE_PERSON_POSITIVE = (
+    "Exactly one main person in the output. " + SINGLE_PERSON_TAIL
+)
+
+# 한 화면 고정 — 출력이 콜라주·분할 패널로 나오는 것을 막는다 (2026-11-10 R260).
+# 왜(Why) 필요한가(사용자 실측): R258 로 "한 명 고정" 을 넣었는데도 같은 주제가
+# **3칸 콜라주**(같은 인물이 칸마다 반복)로 나왔다. 그 실행의 부정어에는
+# collage/panel/split 계열이 0건이었다. 그 문구는 9·10번 외양 참조 경로에만
+# 있어 일반 인물 경로엔 안 나갔다 — 여기서 참조 없이도 쓸 수 있는 조항으로 낸다.
+SINGLE_FRAME_POSITIVE = (
+    "A single full-frame image. Not a collage, not a multi-panel layout, "
+    "no split view or split screen."
 )
 
 
@@ -151,7 +206,133 @@ def build_single_person_anchor(image_count: int, topic: str, image_labels=None) 
         return ""
     first = str(plan["main"])
     return (f"Exactly one main person in the output, using reference image {first} as the only subject. "
-            "Single-person composition. No additional person, copy, or mirrored companion.")
+            + SINGLE_PERSON_TAIL)
+
+
+# 두 인물을 잇는 접속 표기. 영어는 앞뒤 공백으로 단어 경계를 대신한다
+# ("and" 가 다른 단어 안에서 잡히지 않게).
+_MULTI_PERSON_CONJUNCTIONS = (
+    " and ", " & ", " plus ", " with ",
+    "와 ", "과 ", "랑 ", "이랑 ", "하고 ", "그리고 ",
+)
+
+
+# 관계·역할 명사 (다인 판정 전용, 2026-11-10). 왜(Why) 공용
+# HUMAN_SUBJECT_KEYWORDS 에 안 넣나: 그 목록은 `_is_human_subject` 등 사람 가드
+# 12종이 함께 읽는다. 관계 명사를 거기 넣으면 "딸기"(딸)·"형광등"(형) 같은 사물
+# 주제가 사람으로 번질 위험이 다른 가드로 퍼진다. 여기서는 **접속 판정에서
+# 낱말을 세는 데만** 쓴다. 왜(Why) 필요한가(2026-11-10 실측): "여성과 딸"·
+# "a man and his son" 은 사람 낱말이 하나뿐이라 다인으로 안 잡혀, 한 명 주제가
+# 아닌데도 "Exactly one main person" 이 나갔다(정반대 지시).
+_MULTI_PERSON_RELATION_NOUNS = (
+    "son", "daughter", "mother", "father", "mom", "dad", "wife", "husband",
+    "sister", "brother", "friend", "friends", "colleague", "partner", "guy",
+    "guys", "cousin", "nephew", "niece", "parent", "parents", "sibling",
+    "siblings", "grandmother", "grandfather",
+    "딸", "아들", "어머니", "아버지", "엄마", "아빠", "아내", "남편", "부인",
+    "언니", "누나", "오빠", "형", "동생", "친구", "동료", "부모", "가족",
+)
+
+
+# 수량 + 사람 (다인 판정, 2026-11-10). 왜(Why) 필요한가: "three women"·
+# "세 명의 여성" 은 공용 MULTI_PERSON_KEYWORDS 의 "two women"/"두 명" 에 안 걸려
+# 한 명으로 오판됐다(실측). 수량 낱말이 **사람 낱말에 붙을 때만** 다인으로 본다 —
+# "두 그루 나무"·"two cats" 같은 사물 수량은 안 잡아 한 명 주제의 고정 문구를
+# 지키지 않는다.
+_MULTI_COUNT_PATTERNS = (
+    re.compile(
+        r"\b(?:two|three|four|five|six|seven|eight|nine|ten|[2-9]|\d{2,})\s+"
+        r"(?:women|men|people|persons|girls|boys|ladies|children|kids|"
+        r"characters|models|figures|adults|babies)\b", re.I),
+    re.compile(
+        r"(?:두|세|네|다섯|여섯|일곱|여덟|아홉|열|[2-9]|\d{2,})\s*(?:명|사람)"),
+)
+
+
+def _has_multi_person_conjunction(text: str) -> bool:
+    """접속 표기가 있고 **사람 낱말이 둘 이상**이면 True.
+
+    왜(Why) 사람 낱말 개수까지 보나: 접속만 보면 "a woman with a hat"·
+    "여성과 의자" 처럼 사람 하나 + 사물을 다인물로 오판한다. 오판하면 한 명
+    주제에 "혼자 아님" 전제를 만들 수 있어 낱말 수로 제한한다.
+
+    낱말은 공용 목록(HUMAN_SUBJECT_KEYWORDS)에 관계·역할 명사
+    (`_MULTI_PERSON_RELATION_NOUNS`)를 더해 센다. 왜(Why) 더하나(2026-11-10
+    실측): "여성과 딸"·"a man and his son" 은 관계 명사가 공용 목록에 없어
+    낱말이 하나로 세어져 다인을 놓쳤다 — 설계의 "확신 없으면 안 내는 쪽" 과
+    어긋났다. 새 공용 목록을 만들지 않고 여기서만 더해 파급을 막는다.
+    영문은 `_ascii_word_present` 로만 본다("men" 이 "women" 안에서, "man" 이
+    "woman" 안에서 잡히는 것을 막는다).
+    """
+    t = (text or "").lower()
+    if not any(c in t for c in _MULTI_PERSON_CONJUNCTIONS):
+        return False
+    words = set()
+    for kw in HUMAN_SUBJECT_KEYWORDS + _MULTI_PERSON_RELATION_NOUNS:
+        try:
+            if _ascii_only(kw):
+                if _ascii_word_present(t, kw):
+                    words.add(kw)
+            elif _ko_word_present(t, kw):
+                words.add(kw)
+        except Exception:  # noqa: BLE001
+            continue
+    return len(words) >= 2
+
+
+def _multi_person_signal(topic: str) -> bool:
+    """여러 명 신호가 하나라도 있으면 True. 판정 실패도 True(안전한 쪽).
+
+    왜(Why) 판정 실패를 True 로 두나: 이 함수는 "한 명 고정 문구를 낼지"만
+    가른다. 실패를 False 로 두면 다인물 주제에 "Exactly one person" 이 나가
+    **정반대 지시**가 된다. 그래서 못 미더우면 여러 명으로 본다.
+
+    왜(Why) 접속·수량까지 보나: 기존 `_is_multi_person_request` 는 "a woman and
+    a man" 같은 **관사형 접속**과 "three women"·"세 명의 여성" 같은 **수량+사람**
+    을 못 잡는다(실측 False). 그 구멍을 여기서 막는다.
+    """
+    t = topic or ""
+    try:
+        if _is_multi_person_request(t):
+            return True
+        if _is_second_person_request(t):
+            return True
+        if _is_reflection_scene(t):
+            return True
+        if any(p.search(t) for p in _MULTI_COUNT_PATTERNS):
+            return True
+    except Exception:  # noqa: BLE001
+        return True
+    return _has_multi_person_conjunction(t)
+
+
+def build_reference_free_anchor(image_count: int, topic: str = "") -> str:
+    """참조 이미지가 없어도 나가야 하는 슬롯-비의존 긍정 문구.
+
+    왜(Why) 필요한가 (2026-11-10 실측): 복제·군중 금지와 한 명 고정 문구는
+    참조를 지목하지 않아 참조 없이도 쓸 수 있는데, 참조 전용 함수
+    (reference_guard·build_single_person_anchor)의 `image_count > 0` 문 안에
+    묶여 있어 **참조가 없으면 같이 죽었다**. 그 결과 "한 명" 주제에 여러 사람을
+    막는 문구가 아예 안 나가 3명이 나왔다.
+
+    반환:
+      참조가 있으면 ""            — 참조 경로는 기존 함수가 담당한다(무변화).
+      사람 주제가 아니면 ""       — 사물·풍경에 "사람 복제 금지" 는 무의미하다.
+      그 외 → (a) 복제·군중 금지, 한 명 주제면 (b) 한 명 고정, 그리고 항상
+              (c) 한 화면 고정(콜라주·분할 패널 방지, 2026-11-10 R260).
+
+    (c) 는 한 명·여러 명 **모두**에 낸다 — 여러 명 장면도 콜라주로 쪼개지면
+    실패이므로, R258 의 (b)(여러 명에선 정반대라 제한)와 조건이 다르다.
+    """
+    if image_count and image_count > 0:
+        return ""
+    if not _is_human_subject(topic or ""):
+        return ""
+    parts = [NO_DUPLICATE_POSITIVE]
+    if not _multi_person_signal(topic or ""):
+        parts.append(SINGLE_PERSON_POSITIVE)
+    parts.append(SINGLE_FRAME_POSITIVE)
+    return " ".join(parts)
 
 
 def build_duo_person_anchor(image_count: int, topic: str, image_labels=None) -> str:
@@ -366,11 +547,7 @@ def reference_guard(image_count: int, image_labels=None, topic: str = "") -> str
                  "clothing or outfit, and never their pose unless it was "
                  "explicitly requested, ")
     return head + (
-        "do not duplicate the main subject, face, body, outfit, product, or background subject, "
-        "do not turn secondary references into extra people, animals, products, or props "
-        "unless explicitly requested, no cloned faces, no repeated bodies, "
-        "no duplicated characters, no crowd unless requested, "
-        "no background people unless requested"
+        f"{NO_DUPLICATE_MAIN}, {SECONDARY_REF_NO_DUPLICATE}, {NO_DUPLICATE_TAIL}"
     )
 
 

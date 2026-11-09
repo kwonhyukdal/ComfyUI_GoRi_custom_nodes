@@ -27,7 +27,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.93"
+__version__ = "1.9.94"
 
 
 import json
@@ -418,6 +418,11 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
             is_human = bool(_hint_person_slots())
         except Exception:  # noqa: BLE001
             pass
+    # 참조 없는 인물 경로인가 (2026-11-10, R261). 참조가 0장이고 주제가 사람일
+    # 때만 참이다. build_reference_free_anchor 와 **같은 판정**을 여기서 한 번
+    # 계산해 둔다 — 아래 여러 가드(지면·해부 압축·참조없음 긍정)가 이 한 값으로
+    # 갈리므로, 판정이 두 벌이 되어 어긋날 수 없다.
+    ref_free_human = (not image_count) and is_human
     labels = list(image_labels or [])
     # 왜(Why) 샷 인지 게이트가 필요한가 (2026-10-11 실측): 근접(CU)·극접(ECU)
     # 샷은 다리·발이 화면에 없다. 그런데 anatomy_count("두 다리, 발가락 5개")·
@@ -529,7 +534,7 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
                               and _bm is not None
                               and _bm <= SPACING_BOTTOM_CROP)
     grounding = ""
-    if not phys_pos and is_human:
+    if not phys_pos and is_human and not ref_free_human:
         grounding = physics_grounding_guard(text)
     # 지면 고정 (2026-10-15 실측, 파란 동그라미): 배경-참조 지정이면 피사체가
     # 딛은 지면도 그 참조여야 한다 — run10 에서 참조 배경(흙바닥)과 달리 바닥이
@@ -683,7 +688,12 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         # limb_integrity)을 압축 1조각으로 합친다. 조각이 하나도 안 켜진
         # 장면(예: 풍경)에는 넣지 않는다.
         if body_balance or detail_def or anatomy_count:
-            pos["body_balance"] = COMPACT_ANATOMY_POSITIVE
+            # 참조 없는 인물 경로는 숫자 열거 없는 압축본을 쓴다 (2026-11-10,
+            # R261). 열거("two arms, two legs, two feet...")가 누적 임계의
+            # 마지막 한 방울이었다 — 그 조각만으로도 9명이 나왔다(실측).
+            pos["body_balance"] = (REF_FREE_COMPACT_ANATOMY_POSITIVE
+                                   if ref_free_human
+                                   else COMPACT_ANATOMY_POSITIVE)
             pos["detail_def"] = ""
             pos["anatomy_count"] = ""
             pos["limb_integrity"] = ""
@@ -701,8 +711,42 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
         # 사용자가 명시한 요구라 그대로 둔다.
         if footwear and not footwear_bare and not footwear_change:
             pos["footwear"] = compact_footwear_guard(_footwear_slots(text))
+    # 참조 없이도 나가야 하는 문구 (2026-11-10). 왜(Why) 여기서 만드는가: 판정은
+    # 이 한 곳이고 run()·run_prompt() 는 이 조각을 합치기만 한다(위 docstring 의
+    # "판정 한 벌" 원칙). build_reference_free_anchor 는 참조가 있으면 "" 을
+    # 돌려주므로 참조 경로의 문구·순서는 **한 글자도 안 바뀐다**(무변화).
+    #
+    # 실사 질감(REALISM_TEXTURE_POSITIVE)은 종전에 참조 전용 함수
+    # (body_proportion_guard) 안에만 있어 참조가 없으면 안 나갔다. 사람 주제라
+    # 앵커가 나갈 때만 함께 낸다 — 풍경·사물에 피부 문구는 무의미하다.
+    _ref_free_anchor = build_reference_free_anchor(image_count, text)
+    # R261 (2026-11-10): 긍정문에는 **실사 질감만** 낸다. R258·R260 이 넣었던
+    # 복제·군중 금지 / 한 명 고정 / 한 화면 조항 세 문장은 여기서 **빼낸다**.
+    # 왜(Why) 빼는가(사용자 실측 + 렌더 12회): 그 세 문장이 가드 문장 누적을
+    # 임계 위로 밀어 같은 주제를 3칸 콜라주로 만들었다 — 실측으로 8문장까지
+    # 1명, 9문장부터 3명/3칸이었다. 세 문장의 **부정 twins**(복제·군중 금지,
+    # 패널·콜라주 금지)는 그대로 유지되므로 방어 자체는 남는다(아래
+    # ref_free_neg·ref_free_panel). _ref_free_anchor 는 이제 **게이트로만** 쓴다.
+    ref_free_pos = (REALISM_TEXTURE_POSITIVE if _ref_free_anchor else "")
+    # 복제 금지 negative 도 같은 게이트. 여러 명 주제에 "multiple people" 금지는
+    # **정반대 지시**이므로 _multi_person_signal 로 한 명 주제일 때만 낸다.
+    ref_free_neg = (list(NO_DUPLICATE_NEGATIVE)
+                    if (_ref_free_anchor
+                        and not _multi_person_signal(text))
+                    else [])
     return {
         "positive": pos,
+        "ref_free_pos": ref_free_pos,
+        "ref_free_neg": ref_free_neg,
+        # 패널·콜라주(한 화면 분할) 게이트 (2026-11-10 R260). 왜(Why) ref_free_neg
+        # 와 따로 두나: ref_free_neg 는 여러 명 주제에서 꺼진다("multiple people"
+        # 금지가 정반대라서). 패널 금지는 여러 명이어도 맞다 — 여러 명 장면이
+        # 콜라주로 쪼개져도 실패다. 그래서 사람·참조없음이면 **주제 수와 무관**하게
+        # 켠다(기준은 앵커의 유무 하나).
+        "ref_free_panel": bool(_ref_free_anchor),
+        # 참조 없는 인물 경로인가 (2026-11-10, R261). 호출부(run·run_prompt)가
+        # 긍정문 누적을 줄일 자리(스케일·품질)를 가르는 데 쓴다. 판정은 위 한 값.
+        "ref_free_human": ref_free_human,
         # negative 빌더는 플래그를 받는다. 문자열이 아니라 판정 결과.
         "flags": {
             "mix_guard": mix_guard,
@@ -1794,10 +1838,11 @@ class CameraDirector:
                                         steps=pf_steps, cfg=pf_cfg,
                                         denoise=pf_denoise):
             _log(f"[Camera Director] 출발 점검 ⚠ {_warn}")
-        positive = assemble(_scene_assembled, camera, image_count=image_count, topic=topic,
-                            image_labels=image_labels)
-        # 가드 판정은 resolve_guard_plan 한 곳에서. run() 과 run_prompt() 가
-        # 각자 반복하던 시대를 끝내고, 짝이 어긋날 수 없게 했다.
+        # 가드 판정 소스는 assemble **앞에서** 정한다 (2026-11-10, R261). 왜
+        # 앞인가: 참조 없는 인물 경로면 assemble 이 스케일·품질 가드를 빼야
+        # 하는데(문장 누적 임계), 그 판정이 주제 텍스트를 봐야 하기 때문이다.
+        # 값·식은 종전과 동일하다 — 위치만 올린다.
+        #
         # topic 칸 원문을 판정 소스에 합친다 (2026-10-25 F4). prompt_in 이
         # 연결돼 topic 칸이 출력에서 버려진 실행에서도, 그 칸에 적힌 슬롯·포즈
         # 지시는 가드 판정에 반영해야 한다 — 아래 declare 도 같은 취지다.
@@ -1806,6 +1851,14 @@ class CameraDirector:
         if external and _topic_field:
             _guard_src = _guard_src + " " + _topic_field
             _declared_topic = (_declared_topic + " " + _topic_field).strip()
+        # 참조 없는 인물 경로인가 (2026-11-10, R261). resolve_guard_plan 의
+        # ref_free_human 과 **같은 식**이다 — 참조 0장 + 사람 주제.
+        _ref_free_human_pre = (not image_count) and _is_human_subject(_guard_src)
+        positive = assemble(_scene_assembled, camera, image_count=image_count, topic=topic,
+                            image_labels=image_labels,
+                            ref_free_compact=_ref_free_human_pre)
+        # 가드 판정은 resolve_guard_plan 한 곳에서. run() 과 run_prompt() 가
+        # 각자 반복하던 시대를 끝내고, 짝이 어긋날 수 없게 했다.
         _plan = resolve_guard_plan(
             _guard_src, camera, image_count,
             image_labels, reference_items, primary_image, reference_images,
@@ -2034,6 +2087,13 @@ class CameraDirector:
             positive = positive.rstrip(". ") + ". " + _gpos["ground"] + "."
             _log("[Camera Director] 배경 지면 고정 가드 활성 (참조 지면으로 "
                  "통일 + 콘크리트/실내 매끈 바닥 방어 + 바닥을 배경으로 세우지 않음)")
+        # 참조 없이도 나가는 복제·군중 금지 + 한 명 고정 + 실사 질감 (2026-11-10).
+        # 계획(plan)이 낸 조각을 꼬리에 붙인다 — run_prompt 도 같은 조각을 붙여
+        # 두 경로가 갈리지 않는다. 참조가 있으면 빈 문자열이라 무동작(무변화).
+        if _plan["ref_free_pos"]:
+            positive = positive.rstrip(". ") + ". " + _plan["ref_free_pos"] + "."
+            _log("[Camera Director] 참조 없음 — 복제·군중 금지/한 명 고정/실사 "
+                 "질감 문구를 반영 (참조 전용 함수 밖으로 꺼냄)")
         # hint_defense/mix_guard/body_balance 는 _last_guard_plan 안에 있다.
         # 개별로 저장하면 plan 과 값이 어긋날 수 있고(그러면 짝인 negative 가
         # 사라진다), 읽는 곳도 plan 이므로 중복이다.
@@ -2096,7 +2156,13 @@ class CameraDirector:
                                             "garment_boundary_upper")),
                                    hand_placement=bool(
                                        _plan["flags"].get("hand_placement")),
-                                   seat=bool(_plan["flags"].get("seat")))
+                                   seat=bool(_plan["flags"].get("seat")),
+                                   # 참조 없음 + 한 명 주제면 복제 금지 negative
+                                   # (2026-11-10). 계획이 낸 조각의 유무를 그대로
+                                   # 플래그로 넘겨 run_prompt 와 같은 조각을 쓴다.
+                                   prevent_duplicates=bool(
+                                       _plan["ref_free_neg"]),
+                                   panel_guard=bool(_plan["ref_free_panel"]))
         # 정면 응시 회피어 (2026-10-15) — positive 보강문과 짝이다.
         # 한쪽만 붙으면 방어가 조용히 사라진다 (같은 이음새 결함 실측 다수).
         if _gaze_neg:
@@ -3106,7 +3172,8 @@ class CameraDirectorEncode(CameraDirector):
             # 다른 가드(민족·동물·포즈)와 같은 _eth_text_pi 다 — 2026-10-16
             # 감사: 예전 `external_prompt or topic` 은 prompt_in 연결 시
             # topic 의 인물 표기를 못 보아 판정이 꺼질 수 있었다.)
-            if _needs_scale_guard(_eth_text_pi, camera):
+            if (_needs_scale_guard(_eth_text_pi, camera)
+                    and not _plan_pi.get("ref_free_human")):
                 positive_text = self._combine_prompt_text(positive_text,
                                                           SCALE_COHERENCE_POSITIVE)
             # 국가 표현형 가드도 prompt_in 경로에 병합한다.
@@ -3153,8 +3220,26 @@ class CameraDirectorEncode(CameraDirector):
             # 2026-10-07 감사). 주제에 맞는 상수는 quality_guard_text 한 곳이
             # 고른다 (사람 / 동물 전용 / 비인간 장면 — 2026-10-25 감사 통합).
             # add_quality_guard 와 **같은 함수**를 써서 두 경로가 갈리지 않는다.
+            # 참조 없는 인물 경로에서는 뺀다 (2026-11-10, R261) — assemble 과
+            # 같은 이유(문장 누적 임계). 판정은 plan 하나(base run 과 동일).
+            if not _plan_pi.get("ref_free_human"):
+                positive_text = self._combine_prompt_text(
+                    positive_text, quality_guard_text(_eth_text_pi))
+        # 참조 없이도 나가는 복제·군중 금지 + 한 명 고정 + 실사 질감 (2026-11-10).
+        # base run() 과 **같은 plan 조각**을 쓴다. prompt_in/standalone 두 분기가
+        # 여기서 합류하므로 한 번만 붙이면 양쪽이 받는다. 참조가 있으면 빈
+        # 문자열이라 무동작(무변화).
+        #
+        # 왜(Why) 부분문자열 검사가 필요한가: standalone 분기는 positive_text =
+        # prompt_out 이고, 그 prompt_out 은 base run() 이 이미 ref_free_pos 를
+        # 붙인 문자열이다. 검사 없이 또 붙이면 같은 문구가 두 번 들어간다.
+        # prompt_in 분기는 앵커로 문장을 다시 세우므로 그 조각이 없어 여기서 붙는다.
+        if (_plan_pi["ref_free_pos"]
+                and _plan_pi["ref_free_pos"].lower() not in positive_text.lower()):
             positive_text = self._combine_prompt_text(
-                positive_text, quality_guard_text(_eth_text_pi))
+                positive_text, _plan_pi["ref_free_pos"])
+            _log("[Camera Director] 참조 없음 — 복제·군중 금지/한 명 고정/실사 "
+                 "질감 문구를 반영 (참조 전용 함수 밖으로 꺼냄)")
         # LLM 의상 서술을 최종 문장에 반영한다 (2026-10-25, AC-2).
         # 왜(Why) 여기가 유일한 자리인가: prompt_in 이 연결되면 base run 이 만든
         # LLM 장면(prompt_out)은 이 함수에서 버려지고(위 분기), 이 노드는 앵커로
@@ -3171,7 +3256,12 @@ class CameraDirectorEncode(CameraDirector):
                     positive_text, "wearing " + _llm_outfit_pi)
                 _log("[Camera Director] LLM 의상 서술을 프롬프트에 반영 ("
                      + str(len(_llm_outfit_pi)) + "자)")
-        prevent_duplicates = bool(single_person_anchor) if external_prompt else False
+        # 종전엔 single_person_anchor 가 있을 때(=참조 있음)만 True 라 참조가
+        # 없으면 복제 금지어가 불가능했다. 계획의 참조-없음 판정(ref_free_neg)을
+        # 더해 두 경로가 같은 조각을 낸다 (2026-11-10).
+        prevent_duplicates = ((bool(single_person_anchor) if external_prompt
+                               else False)
+                              or bool(_plan_pi["ref_free_neg"]))
         # negative도 positive와 **같은 텍스트 소스**를 본다 (topic + prompt_in).
         # 왜(Why): 이음새가 어긋나면 positive에 붙은 지시의 짝인 negative가
         # 조용히 사라진다 — 실측으로 국가 표현형(브라질)·동물 가드에서 확인됨.
@@ -3215,6 +3305,9 @@ class CameraDirectorEncode(CameraDirector):
                 _plan_pi["flags"].get("garment_boundary_upper")),
             hand_placement=_hand_place_pi,
             seat=bool(_gpos_pi.get("seat")),
+            # 참조 없음 인물이면 패널·콜라주 방어 (2026-11-10 R260) — base run()
+            # 과 **같은 plan 조각**을 쓴다. 참조가 있으면 plan 이 False.
+            panel_guard=bool(_plan_pi["ref_free_panel"]),
             aspect_ratio=_aspect_ratio_pi)
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
