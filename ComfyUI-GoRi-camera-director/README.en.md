@@ -350,6 +350,18 @@ With many constraints the model satisfies **only some** of them, and which one i
 drops changes from run to run. So **fix the seed** and edit the sentence. Picking
 a lucky image by changing seeds is not reproducible.
 
+**Seeds that work well on the Moss model**
+
+```
+4096   5500   3500   6500   8888   1500   900
+```
+
+These seeds gave good people and framing on Moss-family image models. A different
+model gives a different result at the same seed, so this list is for **Moss**.
+
+> Fingers come out well on some seeds and not on others. If a hand looks wrong,
+> re-rolling with another seed from this list is the surest fix.
+
 > Guards **raise the odds; they do not guarantee.** If what you named does not come
 > out, add one more of the five items above. Console logs and `prompt_out` show
 > what was attached.
