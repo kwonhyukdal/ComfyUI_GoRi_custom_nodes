@@ -53,7 +53,9 @@ __all__ = [
     "COMPACT_ANATOMY_POSITIVE", "REF_FREE_COMPACT_ANATOMY_POSITIVE",
     "COMPACT_FOOTWEAR_POSITIVE",
     "COMPACT_FOOTWEAR_POSITIVE_SLOT", "COMPACT_BOUNDARY_POSITIVE",
-    "compact_footwear_guard"
+    "compact_footwear_guard",
+    "REF_FREE_ACCESSORY_NEGATIVE", "REF_FREE_GARMENT_INTEGRITY_NEGATIVE",
+    "REF_FREE_GARMENT_INTEGRITY_NEGATIVE_UPPER", "topic_requests_bag"
 ]
 
 
@@ -153,6 +155,77 @@ NO_DUPLICATE_NEGATIVE = (
 PANEL_COLLAGE_NEGATIVE = (
     "collage", "inset panel", "split view", "split screen", "duplicated crop",
 )
+
+
+# ── 참조 없는 인물 전용 부정문 (2026-11-10, R264) ────────────────────────────
+# 왜(Why) 이 라운드가 필요한가: 사용자가 주제 "30대 한국 여성은 ... 한 손에는
+# 양산을 들고 예쁜 잔디가 있는 공원을 산책하고 있다." 를 참조 0장으로 넣었는데
+# 결과물에 주제에 없는 가방(분홍 숄더백)이 생겼다. 그 실행을 코드로 재구성하니
+# 부정문에 handbag·purse·pouch·bag 조항이 **0건**이었다.
+#
+# 두 번째 결함: 같은 실행에서 팔·손·다리·발이 옷과 한 덩어리로 합쳐지거나 옷을
+# 뚫고 나왔다. 기존 의복 경계 가드(GARMENT_BOUNDARY)가 그 경우를 덮지만 게이트가
+# `image_count >= 1` 이라 **참조 0장이면 꺼진다**(실측: garment_boundary=False).
+#
+# 고치는 방향(후보 A): 두 결함을 참조-없음 인물 경로에만 새 부정 상수로 넣는다.
+# 왜(Why) 기존 GARMENT_BOUNDARY 를 안 넓히나: 참조 경로는 "문구 무변화" 계약이
+# R139·R240 으로 잠겨 있고, 참조없음 긍정문은 R261 실측(문장 9개째 3칸 콜라주)
+# 때문에 문장을 늘릴 수 없다. 새 상수 + 참조없음 게이트 = 참조 경로에 구조적으로
+# 닿지 않는다(바이트 동일이 증명 가능).
+#
+# 왜(Why) 부정문 전용인가: 긍정문 문장을 늘리면 콜라주 임계를 밟는다. 사용자
+# 워크플로는 cfg=3.0 이라 부정문이 실제로 작동한다(노드 경고: cfg=1.0 에서만 무효).
+#
+# ★ 사용자가 명시한 소품은 반드시 나온다 ★ — 아래 ACCESSORY 조항에 담긴 낱말은
+# **가방류뿐**이다. 그래서 양산·컵·책·꽃다발·모자 같은 요청 소품은 조항에 이름이
+# 없어 구조적으로 막히지 않고, 주제에 가방류가 있으면(topic_requests_bag) 조항
+# 자체를 끈다. "명시하면 반영" 원칙을 게이트로 보장한다.
+REF_FREE_ACCESSORY_NEGATIVE = (
+    "extra accessory, invented handbag, shoulder bag with a strap across the "
+    "chest, crossbody bag, purse, pouch, tote bag, satchel, backpack worn on the "
+    "body, bag strap over the shoulder, added prop not requested"
+)
+
+
+REF_FREE_GARMENT_INTEGRITY_NEGATIVE = (
+    "arm merged with clothing, hand and sleeve becoming one shape, leg merging "
+    "into the skirt, foot fused into the dress, limb clipping through the fabric, "
+    "garment outline passing through an arm or leg, clothing intersecting the "
+    "body, fabric fused to the skin, cloth cutting across a limb"
+)
+
+
+REF_FREE_GARMENT_INTEGRITY_NEGATIVE_UPPER = (
+    "arm merged with clothing, hand and sleeve becoming one shape, wrist fused "
+    "into the fabric, limb clipping through the fabric, garment outline passing "
+    "through an arm, clothing intersecting the body, fabric fused to the skin"
+)
+
+
+# 가방류 판정용 낱말. 왜(Why) 목록이 좁은가: 오탐이 규칙 수보다 중요하다. 넓히면
+# 사용자가 좋아하는 잔소품까지 사라지고, 좁히면 이번 실패(가방)를 놓친다. 그래서
+# "들고 다니는 가방류"만 넣는다. 모자·스카프·안경·목걸이는 넣지 않는다(사용자 결정).
+_BAG_WORDS_KO = ("가방", "핸드백", "백팩", "숄더백", "클러치백", "에코백",
+                 "토트백", "파우치")
+_BAG_WORDS_EN = ("bag", "handbag", "backpack", "purse", "pouch", "tote",
+                 "satchel", "clutch")
+
+
+def topic_requests_bag(text: str) -> bool:
+    """주제가 가방류 소품을 요청했는가. 요청했으면 가방 금지 조항을 끈다.
+
+    경계 판정을 쓴다 — `_ko_word_present` 는 "고양이/태양" 속 "양" 을 잡지 않고,
+    `_ascii_word_present` 는 "baggy" 속 "bag" 을 잡지 않는다. 부분 문자열로 판정하면
+    "a baggy dress" 를 가방 요청으로 오인해 방어가 조용히 꺼진다.
+    """
+    t = text or ""
+    for kw in _BAG_WORDS_KO:
+        if _ko_word_present(t, kw):
+            return True
+    for kw in _BAG_WORDS_EN:
+        if _ascii_word_present(t, kw):
+            return True
+    return False
 
 
 NEGATIVE_ANATOMY_GUARD = (
@@ -2068,6 +2141,15 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
     # 플래그는 참조-없음 인물 경로에서만 plan 이 켠다.
     if panel_guard:
         neg.extend(PANEL_COLLAGE_NEGATIVE)
+    # 참조 없는 인물 전용 — 지어낸 가방 방어 + 사지-의복 분리 방어 (2026-11-10, R264).
+    # 게이트는 plan 이 소유한다(참조 0장 인물). 여기서는 플래그만 본다 —
+    # 빌더 하나에서 두 경로(base/Skills)가 같은 조항을 얻는다.
+    if flags.get("ref_free_accessory"):
+        neg.append(REF_FREE_ACCESSORY_NEGATIVE)
+    if flags.get("ref_free_garment_integrity"):
+        neg.append(REF_FREE_GARMENT_INTEGRITY_NEGATIVE_UPPER
+                   if flags.get("ref_free_garment_integrity_upper")
+                   else REF_FREE_GARMENT_INTEGRITY_NEGATIVE)
     for src in extras:
         if src and src.strip():
             neg.append(src.strip())
@@ -2096,6 +2178,9 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
                           hand_placement: bool = False,
                           seat: bool = False,
                           panel_guard: bool = False,
+                          ref_free_accessory: bool = False,
+                          ref_free_garment_integrity: bool = False,
+                          ref_free_garment_integrity_upper: bool = False,
                           aspect_ratio: float = None) -> str:
     """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
     return _assemble_negative(
@@ -2113,6 +2198,9 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
          "body_object_boundary_upper": body_object_boundary_upper,
          "garment_boundary": garment_boundary,
          "garment_boundary_upper": garment_boundary_upper,
+         "ref_free_accessory": ref_free_accessory,
+         "ref_free_garment_integrity": ref_free_garment_integrity,
+         "ref_free_garment_integrity_upper": ref_free_garment_integrity_upper,
          "hand_placement": hand_placement, "seat": seat},
         "unwanted color cast", physics_neg=physics_neg, pose_ref=pose_ref,
         prevent_duplicates=prevent_duplicates,
@@ -2823,7 +2911,10 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
                    seat: bool = False,
                    sheet_kind: str = "",
                    prevent_duplicates: bool = False,
-                   panel_guard: bool = False) -> str:
+                   panel_guard: bool = False,
+                   ref_free_accessory: bool = False,
+                   ref_free_garment_integrity: bool = False,
+                   ref_free_garment_integrity_upper: bool = False) -> str:
     # 힌트·믹스·외양·발란스 방어는 base 경로 전용이라 조립기가 아니라
     # 여기서 덧붙인다(중복이 아니라 경로별 전용).
     #
@@ -2856,6 +2947,9 @@ def build_negative(cam: dict, extra: str = "", llm_extra: str = "", topic: str =
          "body_object_boundary_upper": body_object_boundary_upper,
          "garment_boundary": garment_boundary,
          "garment_boundary_upper": garment_boundary_upper,
+         "ref_free_accessory": ref_free_accessory,
+         "ref_free_garment_integrity": ref_free_garment_integrity,
+         "ref_free_garment_integrity_upper": ref_free_garment_integrity_upper,
          "hand_placement": hand_placement, "seat": seat},
         "color tint", extras=tuple(tail) + (llm_extra, extra),
         physics_neg=physics_neg, pose_ref=pose_ref,

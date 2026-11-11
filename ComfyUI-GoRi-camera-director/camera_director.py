@@ -27,7 +27,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.94"
+__version__ = "1.9.95"
 
 
 import json
@@ -460,6 +460,16 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
     # 전용). 가구 경계와 **같은 게이트**를 쓴다 — 인물 + 참조 실행. 게이트를
     # 넓히면 다른 경로의 문구가 함께 늘어나므로 기존 계약 범위로 시작한다.
     garment_boundary = is_human and image_count >= 1
+    # 참조 없는 인물 전용 — 지어낸 가방 방어 + 사지-의복 분리 방어 (2026-11-10, R264).
+    # 왜(Why) 기존 garment_boundary 를 안 넓히나: 그 게이트를 `is_human` 으로 넓히면
+    # 참조 실행의 문구까지 바뀌어 "참조 경로 무변화" 계약(R139·R240)을 흔든다.
+    # 참조-없음 전용 플래그로 갈라 참조 경로에 구조적으로 닿지 않게 한다.
+    #
+    # 가방 조항은 **주제에 가방류가 없을 때만** 켠다 — 사용자가 "가방을 든 여성" 처럼
+    # 명시하면 그 조항을 끄고 요청한 가방이 나오게 한다(최상위 원칙: 명시하면 반영).
+    # 사지-의복 조항은 참조없음 인물이면 켜고, CU/ECU 면 upper 변형(없는 다리·발 문구 제외).
+    ref_free_accessory = ref_free_human and not topic_requests_bag(text)
+    ref_free_garment_integrity = ref_free_human
     # 손 배치 (2026-10-24 실측, R220): 앉아서 "양 손을 무릎에" 올린 장면에서
     # 두 손이 겹쳐 한 덩어리로 합쳐지고 손가락이 서로 넘어갔다. 손 계열 문구가
     # 전부 "한 손 안에서 손가락 다섯 개·경계 분리" 라 **두 손 사이**를 덮는 문구가
@@ -763,6 +773,10 @@ def resolve_guard_plan(subject_text, _camera, image_count, image_labels,
                                            and not _limb_visible),
             "garment_boundary": garment_boundary,
             "garment_boundary_upper": (garment_boundary and not _limb_visible),
+            "ref_free_accessory": ref_free_accessory,
+            "ref_free_garment_integrity": ref_free_garment_integrity,
+            "ref_free_garment_integrity_upper": (ref_free_garment_integrity
+                                                 and not _limb_visible),
             "hand_placement": bool(hand_placement),
             "hint_defense": hint_defense,
             "remove_item": bool(remove_item),
@@ -2162,7 +2176,19 @@ class CameraDirector:
                                    # 플래그로 넘겨 run_prompt 와 같은 조각을 쓴다.
                                    prevent_duplicates=bool(
                                        _plan["ref_free_neg"]),
-                                   panel_guard=bool(_plan["ref_free_panel"]))
+                                   panel_guard=bool(_plan["ref_free_panel"]),
+                                   # 참조 없는 인물 전용 — 지어낸 가방 + 사지-의복
+                                   # 분리 (2026-11-10, R264). plan 판정을 그대로
+                                   # 넘겨 run_prompt 와 같은 조항을 쓴다. 참조가
+                                   # 있으면 모두 False 라 무동작(참조 경로 무변화).
+                                   ref_free_accessory=bool(
+                                       _plan["flags"].get("ref_free_accessory")),
+                                   ref_free_garment_integrity=bool(
+                                       _plan["flags"].get(
+                                           "ref_free_garment_integrity")),
+                                   ref_free_garment_integrity_upper=bool(
+                                       _plan["flags"].get(
+                                           "ref_free_garment_integrity_upper")))
         # 정면 응시 회피어 (2026-10-15) — positive 보강문과 짝이다.
         # 한쪽만 붙으면 방어가 조용히 사라진다 (같은 이음새 결함 실측 다수).
         if _gaze_neg:
@@ -3308,6 +3334,14 @@ class CameraDirectorEncode(CameraDirector):
             # 참조 없음 인물이면 패널·콜라주 방어 (2026-11-10 R260) — base run()
             # 과 **같은 plan 조각**을 쓴다. 참조가 있으면 plan 이 False.
             panel_guard=bool(_plan_pi["ref_free_panel"]),
+            # 참조 없는 인물 전용 — 지어낸 가방 + 사지-의복 분리 (2026-11-10, R264).
+            # base run() 과 같은 plan 플래그를 쓴다. 참조가 있으면 모두 False.
+            ref_free_accessory=bool(
+                _plan_pi["flags"].get("ref_free_accessory")),
+            ref_free_garment_integrity=bool(
+                _plan_pi["flags"].get("ref_free_garment_integrity")),
+            ref_free_garment_integrity_upper=bool(
+                _plan_pi["flags"].get("ref_free_garment_integrity_upper")),
             aspect_ratio=_aspect_ratio_pi)
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
