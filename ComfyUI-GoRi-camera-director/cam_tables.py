@@ -10,7 +10,7 @@ except ImportError:  # 스탠드얼론/테스트 실행용
 
 
 __all__ = [
-"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clauses", "split_multi", "has_any_label", "normalize_multi_value", "grade_clauses", "build_clauses", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning", "_ANALYSIS_MAX_SIDE", "_analysis_downscale"
+"PRESETS", "KEYWORDS", "AUTO", "CUSTOM", "SHOT", "TOPIC_SHOT_PHRASES", "_longest_shot_label", "LENS", "ANGLE", "COMPOSITION", "LIGHTING", "GRADE", "MOTION", "SPEED", "AMPLITUDE", "DEFAULTS", "_TABLES", "preset_names", "topic_shot_label", "rules", "FRAMING_LIGHTING_RULES", "apply_framing_lighting", "resolve_rules_camera", "_motion_clauses", "split_multi", "has_any_label", "normalize_multi_value", "grade_clauses", "build_clauses", "VIDEO_MOTION_POSITIVE", "STILL_MOMENT_POSITIVE", "image_metrics", "object_color_name", "_OBJECT_COLOR_PALETTE", "_reference_lighting_flow", "_lighting_clash", "apply_image_hints", "build_camera_conditioning", "_ANALYSIS_MAX_SIDE", "_analysis_downscale"
 ]
 
 
@@ -711,8 +711,22 @@ def _label_clauses(cam: dict, key: str, table: dict) -> list:
     return [table.get(v, "") for v in split_multi(cam.get(key))]
 
 
+# 파이프라인별 모션 조항 (2026-11-11, R272). 왜(Why) 카메라 절에 두나:
+# `build_clauses` 는 두 경로(base `assemble` · Skills `build_camera_conditioning`)
+# 가 **같은 함수**를 지나는 유일한 지점이라 영상/이미지가 갈리지 않는다.
+# 쉼표 절로 붙어 **문장 수가 늘지 않는다** — R261 실측(가드 문장 9개째에 참조
+# 없는 인물이 3칸 콜라주로 붕괴)의 위험을 사지 않기 위해서다.
+# 창작 금지 경계를 지킨다: 어느 조항도 새 사물·인물·장소를 지어내지 않고,
+# 주제가 말한 장면이 **어떻게 담기는가**(정지 한 순간 / 시간 흐름)만 말한다.
+VIDEO_MOTION_POSITIVE = (
+    "continuous natural motion throughout the shot, movement reading fluently "
+    "from frame to frame, believable momentum, no frozen or stuttering motion")
+STILL_MOMENT_POSITIVE = (
+    "captured at one decisive natural moment, sharp resolved detail")
+
+
 # 카메라 dict → 영문 절 목록 (샷/렌즈/앵글/구도/조명/무브), 중복 문구 제거
-def build_clauses(cam: dict) -> list:
+def build_clauses(cam: dict, is_video=None) -> list:
     parts = []
     parts.extend(_label_clauses(cam, "shot", SHOT))
     parts.extend(_label_clauses(cam, "lens", LENS))
@@ -726,6 +740,12 @@ def build_clauses(cam: dict) -> list:
     for p in parts:
         if p and p not in out:
             out.append(p)
+    # 파이프라인별 모션 조항 (R272). is_video=None 은 "판정 불명" 이라 넣지
+    # 않는다 — 기본 호출(테스트·직접 호출)의 동작을 한 글자도 바꾸지 않는다.
+    if is_video is True and VIDEO_MOTION_POSITIVE not in out:
+        out.append(VIDEO_MOTION_POSITIVE)
+    elif is_video is False and STILL_MOMENT_POSITIVE not in out:
+        out.append(STILL_MOMENT_POSITIVE)
     return out
 
 
@@ -740,12 +760,16 @@ def grade_clauses(cam: dict) -> str:
         g for g in (GRADE.get(v, "") for v in split_multi(cam.get("grade"))) if g)
 
 
-def build_camera_conditioning(cam: dict) -> str:
+def build_camera_conditioning(cam: dict, is_video=None) -> str:
     """Build only the camera direction used by the public conditioning node.
 
     This intentionally excludes scene identity, anatomy, skin, outfit, and
     quality guard text. The public conditioning path combines it with an
     upstream prompt string before a single final CLIP encode.
+
+    is_video (2026-11-11, R272): 하류가 영상인가. build_clauses 로 그대로
+    전달해 영상/이미지별 모션 조항이 이 경로에도 붙게 한다 (base 경로와
+    같은 함수를 지나므로 두 경로가 갈리지 않는다). None 이면 종전과 동일.
     """
-    parts = [", ".join(build_clauses(cam)), grade_clauses(cam)]
+    parts = [", ".join(build_clauses(cam, is_video=is_video)), grade_clauses(cam)]
     return ". ".join(part for part in parts if part) + "."

@@ -503,11 +503,16 @@ ANIMAL_SUBJECT_KEYWORDS = (
 )
 
 
-# 동물 낱말이지만 **사람 신체**로도 쓰는 표기 (2026-10-25 감사 F2).
-# 왜(Why) 필요한가: "calf" 는 새끼 소이자 종아리 근육이다. "the runner's
-# calf muscles" 를 동물 장면으로 보면 사람 장면에 동물 가드가 붙는다.
-# 뒤에 muscle 이 붙은 표기만 가린다("a calf in the meadow" 는 그대로 동물).
-_ANIMAL_FALSE_FRIEND_RE = re.compile(r"\b(?:calf|calves)\s+muscles?\b")
+# 동물 낱말이지만 **사람 신체**이거나 **식물**인 표기 (2026-10-25 감사 F2,
+# 2026-11-11 R269 확장).
+# 왜(Why) 필요한가: "calf" 는 새끼 소이자 종아리 근육이고, "snake" 는 뱀이자
+# 뱀선인장이다. "the runner's calf muscles" 를 동물 장면으로 보면 사람 장면에
+# 동물 가드가 붙고, "a snake plant in a ceramic pot"(식물)도 동물로 판정됐다
+# (실측 animal=True). 관찰된 형태만 가린다 — "a calf in the meadow",
+# "a snake in the grass" 는 그대로 동물이다.
+_ANIMAL_FALSE_FRIEND_RE = re.compile(
+    r"\b(?:calf|calves)\s+muscles?\b"
+    r"|\bsnake\s+plants?\b")
 
 
 def _mask_animal_false_friends(text: str) -> str:

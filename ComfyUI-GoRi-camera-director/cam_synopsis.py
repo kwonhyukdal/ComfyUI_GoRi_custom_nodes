@@ -35,7 +35,35 @@ __all__ = [
     "structure_ko_synopsis",
     "_extract_hints",
     "_en_normalize",
+    "_join_translated",
 ]
+
+
+def _join_translated(parts) -> str:
+    """문장별 번역 조각을 **문장 경계를 보존해** 이어 붙인다 (R272).
+
+    왜(Why) 공백 하나로 이으면 안 되나 (2026-11-11 실측): 종전 `" ".join(...)`
+    은 조각 사이에 마침표를 만들지 않아 두 문장이 한 문장으로 붙었다.
+    실측 출력(`여성이 ... 걸어간다. 파도가 ... 밀려온다.` 규칙 tier):
+
+        "Woman walks slowly with hair scattered on the beach The waves
+         are coming down."
+
+    조각 끝의 종결 부호를 정리하고 ". " 로 이어 경계를 명시한다. 그래야
+    모델이 문장 경계를 읽고, 문장 중간 대문자("...beach The...")도 사라진다.
+    마지막 조각의 마침표는 붙이지 않는다 — 호출부(assemble)가 정리를 맡는다.
+    """
+    clean = []
+    for p in parts:
+        p = (p or "").strip()
+        if not p:
+            continue
+        p = p.rstrip(" .,;:…")
+        if p:
+            clean.append(p)
+    if not clean:
+        return ""
+    return ". ".join(clean)
 
 
 # tc-big 가 도메인어를 로마자화하는 경우를 보정하는 경량 사전 (아이템1: 번역 품질).
@@ -152,7 +180,7 @@ def structure_ko_synopsis(text, translate=translate_ko_to_en) -> dict:
         else:
             # 번역 실패 → 원문 유지(폴백). 전체 장면이 누락되지 않게 한다.
             translated.append(s)
-    scene_en = " ".join(x for x in translated if x).strip()
+    scene_en = _join_translated(translated)
     if not scene_en:
         scene_en = raw
     out["scene_en"] = scene_en

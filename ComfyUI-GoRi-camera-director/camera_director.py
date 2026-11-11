@@ -27,7 +27,7 @@ from __future__ import annotations
 # __version__ 을 둔다 (test_pack.py 가 강제한다).
 # 버전 상수는 **이 한 곳에만** 둔다 (2026-10-07 라운드 2): 이 파일에 같은
 # 값이 두 번 대입돼 있었고, 갱신 때 한쪽만 올리면 어긋난 채로 배포된다.
-__version__ = "1.9.95"
+__version__ = "1.9.103"
 
 
 import json
@@ -197,10 +197,9 @@ def preflight_warnings(_topic: str, camera: dict, latent_mp=None,
             # comfy/samplers.py 는 math.isclose(cond_scale, 1.0) 이면 uncond_=None
             # 으로 두고 negative conditioning 을 **계산조차 하지 않는다.** 그러면
             # 이 노드가 내보내는 negative 가 통째로 사라진다 — 부위 개수
-            # (ANATOMY_COUNT_NEGATIVE 의 "extra feet/third leg"), 위험 비율 다리
-            # 복제 에스컬레이션(ASPECT_LEG_DUPLICATION_NEGATIVE), 물리·접촉까지.
+            # (ANATOMY_COUNT_NEGATIVE 의 "extra feet/third leg"), 물리·접촉까지.
             # 사용자 제보("자동 프리셋에서 다리 3개", 848x1232=0.688, cfg=1.0)가
-            # 정확히 이 상태였다: 에스컬레이션은 켜졌는데 채널이 죽어 무효였다.
+            # 정확히 이 상태였다: 이 노드의 negative 가드가 켜져 있어도 채널이 죽어 무효였다.
             # 노드는 denoise=1.0 은 경고하면서 cfg=1.0 은 침묵했고, 사용자는
             # negative 가드가 살아 있다고 믿었다. 그 믿음을 깬다.
             # 저스텝(<=12)이면 증류 스케줄이라 cfg=1.0 이 의도된 정상값이고 올리면
@@ -208,7 +207,7 @@ def preflight_warnings(_topic: str, camera: dict, latent_mp=None,
             msgs.append(
                 f"cfg={cfg} — ComfyUI 기본 경로는 cfg 가 1.0 이면 uncond 를 계산하지 않아 "
                 "negative conditioning 이 통째로 무효입니다. 이 노드의 negative "
-                "가드(부위 개수·다리 복제·여분 발·접촉)가 생성에 전달되지 않고 "
+                "가드(부위 개수·여분 발·접촉)가 생성에 전달되지 않고 "
                 "positive 가드만 방어합니다. negative 를 쓰려면 cfg 2.0~4.0 을 "
                 "권장합니다 — 단 일부 환경은 1.0 초과에서 샘플러가 크래시하므로"
                 "(실측 2026-10-13: aimdo malloc_graph_pop NULL) 그때는 런처에 "
@@ -1028,6 +1027,15 @@ class CameraDirector:
         # 규칙/LLM 이 채운다). 값이 비거나 알 수 없으면 규칙(auto) 이 기본이다.
         tier = "llm" if "llm" in low_a else "auto"
 
+        # 하류 파이프라인 판정 (2026-11-11, R272). 여기서 **한 번만** 계산해
+        # 세 곳이 같은 값을 쓴다: ① LLM user 메시지(영상이면 시간 흐름 묘사를
+        # 지시 — D1), ② 정지 이미지의 무빙 제거 게이팅(:1626), ③ 조항 조립
+        # (assemble·build_camera_conditioning 의 영상/이미지 모션 조항 — D2/D3).
+        # 왜(Why) LLM 호출보다 위로 올렸나: 종전엔 LLM 호출(:1440) **뒤**에서
+        # 계산해서 LLM 이 자기가 영상을 만드는지조차 몰랐다(실측). 판정은
+        # prompt 그래프의 비디오 표식으로 하고, 불명은 이미지로 본다(안전 기본).
+        is_video = detect_video_pipeline(prompt)
+
         widget_pairs = [("shot", shot), ("lens", lens), ("angle", angle),
                         ("composition", composition), ("lighting", lighting),
                         ("grade", grade), ("motion", motion),
@@ -1438,7 +1446,7 @@ class CameraDirector:
                              f"ComfyUI 모델을 GPU에서 내림 (이후 샘플러에서 자동 재로드)")
                 llm_obj = llm_client.chat(
                     provider, resolved_model, api_key, llm_system(),
-                    llm_user(topic, fixed_cam)
+                    llm_user(topic, fixed_cam, is_video)
                     + image_note + hint_note,
                     image_b64=img_b64, image_b64s=img_b64s,
                     image_sig=img_sig if not img_b64s else None,
@@ -1615,11 +1623,9 @@ class CameraDirector:
         # 2.5) 무빙 게이팅 (2026-10-21 사용자 지시): 하류가 정지 이미지면
         # motion·motion2 는 영상 전용 지시라 왜곡을 유발한다 — 제거한다.
         # speed·amplitude 는 motion 수식어라 함께 기본값으로 되돌린다.
-        # 하류가 영상이면 그대로 둔다. 판정은 hidden 입력 prompt 그래프의
-        # 비디오 노드 표식으로 한다(detect_video_pipeline). 불명은 이미지로
-        # 간주(안전 기본). 프론트에도 신호를 보내 UI 가 '영상 전용' 표시를
-        # 하게 한다(백엔드/UI 어긋남 방지).
-        is_video = detect_video_pipeline(prompt)
+        # 하류가 영상이면 그대로 둔다. 판정은 위에서 한 번 한 것(is_video)을
+        # 그대로 쓴다 (R272 — LLM 호출 전에 계산). 프론트에도 신호를 보내
+        # UI 가 '영상 전용' 표시를 하게 한다(백엔드/UI 어긋남 방지).
         try:
             notify_pipeline_type(unique_id, is_video)
         except Exception:
@@ -1759,12 +1765,16 @@ class CameraDirector:
                         _log("[Camera Director] 주제를 영어로 번역했습니다 (tc-big)")
                     else:
                         _log("[Camera Director] ⚠ 주제 번역 실패 — 원문 사용")
-        # 배경 지정 문장 보정 (2026-10-15): 번역기가 뭉갠 자기참조 배경
-        # 문장은 지시력을 잃는다 — 한글 원문 근거로 정식 문장이 되돌린다.
-        _scene_assembled = fix_background_clause(scene, _scene_assembled)
-        # 부채 보유 문장 복구 (2026-10-15): 번역이 없앤 부채를 한글 원문
-        # 근거로 되붙인다 (같은 이유 — 없어진 지시는 생성물에도 없다).
-        _scene_assembled = fix_fan_clause(scene, _scene_assembled)
+        # 장면 보정 통합 (R270, 2026-11-11): 포즈·신발·배경·부채 보정을 한
+        # 곳에서 **한글 원문을 권위로** 적용한다. 왜(Why) 모으나: 종전에는
+        # 배경·부채가 여기서만(그것도 영문을 근거로) 돌아 LLM tier 에서
+        # 사실상 무동작이었고, 포즈·신발은 번역 직후에만 돌았다. 한글 원문이
+        # 있으면(scene) 그것을, 없으면(LLM tier 는 scene 이 이미 영문)
+        # topic·prompt_in 을 근거로 쓴다 — 그래야 규칙 tier 든 LLM tier 든
+        # 같은 보정이 걸린다 (idempotent — 위 번역 직후 보정과 겹쳐도 같다).
+        _ko_src = scene if _has_cjk(scene) else ((topic or "")
+                                                 + " " + (prompt_in or ""))
+        _scene_assembled = fix_translated_scene(_ko_src, _scene_assembled)
         # 손가락 분리 단서를 장면 문장 위치에도 둔다 (2026-10-22 R194 실측).
         # 왜(Why) 가드 위치만으로는 부족했나: 실기 A/B 에서 가드 위치 단독은
         # 시드별로 엇갈렸다(-0.14 / +0.08 / +0.36). 시드 8개 짝지음에서는 장면
@@ -1870,7 +1880,8 @@ class CameraDirector:
         _ref_free_human_pre = (not image_count) and _is_human_subject(_guard_src)
         positive = assemble(_scene_assembled, camera, image_count=image_count, topic=topic,
                             image_labels=image_labels,
-                            ref_free_compact=_ref_free_human_pre)
+                            ref_free_compact=_ref_free_human_pre,
+                            is_video=is_video)
         # 가드 판정은 resolve_guard_plan 한 곳에서. run() 과 run_prompt() 가
         # 각자 반복하던 시대를 끝내고, 짝이 어긋날 수 없게 했다.
         _plan = resolve_guard_plan(
@@ -2447,6 +2458,37 @@ class CameraDirectorEncode(CameraDirector):
             return ref_latent
 
     @staticmethod
+    def _canvas_passthrough(latent_image):
+        """참조 latent 가 없을 때 입력 캔버스를 그대로 넘긴다. 못 쓰면 None.
+
+        왜(Why) 필요한가 (2026-11-11 실측, prompt 9f1b3d8b): 사용자 배선은
+        `Empty Flux 2 Latent -> 카메라.latent_image`, `카메라 5번 -> 샘플러` 다.
+        카메라에 참조 사진이 없으면 5번이 None 이었고, 샘플러는
+        `comfy_extras/nodes_custom_sampler.py:1042` 의 `latent["samples"]` 에서
+        `TypeError: 'NoneType' object is not subscriptable` 로 즉시 죽었다.
+        화면에는 "샘플러가 멈춘 것" 처럼 보이고 카메라 로그에는 단서가 없었다.
+
+        참조 사진이 없을 때 샘플러에 필요한 값은 "사용자가 고른 크기의 빈 격자"
+        이므로, 입력 `latent_image` 를 **손대지 않고** 그대로 넘긴다 — 빈
+        latent 를 샘플러에 직접 연결한 것과 같은 텐서이므로 결과 이미지가
+        한 픽셀도 바뀌지 않는다.
+
+        통과 표시(`gori_canvas_passthrough`)를 붙이는 이유: 기준 latent 를 받는
+        쪽(교정 노드 등)이 0 으로 찬 격자를 "참조 사진" 으로 오해하면 조용히
+        틀린 판정을 한다. 샘플러·디코더는 모르는 키를 무시하므로 부작용이 없다.
+
+        반환: 얕은 복사 dict(+표시). 크기가 4차원이 아니거나 텐서가 없으면 None.
+        """
+        samples = (latent_image.get("samples")
+                   if isinstance(latent_image, dict) else latent_image)
+        if getattr(samples, "ndim", 0) != 4:
+            return None
+        out = dict(latent_image) if isinstance(latent_image, dict) else {
+            "samples": samples}
+        out["gori_canvas_passthrough"] = True
+        return out
+
+    @staticmethod
     def _prepare_qwen_image_data(image_items, vae=None, latent_image=None,
                                  latent_skip_labels=None):
         """Prepare Qwen vision images and VAE reference latents once.
@@ -2706,7 +2748,10 @@ class CameraDirectorEncode(CameraDirector):
                 _log("[Camera Director] 참조 자동 분류 실패(Skills 재심기) "
                      f"({type(_e).__name__}) — 기존 규약으로 진행")
         camera = getattr(self, "_last_camera", dict(DEFAULTS))
-        camera_text = build_camera_conditioning(camera)
+        # 하류 파이프라인을 여기서도 같은 함수로 판정한다 (R272) — base run 과
+        # 같은 결과여야 영상/이미지 모션 조항이 두 경로에서 갈리지 않는다.
+        _is_video_rp = detect_video_pipeline(prompt)
+        camera_text = build_camera_conditioning(camera, is_video=_is_video_rp)
         external_prompt = (prompt_in or "").strip()
         # 한국어→영어 번역 (규칙 tier 전용, 비ASCII 감지 시에만 동작).
         # LLM tier 는 cam_llm.py 가 이미 영문으로 확장하므로 여기선 번역 안 함.
@@ -2720,10 +2765,10 @@ class CameraDirectorEncode(CameraDirector):
         if _tier_rp != "llm" and external_prompt and _has_cjk(external_prompt):
             _tr = translate_ko_to_en(external_prompt)
             if _tr:
-                external_prompt_en = fix_fan_clause(
-                    external_prompt,
-                    fix_footwear_clause(
-                        external_prompt, fix_pose_clause(external_prompt, _tr)))
+                # 장면 보정 통합 (R270): 흩어진 포즈·신발·부채 보정을 한 함수로
+                # 모은다 (한글 원문 권위). 배경은 아래 _ko_user_pi 경로에서 한 번
+                # 더 걸리지만 idempotent 라 중복이 아니다.
+                external_prompt_en = fix_translated_scene(external_prompt, _tr)
                 _log("[Camera Director] prompt_in 한글을 영어로 번역했습니다 (tc-big)")
             else:
                 _log("[Camera Director] ⚠ 번역 실패 — prompt_in 원문을 사용합니다")
@@ -2900,12 +2945,12 @@ class CameraDirectorEncode(CameraDirector):
                 else:
                     _user_text = self._combine_prompt_text(
                         _scene_pi_en, _external_out)
-            # 배경 지정 문장 보정 (2026-10-15, base run과 동일 판정):
-            # 번역기가 뭉갠 자기참조 배경 문장은 지시력을 잃는다.
+            # 장면 보정 통합 (R270, 2026-11-11): base run 과 **같은 함수**로
+            # 한글 원문을 권위로 포즈·신발·배경·부채를 한 곳에서 적용한다.
+            # 왜(Why) 같은 함수인가: 두 경로가 각자 배선하면 한쪽만 갱신돼
+            # 보정이 조용히 갈린다 (저장소 관례 — R224 역할 선언 분리와 같음).
             _ko_user_pi = (topic or "") + " " + (external_prompt or "")
-            _user_text = fix_background_clause(_ko_user_pi, _user_text)
-            # 부채 보유 문장 복구 (2026-10-15, base run과 동일 판정).
-            _user_text = fix_fan_clause(_ko_user_pi, _user_text)
+            _user_text = fix_translated_scene(_ko_user_pi, _user_text)
             # 손가락 분리 단서를 장면 문장 위치에도 둔다 (2026-10-22 R194 실측).
             # base run 과 **같은 헬퍼**(scene_finger_cue)로 판정한다 — 두 경로가
             # 각자 판정하면 한쪽만 갱신돼 방어가 조용히 어긋난다(2026-09-28 실측).
@@ -3292,19 +3337,6 @@ class CameraDirectorEncode(CameraDirector):
         # 왜(Why): 이음새가 어긋나면 positive에 붙은 지시의 짝인 negative가
         # 조용히 사라진다 — 실측으로 국가 표현형(브라질)·동물 가드에서 확인됨.
         # 국가명은 한글 topic 칸에만 있을 수 있어 prompt_in만 보면 놓친다.
-        # 출력 가로세로비를 latent 에서 읽는다 (2026-10-16). DenoResolutionSetup
-        # 이 latent 크기를 정하므로 그 가로/세로가 곧 출력 비율이다. 화면비
-        # 인지형 다리 복제 에스컬레이션(16:9·19:6) 판정 근거로 쓴다.
-        _aspect_ratio_pi = None
-        if latent_image is not None:
-            try:
-                _s_pi = (latent_image["samples"]
-                         if isinstance(latent_image, dict) else latent_image)
-                _h_pi, _w_pi = int(_s_pi.shape[-2]), int(_s_pi.shape[-1])
-                if _h_pi and _w_pi:
-                    _aspect_ratio_pi = _w_pi / _h_pi
-            except Exception:  # noqa: BLE001
-                _aspect_ratio_pi = None
         negative_text = build_camera_negative(
             camera, prevent_duplicates=prevent_duplicates,
             topic=_eth_text_pi, image_count=last_count,
@@ -3341,8 +3373,7 @@ class CameraDirectorEncode(CameraDirector):
             ref_free_garment_integrity=bool(
                 _plan_pi["flags"].get("ref_free_garment_integrity")),
             ref_free_garment_integrity_upper=bool(
-                _plan_pi["flags"].get("ref_free_garment_integrity_upper")),
-            aspect_ratio=_aspect_ratio_pi)
+                _plan_pi["flags"].get("ref_free_garment_integrity_upper")))
         # LLM이 제안한 extra negative가 있으면 카메라 negative 뒤에 병합한다.
         # 왜(Why): base run()은 llm_extra를 build_negative에 넣지만, 위에서
         # 카메라 전용 negative로 덮어쓰면서 조용히 버려졌기 때문이다.
@@ -3473,6 +3504,11 @@ class CameraDirectorEncode(CameraDirector):
         # — 시작 latent 의 모양이 곧 시드이므로 비율을 바꾸면 그림이 바뀌는 것이 정상이다.
         # 대가(합의 2026-10-24): 비율을 바꾸면 같은 시드라도 그림이 바뀐다. 그 맞바꿈을
         # 사용자가 선택했다. 캔버스를 연결하지 않으면 같은 객체가 그대로 나간다(하위호환).
+        #
+        # 2026-11-11 (R265) 이 출력은 두 경우를 **자동으로** 처리한다:
+        #   참조 사진 있음 -> 참조 사진 latent (위 R215 경로, 종전 그대로)
+        #   참조 사진 없음 -> 입력 캔버스를 그대로 통과 (아래)
+        # 두 번째가 없으면 5번이 None 이 되어 샘플러가 즉시 죽는다(실측 9f1b3d8b).
         reference_latent_out = None
         try:
             if vae is not None and main_img is not None:
@@ -3491,6 +3527,19 @@ class CameraDirectorEncode(CameraDirector):
                        "또는 이동 중 오류 (기준 latent 없이 진행): "
                        f"{type(e).__name__}: {str(e)[:80]}")
             reference_latent_out = None
+        # 참조 latent 가 없으면 입력 캔버스를 그대로 넘긴다 (R265, 2026-11-11).
+        # 왜(Why) 여기서 하나: 참조 사진을 안 쓰는 텍스트->이미지에서도 5번은
+        # 샘플러의 시작 latent 여야 한다. 넘기지 않으면 None 이 되어 샘플러가
+        # `latent["samples"]` 에서 죽는다(실측 prompt 9f1b3d8b). 넘기는 값은
+        # 사용자가 고른 빈 격자 그 자체라 결과가 직접 연결과 한 픽셀도 다르지 않다.
+        if reference_latent_out is None and not image_items:
+            reference_latent_out = CameraDirectorEncode._canvas_passthrough(
+                latent_image)
+            if reference_latent_out is not None:
+                _note_once(
+                    "camera.ref_latent_passthrough",
+                    "[Camera Director] 참조 사진이 없어 5번 출력은 입력한 빈 "
+                    "latent 를 그대로 넘깁니다 — 샘플러 시작점으로 쓰십시오.")
         _release_vram()
         clear_reference_kinds()
         return (positive_out, negative_out, positive_text, image_out,

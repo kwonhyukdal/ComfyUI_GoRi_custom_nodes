@@ -47,7 +47,7 @@ __all__ = [
     "FURNITURE_CONTACT_POSITIVE", "GROUND_REF_POSITIVE", "FURNITURE_ORIENTATION_POSITIVE", "FURNITURE_BACKGROUND_POSITIVE", "FURNITURE_SUPPORT_POSITIVE", "FURNITURE_BACKGROUND_NEGATIVE", "SCENERY_BACKGROUND_POSITIVE", "BACKGROUND_LIGHT_RECONCILE_POSITIVE", "BACKGROUND_SCENE_ADOPT_POSITIVE", "_is_mood_only_background", "background_scene_adopt_guard", "background_support_scene_guard", "BACKGROUND_SEAT_POSITIVE", "BACKGROUND_SEAT_NEGATIVE", "background_seat_guard", "PLACE_DESCRIPTION_WORDS", "_ascii_word_in", "place_description_present", "scene_metric_slot", "FURNITURE_SURFACE_POSITIVE", "FURNITURE_COLOR_POSITIVE", "FURNITURE_SURFACE_NEGATIVE", "object_appearance_guard", "OBJECT_FEATURE_POSITIVE", "_object_feature_guard", "_object_feature_words", "_OBJECT_FEATURE_WORDS",
     "SEAT_OCCUPANCY_POSITIVE", "SEAT_OCCUPANCY_NEGATIVE", "SEAT_ORIENTATION_POSITIVE", "FURNITURE_PLACEMENT_LOCK_NON_SEAT",
     "GROUND_REF_NEGATIVE", "ground_reference_guard",
-    "pose_map_sentence", "ASPECT_LEG_DUPLICATION_NEGATIVE", "_is_risky_aspect_ratio",
+    "pose_map_sentence",
     "HAND_PLACEMENT_POSITIVE", "HAND_PLACEMENT_NEGATIVE", "HAND_PLACE_MARKERS",
     "hand_placement_marks",
     "COMPACT_ANATOMY_POSITIVE", "REF_FREE_COMPACT_ANATOMY_POSITIVE",
@@ -1322,7 +1322,7 @@ def add_quality_guard(prompt: str, image_count: int = 0, topic: str = "", image_
 
 
 def assemble(scene: str, cam: dict, image_count: int = 0, topic: str = "", image_labels=None,
-             ref_free_compact: bool = False) -> str:
+             ref_free_compact: bool = False, is_video=None) -> str:
     """scene + 카메라 + 그레이드 + 범용 품질/정체성 가드 → 영문 prompt_out.
 
     ref_free_compact (2026-11-10, R261, 선택): 참조 없는 인물 경로인가.
@@ -1331,9 +1331,13 @@ def assemble(scene: str, cam: dict, image_count: int = 0, topic: str = "", image
     (실측: 8문장까지 1명, 9문장부터 3명/3칸), 이 두 문장은 그 누적에서
     **빼도 결과가 망가지지 않는** 몫이었다(렌더 실측). 참조가 있으면
     호출부가 참을 주지 않으므로 참조 경로는 한 글자도 안 바뀐다.
+
+    is_video (2026-11-11, R272, 선택): 하류 파이프라인이 영상인가. build_clauses
+    로 전달해 영상/이미지별 모션 조항을 카메라 절에 붙인다. None(기본)이면
+    넣지 않아 기존 호출의 출력을 바꾸지 않는다.
     """
     scene = (scene or "").strip().rstrip("., ")
-    segs = [", ".join(build_clauses(cam)), grade_clauses(cam)]
+    segs = [", ".join(build_clauses(cam, is_video=is_video)), grade_clauses(cam)]
     segs = [s for s in segs if s]
     if scene and segs:
         prompt = scene + ". " + ". ".join(segs) + "."
@@ -1775,52 +1779,28 @@ ANATOMY_COUNT_NEGATIVE_UPPER = (
 )
 
 
-# 화면비 인지형 다리 복제 에스컬레이션 (2026-10-16 실측, 2026-10-21 확장).
-# 왜(Why): 13개 가로 화면비 스윕(시드 42 고정)에서 종아리->발 다리가 하나 더
-# 생기는 버그가 16:9(1.78)·19:6(3.17) 에서 재현됐다. 2026-10-21 사용자 실측으로
-# 세로 프레임(848x1232 = 0.688)에서도 같은 버그가 확인됐다. denoise=1.0 이라
-# 참조가 픽셀로 기여를 못 해 텍스트로만 전달되는데, 긴 축의 빈 공간을 모델이
-# 사지 복제로 채우는 잔여(denoise=1.0 한계)다. 위험 비율일 때 기존
-# ANATOMY_COUNT_NEGATIVE 위에 더 강한 "정확히 두 다리" 문구를 한 번 더 얹는다
-# (기존 negative 는 유지 — 짝이므로). positive 짝은 LEG_FOOT_INTEGRITY_POSITIVE.
-ASPECT_LEG_DUPLICATION_NEGATIVE = (
-    "exactly two legs total: one leg on the left and one leg on the right, "
-    "each complete from hip to ankle with both feet present, separate and "
-    "fully formed; absolutely no third leg, no extra leg, no duplicate leg, "
-    "no mirrored or cloned leg, no second pair of legs, no leg splitting "
-    "into two"
-)
-
-# 위험 비율 판정. 2026-10-16 가로 스윕에서 16:9(1.7778)·19:6(3.1667) 이
-# 다리 복제를 냈다. 2026-10-21 사용자 실측: 세로 프레임(848x1232 = 0.688)에서도
-# 종아리->발 다리가 하나 더 생기고 종아리가 휘었다. 원인은 같은 잔여다 —
-# denoise=1.0 이라 참조가 픽셀로 기여하지 못하고, 긴 축의 빈 공간을 사지
-# 복제로 채운다. 그래서 **가로로 긴 비율과 세로로 긴 비율을 모두** 위험으로 본다
-# (정사각 근처는 제외 — 빈 공간이 적다).
-_RISKY_ASPECT_RATIOS = (16.0 / 9.0, 19.0 / 6.0)   # 가로로 긴 (2026-10-16)
-# 세로로 긴 비율의 하한/상한 (2026-10-21). 9:16 ≈ 0.5625, 3:4 = 0.75.
-# 이보다 좁으면(더 세로로 길면) 위험으로 본다.
-_PORTRAIT_RISKY_MAX = 0.80
-_ASPECT_RATIO_TOL = 0.05
-
-
-def _is_risky_aspect_ratio(aspect_ratio) -> bool:
-    """출력 가로세로비가 실측으로 다리 복제 버그가 난 비율이면 True.
-
-    latent(또는 픽셀) 가로/세로를 받아 비교한다. 가로로 긴 비율(16:9·19:6)은
-    2026-10-16 스윕 실측이고, 세로로 긴 비율(0.80 이하)은 2026-10-21 사용자
-    실측(848x1232=0.688 에서 종아리에서 발이 하나 더 생김)이다. 둘 다
-    denoise=1.0 에서 긴 축 빈 공간을 사지 복제로 채우는 같은 잔여다.
-    """
-    try:
-        r = float(aspect_ratio)
-    except (TypeError, ValueError):
-        return False
-    if r <= 0:
-        return False
-    if any(abs(r - ref) <= _ASPECT_RATIO_TOL for ref in _RISKY_ASPECT_RATIOS):
-        return True
-    return r <= _PORTRAIT_RISKY_MAX
+# 화면비 인지형 다리 복제 에스컬레이션은 2026-11-11 (R267) **완전히 제거했다.**
+# 왜(Why) 제거했나: 이 판정의 효과는 프롬프트였다 — 위험 비율이면 부정 프롬프트에
+# "정확히 두 다리" 조항을 한 줄 얹는데, 그 판정은 사용자가 고른 화면비에 따라
+# **조용히 프롬프트를 바꿨다.** 참조가 있을 때만 발동하도록 (R266) 좁혀도,
+# 참조가 있는 실행에서는 여전히 화면비만으로 문구가 붙었다. 같은 시드·같은
+# 그래프에서 화면비를 16:9 에서 조금만 벗어나도(예: 1344x736 = 1.826, tol 0.05
+# 안이라 16:9 로 판정) 결과가 달라진다 — 사용자는 화면비를 바꿨을 뿐인데
+# 생성물이 바뀌는 이유를 알 수 없다. 그래서 **참조 유무·비율과 무관하게**
+# 이 조항이 나오지 않게 상수·판정 함수·인자 전부를 걷어냈다.
+# 남는 방어: 정면 LEG_FOOT_INTEGRITY_POSITIVE(긍정)와 기본
+# ANATOMY_COUNT_NEGATIVE(다리 수)는 그대로다. 그 둘은 화면비를 보지 않으므로
+# 화면비를 바꿔도 나오는 문구가 달라지지 않는다.
+# 되돌리려면 이 커밋 하나를 revert 하면 된다 (R267).
+#
+# 되살리지 않는 이유(2026-11-11, 사용자 요청으로 기록을 대조한 결과): 이 조항이
+# 다리 복제를 **막았다는 전후 그림 비교는 기록에 없다.** 2026-10-16 스윕은 조항이
+# 붙는지(단위 테스트)만 확인했고, 이 조항 때문에 위험 비율 목록을 세로로 넓힌
+# 2026-10-21 사용자 사례는 cfg=1.0 이라 negative 가 **계산조차 되지 않아** 이
+# 조항이 모델에 도달하지 못했다(기록: "0.688 세로라 켜져 있었는데 죽어 있었다").
+# 반대로 이 조항이 같은 시드에서 프롬프트를 바꿔 다리 잔상을 낳았다는 실기 A/B 는
+# 있다(R266). 그래서 증거 없이 되살리지 않는다 — 실효 방어는 위 positive 가드와
+# 기본 ANATOMY_COUNT_NEGATIVE 다.
 
 
 # 스케일 일관 샷 — 인물 전신·주변이 함께 보이는 샷에서만 사물 스케일 점검.
@@ -2011,7 +1991,7 @@ def _topic_requests_pose(topic) -> bool:
 def _assemble_negative(cam, topic, image_count, image_labels, flags,
                        noir_phrase, extras=(), physics_neg="",
                        pose_ref=False, prevent_duplicates=False,
-                       panel_guard=False, aspect_ratio=None) -> str:
+                       panel_guard=False) -> str:
     """두 negative 빌더가 공유하는 조립 로직.
 
     왜(Why) 하나인가(2026-09-29): `build_negative` 와
@@ -2045,13 +2025,9 @@ def _assemble_negative(cam, topic, image_count, image_labels, flags,
             neg.append(ANATOMY_COUNT_NEGATIVE_UPPER)
         else:
             neg.append(ANATOMY_COUNT_NEGATIVE)
-    # 화면비 인지형 다리 복제 에스컬레이션 (2026-10-16 실측). 풀바디(full)이고
-    # 위험 비율(16:9·19:6)일 때만 기존 ANATOMY_COUNT_NEGATIVE 위에 더 강한
-    # "정확히 두 다리" 문구를 한 번 더 얹는다. upper(CU/ECU) 는 다리·발이 화면에
-    # 없어 의도적으로 제외.
-    if (flags.get("anatomy_count") and not flags.get("anatomy_count_upper")
-            and _is_risky_aspect_ratio(aspect_ratio)):
-        neg.append(ASPECT_LEG_DUPLICATION_NEGATIVE)
+    # 화면비 인지형 다리 복제 에스컬레이션은 R267(2026-11-11)에서 제거했다 —
+    # 화면비에 따라 조용히 프롬프트가 바뀌던 자리다. 자세한 사유와 되돌리는
+    # 방법은 위 상수 블록의 R267 주석을 참조.
     if flags.get("character_sheet"):
         neg.append(CHARACTER_SHEET_NEGATIVE)
         # 시트 뷰가 별개 인물로 세어지는 것까지 막는다 (신원 일관성이 목적이므로).
@@ -2180,8 +2156,7 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
                           panel_guard: bool = False,
                           ref_free_accessory: bool = False,
                           ref_free_garment_integrity: bool = False,
-                          ref_free_garment_integrity_upper: bool = False,
-                          aspect_ratio: float = None) -> str:
+                          ref_free_garment_integrity_upper: bool = False) -> str:
     """카메라/영상 실패 모드 + 인물 해부 디테일 방어 (신원·신체 비율 가드 제외)."""
     return _assemble_negative(
         cam, topic, image_count, image_labels,
@@ -2204,7 +2179,7 @@ def build_camera_negative(cam: dict, prevent_duplicates: bool = False,
          "hand_placement": hand_placement, "seat": seat},
         "unwanted color cast", physics_neg=physics_neg, pose_ref=pose_ref,
         prevent_duplicates=prevent_duplicates,
-        panel_guard=panel_guard, aspect_ratio=aspect_ratio)
+        panel_guard=panel_guard)
 
 
 # llm_hint 사용 시 검열 아티팩트 방어어. (Why: 모델이 학습 편향으로

@@ -205,6 +205,17 @@ def translate_ko_to_en(text: str) -> "str | None":
 _POSE_FACING_KO = ("정면", "앞을 보", "앞 보고", "정면으로", "앞모습")
 _POSE_SIT_VERB = ("앉",)
 
+# 일자로 (R270, 2026-11-11). 왜(Why) 필요한가: "일자로"(한 줄로 곧게)가 "일자"를
+# **날짜(date)** 로 읽혀 자세가 뒤집힌다 — 실측:
+#   "여성이 일자로 서 있다"        -> "A woman stands at work."
+#   신고 토픽 "... 일자로 서서 ..." -> "... stands on a date next to a nice sports car"
+# 그래서 한글에 일자로/일직선이 있고 영문에 그 오역(date·work)이 있으면
+# "straight" 로 되돌린다. 일자로가 없으면 손대지 않는다 — 진짜 데이트 장면은
+# 그대로 두어야 한다(오폭 방지).
+_STRAIGHT_KO = re.compile(r"일자로|일직선")
+_STRAIGHT_BAD_EN = re.compile(
+    r"\b(?:on|at|as|in)\s+(?:a\s+)?(?:date|work)\b", flags=re.I)
+
 
 def fix_pose_clause(ko_text, en_text):
     """번역기가 뭉갠 포즈 절을 한글 원문 근거로 바로잡는다. 실패해도
@@ -218,11 +229,17 @@ def fix_pose_clause(ko_text, en_text):
       정면 — 한글에 정면 markers + 영문에 facing|forward 없음 →
             ", facing forward" 추가.
       동사 — 한글에 앉 + 영문에 sit 계열 없음 → " Sitting." 추가.
+      일자로 (R270) — 한글에 일자로/일직선 + 영문에 date·work 오역 → "straight"
+            로 교체 ("일자" 를 날짜로 읽는 오역). 일자로가 없으면 무동작.
     """
     try:
         if not ko_text or not en_text or not isinstance(en_text, str):
             return en_text
         out = en_text
+        # 일자로 (R270): 날짜/직장 오역을 straight 로 되돌린다 (다른 포즈 규칙보다
+        # 먼저 — 정면·앉기 규칙이 교정된 글 위에 붙게 한다).
+        if _STRAIGHT_KO.search(ko_text):
+            out = _STRAIGHT_BAD_EN.sub("straight", out)
         if (any(v in ko_text for v in _POSE_SIT_VERB)
                 and "앞에" not in ko_text):
             _m = re.search(r"in front of the (\w+)", out, flags=re.I)
@@ -424,58 +441,249 @@ def fix_background_clause(ko_text, en_text):
         return en_text
 
 
-# 부채 보유 문장 복구 (2026-10-15 실측, 파란 동그라미 좌측 빈 손). tc-big 은
-# "왼손은 이미지4 번의 부체를 들고" 를 "her left hand is on the side of the
-# image, she has four sub-bodys" 로 — 부채를 통째로 없애고 잔재 문장만
-# 남겼다. 결과물에서는 왼손이 빈 채 시트에 놓였고 부채 자체가 그려지지
-# 않았다. 한글 원문에 부채 보유 지시가 있고 영문에 fan 이 없으면 정식
-# 문장을 되붙인다. 잔재("four sub-bodys")는 같은 문장의 찌꺼기라 함께
-# 지운다 — "she has four sub-bodys" 는 몸통 개수 오해를 낳을 수 있다.
-# 관찰된 형태만: 손(왼손/오른손)이 앞에 오는 문장과 부[채체] 표기(사용자
-# 원문의 오탈자 '부체' 포함)만 다룬다.
-_FAN_KO = (r"(왼손|오른손|왼쪽\s*손|오른쪽\s*손)[^.\n]{0,40}?"
-           r"이미지\s*(\d+)\s*번의\s*부[채체]")
-# 끝 마침표만 함께 지운다 (문장 끝 잔재 → "…image.." 이중 마침표 방지).
-# 쉼표는 남긴다 — 중간 삽입형(", and she sits…")의 문장 경계를 지키기 위해.
+# 부채 보유 문장 복구 (2026-10-15 실측, R137. 파란 동그라미 좌측 빈 손).
+# tc-big 은 "왼손은 이미지4 번의 부체를 들고" 를 "her left hand is on the side
+# of the image, she has four sub-bodys" 로 — 부채를 통째로 없애고 잔재 문장만
+# 남겼다. 결과물에서는 왼손이 빈 채 시트에 놓였고 부채 자체가 그려지지 않았다.
+# 한글 원문에 부채 지시가 있고 영문에 fan 이 없으면 정식 문장을 되붙인다.
+# 잔재("four sub-bodys")는 같은 문장의 찌꺼기라 함께 지운다 — 몸통 개수 오해를
+# 낳을 수 있다. 관찰된 표기(부[채체], 사용자 오탈자 '부체' 포함)만 다룬다.
+#
+# R269 (2026-11-11): 참조 이미지 없이 "부채를 들고 있다" 만 써도 tc-big 이
+# 부채를 **재산** 뜻으로 옮긴다 — 실측 "여성이 부채를 들고 있다" -> "Women are
+# in debt."(부채=빚). 그러면 부채 지시가 통째로 사라져 결과물에 부채가 안 그려진다.
+# R270 (2026-11-11): R269 는 "부채를 들" 만 덮어 펼치/흔들/쥐 형태가 샜다 —
+# 실측 "부채를 펼쳤다" -> "Women are in debt.", "부채를 흔들며 춤춘다" ->
+# "shaking their heads", "이미지2 번의 부채를 쥐고 있다" -> "in debt for two
+# images". 그래서 판정을 "한글에 부채가 있는가" 로 넓히고, 오역 표현을 걷어낸 뒤
+# 부채 문장을 되붙인다.
+_FAN_ANY_KO = re.compile(r"부[채체]")
+# 손 없이 참조 이미지만 있는 형태 ("이미지2 번의 부채를 쥐고"). R137 참조형
+# ("왼손은 이미지4 번의 부체")도 같은 패턴에 걸린다 — 손 표기는 따로 읽는다.
+_FAN_REF_ONLY_KO = re.compile(r"이미지\s*(\d+)\s*번[^.\n]{0,12}부[채체]")
+# 손 표기 (참조 번호 없이도 쓴다).
+_FAN_SIDE_KO = re.compile(r"(왼손|왼쪽\s*손|오른손|오른쪽\s*손)")
+# 잔재 문장("she has four sub-bodys"). 끝 마침표만 함께 지운다 — 쉼표는 남겨
+# 중간 삽입형(", and she sits…")의 문장 경계를 지킨다.
 _FAN_SUBBODY_EN = (r"[,\s]*(?:she|he|the woman|the man|they)\s+has\s+"
                    r"four\s+sub-bodys?\.?")
+# 부채가 확실한데 영문에 남은 **오역 표현**. 지우고 부채 문장을 되붙인다 —
+#   "be in debt"   부채=빚. [^.!?]* 로 조각 끝까지 먹는다: 뒤따르는 말
+#                  ("for two images")도 같은 오역의 찌꺼기라 남기면 개념이 섞인다.
+#   "her debts"    부채=재산. 관사·전치사("with her debts")까지 함께 지운다.
+#   "shake … heads" 부채를 흔들다를 머리 흔들기로 옮긴 것 — 뜻이 정반대다.
+_FAN_BAD_SENSE_RE = re.compile(
+    r"\b(?:are|is|were|was|am|be)\s+in\s+debt[^.!?]*"
+    r"|\b(?:with\s+)?(?:her|his|their|the)\s+debts?\b"
+    r"|\bdebts?\b"
+    r"|\bshak\w*\s+(?:their|her|his|the)?\s*heads?\b",
+    flags=re.I)
+# 문장 분할 (마침표·물음표·느낌표 뒤 공백). 조각 단위로 오역을 걷어내기 위해.
+_FAN_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+# 번역 잔여물 정리 (R271, 2026-11-11). 왜(Why): ko→en 실증에서 가장 흔한 전략이
+# **축약/생략**이라(영화 더빙 12편 코퍼스, Nature 2025 — 화면 안/밖 무관 1순위),
+# 번역기가 접속사·관사·전치사를 중복으로 남기는 일이 관찰된다. 그 잔여물은 뜻이
+# 아니라 소음이라, 뜻을 건드리지 않고 걷어낸다. 기능어만 대상으로 한다 — "very
+# very" 같은 강조 반복은 뜻이므로 손대지 않는다.
+_TIDY_DUP_FUNC = re.compile(
+    r"\b(the|a|an|and|or|of|to|in|on|at|with|is|are|was|were|that)\b"
+    r"(?:\s+\1\b)+", flags=re.I)
+
+
+def _tidy_en(text):
+    """보정 뒤 남은 이중 공백·중복 기능어·구두점 잔여물을 정리한다.
+
+    멱등하다 (두 번 불러도 같다) — fix_translated_scene 이 두 번 돌아도 안전.
+    """
+    out = re.sub(r"[ \t]{2,}", " ", text or "")
+    out = _TIDY_DUP_FUNC.sub(lambda m: m.group(1), out)
+    out = re.sub(r"\s+([.,;:!?])", r"\1", out)
+    out = re.sub(r"([,;:])(?:\s*\1)+", r"\1", out)
+    out = re.sub(r"\b(?:and|or|but)\s*([.!?])", r"\1", out, flags=re.I)
+    return out.strip()
+
+
+def _append_sentence(text, sentence):
+    """문장 끝을 정리해 새 문장을 덧붙인다 (중복 마침표 방지)."""
+    out = (text or "").rstrip()
+    if not out:
+        return sentence
+    if not out.endswith("."):
+        out += "."
+    return out + " " + sentence
+
+
+def _fan_canonical(ko_text):
+    """한글 원문에서 부채 보유 정식 문장을 만든다 (손·참조 번호 반영)."""
+    side = ""
+    m = _FAN_SIDE_KO.search(ko_text or "")
+    if m:
+        side = "left" if m.group(1).startswith("왼") else "right"
+    rm = _FAN_REF_ONLY_KO.search(ko_text or "")
+    if rm:
+        who = f"The {side} hand" if side else "The person"
+        return f"{who} holds the hand fan from reference image {rm.group(1)}."
+    if side:
+        return f"The {side} hand holds a hand fan."
+    return "The person holds a hand fan."
+
+
+def _repair_fan_fragments(text):
+    """문장 조각에 남은 부채 오역(빚·머리 흔들기)을 걷어낸다.
+
+    오역 표현만 지우고, 남은 조각이 3 단어 미만이면(조각이 오역뿐이었으면)
+    통째로 버린다. 오역이 없는 조각은 손대지 않는다.
+    """
+    keep = []
+    for part in _FAN_SENT_SPLIT.split(text or ""):
+        if not part.strip():
+            continue
+        if _FAN_BAD_SENSE_RE.search(part):
+            part = _tidy_en(_FAN_BAD_SENSE_RE.sub("", part))
+            if len(part.split()) < 3:
+                continue
+        keep.append(part.strip())
+    return " ".join(keep)
 
 
 def fix_fan_clause(ko_text, en_text):
     """번역이 없앤 부채 보유 지시를 한글 원문 근거로 되붙인다.
 
     규칙:
-      한글에 "왼손은 이미지 N 번의 부채|부체를 들고" 가 있으면
-        영문에 fan 언급이 없을 때 정식 문장을 덧붙이고,
-        "…has four sub-bodys" 잔재는 지운다.
-      fan 언급이 이미 있으면 잔재만 지우고 문장은 더하지 않는다.
+      판정 — 한글에 부채(부[채체])가 없으면 입력 그대로 (R270).
+      참조형 — 한글에 "…이미지 N 번…부채" 가 있으면 영문에 fan 이 없을 때
+        "…hand fan from reference image N." 을 덧붙인다 (R137).
+      일반형 — 참조 없이 "부채를 들|쥐|잡|펼|흔들" 이면 영문에 fan 이 없을 때
+        부채 문장을 덧붙인다 (R269/R270). 손이 명시되면 그 손을 쓴다.
+      오역 제거 — 번역이 만든 "be in debt"(빚)·"…debts"(재산)·"shake … heads"
+        (머리 흔들기) 표현을 걷어낸다. 오역뿐이던 조각은 통째로 버린다.
+      잔재 — "…has four sub-bodys" 는 언제나 지운다 (몸통 개수 오해).
+      영문에 fan 이 이미 있으면 문장은 더하지 않고 잔재만 정리한다.
       한글 지시가 없으면 입력 그대로. 실패해도 원문을 돌려준다.
     """
     try:
         if not ko_text or not en_text or not isinstance(en_text, str):
             return en_text
-        m = re.search(_FAN_KO, ko_text)
-        if not m:
+        if not _FAN_ANY_KO.search(ko_text):
             return en_text
         out = re.sub(_FAN_SUBBODY_EN, "", en_text, flags=re.I)
         if re.search(r"\bfan\b", out, flags=re.I):
+            out = _tidy_en(out)
             if out != en_text:
                 _log("[Camera Director] 부채 절 보정 — 번역 잔재(몸통 개수)만 "
                      "지웠습니다 (fan 문장은 이미 있음)")
             return out
-        side = "left" if m.group(1).startswith("왼") else "right"
-        tail = (f"The {side} hand holds the hand fan from reference "
-                f"image {m.group(2)}.")
-        out = out.rstrip()
-        if out:
-            if not out.endswith("."):
-                out += "."
-            out = out + " " + tail
-        else:
-            out = tail
-        _log("[Camera Director] 부채 절 보정 — 번역이 없앤 부채 보유 지시를 "
-             "한글 원문으로 되돌렸습니다")
+        if _FAN_BAD_SENSE_RE.search(out):
+            out = _repair_fan_fragments(out)
+        if not re.search(r"\bfan\b", out, flags=re.I):
+            out = _append_sentence(_tidy_en(out), _fan_canonical(ko_text))
+            _log("[Camera Director] 부채 절 보정 — 번역이 없앤 부채 보유 "
+                 "지시를 한글 원문으로 되돌렸습니다")
         return out
+    except Exception:
+        return en_text
+
+
+# 한국 문화어 관용형 보정 (R271, 2026-11-11).
+# 왜(Why) 필요한가: tc-big 이 한국 문화어를 심하게 망가뜨린다 — 직접 실측:
+#   한복   "여성이 한복을 입고 있다"   -> "A woman is wearing a suit."
+#   김치   "그릇에 김치가 담겨 있다"   -> "Kim is in the bowl."
+#   갓     "남자가 갓을 쓰고 있다"     -> "Man is using God."
+#   태극기 "태극기가 펄럭인다"         -> "The attack is flaring."
+#   노리개 "여성이 노리개를 착용했다"  -> "A woman wears a toenail."
+# (한옥/윷놀이/탈춤/기와지붕 은 단어가 통째로 사라진다 — 잘못된 대체어가 없어
+#  이 표로는 못 잡는다. 누락 감지(C3)가 필요해 부채 원장에 남긴다.)
+# 근거: 공공 용어의 외국어 번역 및 표기 지침 (문체부훈령 제520호) §4 의 4) — 의미역이 원칙이나
+# "국내에서 널리 쓰이는 번역어가 있으면 관용적인 표현으로 인정한다". 한국
+# 번역이 망가뜨린 **측정된 오역**만 되돌리는 표 (R271 · R272).
+# 문화어는 관용 로마자형(hanbok·kimchi·gat)이 그 관용형이고, 이미지 모델도
+# 그 토큰을 안다. 그래서 측정된 오역만 관용형으로 되돌린다.
+# 안전장치: (한글 표지, 잘못된 영문 패턴, 정본 영문, 수용 표지) 튜플.
+# 정본이 이미 있으면 무동작(멱등), 한글 표지가 없으면 무동작 — 오폭 방지.
+# 측정되지 않은 형태는 건드리지 않는다.
+_MEASURED_REPAIR = (
+    (re.compile(r"한복"),
+     re.compile(r"\bwearing\s+a\s+suit\b", re.I), "wearing a hanbok",
+     re.compile(r"hanbok", re.I)),
+    (re.compile(r"김치"),
+     re.compile(r"\bKim\b"), "Kimchi", re.compile(r"kimchi", re.I)),
+    (re.compile(r"갓\s*쓰|갓을|갓이"),
+     re.compile(r"\busing\s+God\b", re.I), "wearing a gat",
+     re.compile(r"\bgat\b", re.I)),
+    (re.compile(r"태극기"),
+     re.compile(r"\bthe\s+attack\s+is\s+flaring\b", re.I),
+     "the Taegukgi flag is waving", re.compile(r"taegukgi", re.I)),
+    (re.compile(r"노리개"),
+     re.compile(r"\bwears\s+a\s+toenail\b", re.I), "wears a norigae",
+     re.compile(r"norigae", re.I)),
+    # 파도 어휘 (R272, 2026-11-11 실측): `파도가 발밑으로 밀려온다` 를 tc-big 가
+    # "The waves are coming down" 으로 옮겼다(밀려오다=굴러 들어오다). 하강이
+    # 아니라 유입이라 장면이 뒤집힌다. 동사까지 함께 바꾼다 — 명사만 바꾸면
+    # "The waves rolling in" 처럼 동사가 빠져 문장이 깨진다.
+    (re.compile(r"밀려오|파도"),
+     re.compile(r"\bwaves?\s+(?:are|is)\s+coming\s+down\b", re.I),
+     "waves roll in", re.compile(r"\bwaves?\s+roll", re.I)),
+)
+
+
+def fix_culture_terms(ko_text, en_text):
+    """번역이 망가뜨린 **측정된 오역**을 정본 영문으로 바로잡는다 (R271 · R272).
+
+    이름은 R271 의 문화어 작업에서 왔지만, 표(`_MEASURED_REPAIR`)는 문화어와
+    측정된 장면 어휘 오역(파도)을 함께 담는다.
+
+    규칙: 한글에 표지가 있고, 정본이 아직 없고, 측정된 오역 표현이 있으면 →
+    그 오역만 정본으로 교체. 그 외에는 무동작.
+    실패해도 원문을 돌려준다 (절대 크래시 금지).
+    """
+    try:
+        if not ko_text or not en_text or not isinstance(en_text, str):
+            return en_text
+        out = en_text
+        for ko_re, bad_re, canon, ok_re in _MEASURED_REPAIR:
+            if not ko_re.search(ko_text):
+                continue
+            if ok_re.search(out):
+                continue
+            if bad_re.search(out):
+                out = bad_re.sub(canon, out)
+        if out != en_text:
+            _log("[Camera Director] 번역 오역 절 보정 — 측정된 오역을 정본 "
+                 "영문으로 바로잡았습니다")
+        return out
+    except Exception:
+        return en_text
+
+
+def fix_translated_scene(ko_source, en_text):
+    """번역된 영문 장면을 **한글 원문 근거로** 한 번에 보정한다 (R270).
+
+    왜(Why) 한 곳으로 모으나: 포즈·신발·배경·부채 보정이 여러 지점에 흩어져
+    있었고, 특히 LLM tier 에서는 배경·부채만(그것도 **영문을 근거로**) 돌아
+    사실상 무동작이었다. 사용자 지시 — "규칙이든 LLM 이든 모두 적용되어야
+    번역 정확도가 오른다". 그래서 한국어 원문을 권위로 삼아 tier 와 무관하게
+    같은 보정을 순서대로 적용한다.
+
+    순서(Why): 포즈·신발은 장면 문장을 고쳐 쓰고, 배경·부채·문화어는 문장을
+    덧붙이거나 오역 조각을 걷어낸다. 각 함수는 "해당 지시가 한글에 없으면
+    무동작"이므로 서로 간섭하지 않는다 (idempotent — 두 번 불러도 같다).
+    마지막 `_tidy_en` 이 보정 잔여물(중복 기능어·이중 공백)을 정리한다 (R271).
+
+    한글이 없으면(이미 영문) 입력 그대로. 실패해도 원문을 돌려준다.
+    """
+    try:
+        if not en_text or not isinstance(en_text, str):
+            return en_text
+        if not ko_source or not _has_cjk(ko_source):
+            return en_text
+        out = fix_pose_clause(ko_source, en_text)
+        out = fix_footwear_clause(ko_source, out)
+        out = fix_background_clause(ko_source, out)
+        out = fix_fan_clause(ko_source, out)
+        out = fix_culture_terms(ko_source, out)
+        return _tidy_en(out)
     except Exception:
         return en_text
 

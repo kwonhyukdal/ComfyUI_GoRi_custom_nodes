@@ -613,12 +613,31 @@ def llm_system() -> str:
 
 
 # LLM 사용자 메시지 — topic 문장 + 사용자가 고정한 카메라 라벨(있으면)을 붙인다
-def llm_user(topic: str, forced_camera: dict | None) -> str:
+def llm_user(topic: str, forced_camera: dict | None,
+             is_video: bool = False) -> str:
+    """LLM user 메시지. is_video 면 시간 흐름(동적) 묘사를 지시한다 (D1, R272).
+
+    왜(Why) 파이프라인을 알려 주나 (2026-11-11 실측): 종전엔 LLM 이 자기가
+    정지 이미지를 만드는지 영상을 만드는지 **알 방법이 없었다**(인자가 topic 과
+    고정 카메라뿐). 그래서 영상 워크플로에서도 "1-3 감각 문장"만 받아 피사체의
+    동작·시간 흐름이 사용자가 쓴 만큼만 나갔다. 영상일 때만 동작 묘사를 지시한다.
+
+    창작 금지는 유지한다 — 시스템 프롬프트의 "주제가 말한 것만" 경계를 이
+    블록에서 다시 확인시킨다(새 사물·인물·행동을 지어내지 않는다).
+    """
     msg = f"Topic: {topic.strip() or '(no topic text — judge from the attached image(s))'}"
     if forced_camera:
         msg += ("\nThese camera labels are already fixed by the chosen preset/user — "
                 "copy them into camera as-is:\n"
                 + json.dumps(forced_camera, ensure_ascii=False))
+    if is_video:
+        msg += (
+            "\nThis pipeline renders a VIDEO (a moving shot), not a still image. "
+            "In the scene, describe how the subject and the scene move over time — "
+            "natural subject motion, changing weight and momentum, movement that "
+            "reads from one moment to the next — using ONLY what the topic states or "
+            "a reference image shows. Do NOT invent objects, props, people, places "
+            "or actions that the topic does not mention.")
     return msg
 
 

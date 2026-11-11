@@ -110,21 +110,26 @@ You do not need `prompt_in`; the node builds the prompt from `topic` itself.
 | `negative_out` | CONDITIONING | `KSampler.negative` | Keeps your existing negative and adds failure guards |
 | `prompt_out` | STRING | Show Text, another prompt node | The exact English string used. Copy it into KREA 2 or similar |
 | `image_out` | IMAGE | I2V start frame, upscale | Passes the main reference image through. Empty when no image is connected |
-| `reference_latent_out` | LATENT | KSampler, VAE Decode | Latent of the main reference. Connect `latent_image` and it leaves at **exactly the width and height that node decided**; without `latent_image` it follows the reference image's aspect. Requires `vae` |
+| `reference_latent_out` | LATENT | KSampler, VAE Decode | Latent of the main reference. **When no reference image is connected, the empty latent linked to `latent_image` is passed straight through** (so text-to-image can wire it straight into a sampler). With a reference, it leaves at **exactly the width and height that node decided**; without `latent_image` it follows the reference image's aspect. `vae` is only needed when you encode the reference into a latent |
 
 > **A sheet image is also dropped from `image_out` and `reference_latent_out`.**
 > Even if a character sheet becomes the main reference, the outputs carry a
 > non-sheet reference instead. Passing the sheet through would make downstream
 > nodes (I2V, upscale) draw a multi-panel sheet. If the sheet is the
-> only connected reference, both outputs are empty.
+> only connected reference, both outputs are empty (a sheet still counts as a
+> connected image, so the pass-through below does not apply to it).
 
 > **`reference_latent_out` can be used directly as the sampler's start latent.**
-> Connect an empty latent (Empty Latent Image, Deno Resolution, ...) to
-> `latent_image` and the output leaves at **exactly that node's width and height**.
-> Every ratio works the same — 1:1, 4:5, 3:4, 2:3, 16:9, 9:16, 16:10, 21:9 — because
-> the image size the sampler produces is decided by the start latent's size. Without
-> `latent_image` it follows the reference image's aspect as before. With
-> `denoise=1.0`, though, the start latent's **shape is the seed**, so changing the
+> **No reference photo is required.** When a reference image is connected, its
+> latent is emitted; when none is connected, the empty latent linked to
+> `latent_image` is passed **straight through** (the same tensor, so the result is
+> pixel-identical to wiring it directly). Connect an empty latent (Empty Latent
+> Image, Deno Resolution, ...) to `latent_image` and the output leaves at **exactly
+> that node's width and height**. Every ratio works the same — 1:1, 4:5, 3:4, 2:3,
+> 16:9, 9:16, 16:10, 21:9 — because the image size the sampler produces is decided
+> by the start latent's size. Without `latent_image` it follows the reference image's
+> aspect as before. With `denoise=1.0`, though, the start latent's **shape is the
+> seed**, so changing the
 > ratio changes the result even at the same seed (see 4-8).
 
 > The `positive` socket is kept for compatibility with older workflows. The new
@@ -903,7 +908,7 @@ GEMINI_API_KEY=...
 | Korean text inside the image is broken | Most image models cannot draw Korean. Pick a model that renders text well, or composite the text in an image editor |
 | Two people appear | A single-character sheet was treated as a cast sheet. Write `character sheet` in the topic |
 | The output looks like a multi-panel sheet | A normal photo was detected as a sheet. Remove `character sheet` from the topic and describe the scene |
-| `image_out` / `reference_latent_out` is empty | Only a sheet image is connected. Sheets are dropped from all outputs, so connect one more reference besides the sheet |
+| `image_out` / `reference_latent_out` is empty | Only a sheet image is connected. Sheets are dropped from all outputs, so connect one more reference besides the sheet. However, when **no reference at all** is connected and an empty latent is linked to `latent_image`, `reference_latent_out` passes that empty latent through (usable as a sampler start point) |
 | The outfit from a reference is copied | Give that slot a role in the topic (`image 2 is background only`) |
 | People look smeared | Lower denoise (0.6-0.8) and raise resolution. Enter the value in `pf_denoise` to get a warning |
 | One arm is missing | The reference arms did not carry over to the new pose. Name the arm position in the topic (`both hands on her knees`). See 4-7 |
